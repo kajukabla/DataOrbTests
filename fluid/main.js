@@ -62,10 +62,20 @@ struct Params {
 @group(0) @binding(0) var<uniform> p: Params;
 `;
 
-const splatShaderVel = /* wgsl */`
+const MAX_SPLATS = 16;
+
+const batchSplatShaderVel = /* wgsl */`
 ${commonHeader}
+
+struct Splat {
+  x: f32, y: f32, dx: f32, dy: f32,
+  r: f32, g: f32, b: f32, radius: f32,
+};
+
 @group(0) @binding(1) var src: texture_2d<f32>;
 @group(0) @binding(2) var dst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var<storage, read> splats: array<Splat>;
+@group(0) @binding(4) var<uniform> splatMeta: vec4u;
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
 const SPHERE_RADIUS = 0.43;
@@ -82,20 +92,31 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     return;
   }
   var vel = textureLoad(src, id.xy, 0).xy;
-  let point = vec2f(p.splatX, p.splatY);
-  let diff = uv - point;
-  let dist2 = dot(diff, diff);
-  let strength = exp(-dist2 / (2.0 * p.splatRadius * p.splatRadius));
   let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.06, SPHERE_RADIUS, dist);
-  vel += strength * boundaryFade * vec2f(p.splatDx, p.splatDy);
+  let count = min(splatMeta.x, ${MAX_SPLATS}u);
+  for (var i = 0u; i < count; i++) {
+    let s = splats[i];
+    let diff = uv - vec2f(s.x, s.y);
+    let dist2 = dot(diff, diff);
+    let strength = exp(-dist2 / (2.0 * s.radius * s.radius));
+    vel += strength * boundaryFade * vec2f(s.dx, s.dy);
+  }
   textureStore(dst, id.xy, vec4f(vel, 0.0, 1.0));
 }
 `;
 
-const splatShaderDye = /* wgsl */`
+const batchSplatShaderDye = /* wgsl */`
 ${commonHeader}
+
+struct Splat {
+  x: f32, y: f32, dx: f32, dy: f32,
+  r: f32, g: f32, b: f32, radius: f32,
+};
+
 @group(0) @binding(1) var src: texture_2d<f32>;
 @group(0) @binding(2) var dst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var<storage, read> splats: array<Splat>;
+@group(0) @binding(4) var<uniform> splatMeta: vec4u;
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
 const SPHERE_RADIUS = 0.43;
@@ -112,14 +133,18 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     return;
   }
   var dye = textureLoad(src, id.xy, 0);
-  let point = vec2f(p.splatX, p.splatY);
-  let diff = uv - point;
-  let dist2 = dot(diff, diff);
-  let strength = exp(-dist2 / (2.0 * p.splatRadius * p.splatRadius));
   let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.06, SPHERE_RADIUS, dist);
-  // Mix-blend instead of additive: new color replaces old, keeping hues saturated
-  let incoming = vec3f(p.splatR, p.splatG, p.splatB);
-  dye = vec4f(mix(dye.rgb, incoming, min(strength * boundaryFade, 1.0)), 1.0);
+  let count = min(splatMeta.x, ${MAX_SPLATS}u);
+  for (var i = 0u; i < count; i++) {
+    let s = splats[i];
+    let diff = uv - vec2f(s.x, s.y);
+    let dist2 = dot(diff, diff);
+    let strength = exp(-dist2 / (2.0 * s.radius * s.radius));
+    let incoming = vec3f(s.r, s.g, s.b);
+    if (incoming.x + incoming.y + incoming.z > 0.0) {
+      dye = vec4f(mix(dye.rgb, incoming, min(strength * boundaryFade, 1.0)), 1.0);
+    }
+  }
   textureStore(dst, id.xy, dye);
 }
 `;
@@ -482,17 +507,6 @@ fn randF(seed: u32) -> f32 {
   return f32(pcg(seed)) / 4294967295.0;
 }
 
-fn linearToOklab(c: vec3f) -> vec3f {
-  let l = pow(max(0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b, 0.0), 1.0 / 3.0);
-  let m = pow(max(0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b, 0.0), 1.0 / 3.0);
-  let s = pow(max(0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b, 0.0), 1.0 / 3.0);
-  return vec3f(
-    0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
-    1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
-    0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
-  );
-}
-
 fn oklabToLinear(lab: vec3f) -> vec3f {
   let l = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
   let m = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
@@ -649,15 +663,14 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     tint = mix(tint, prismatic, prisMix);
   }
 
-  // Glitter color: blend base→accent based on dye density
-  // blend controls transition sharpness: 0=gradual, 1=sharp cutoff
-  let glitBase = pp.extra.yzw;
-  let glitAccent = pp.extra2.xyz;
+  // Glitter color: blend base→accent in Oklab (pre-converted on CPU)
+  let okBase = pp.extra.yzw;
+  let okAccent = pp.extra2.xyz;
   let blend = pp.extra2.w;
   let gLo = mix(0.0, 0.35, blend);
   let gHi = mix(1.0, 0.4, blend);
   let densityT = smoothstep(gLo, gHi, intensity);
-  let glitCol = oklabToLinear(mix(linearToOklab(glitAccent), linearToOklab(glitBase), densityT));
+  let glitCol = oklabToLinear(mix(okAccent, okBase, densityT));
   tint *= glitCol;
 
   let brightness = glint * pp.screen.w + ambient;
@@ -817,17 +830,6 @@ fn aces(x: vec3f) -> vec3f {
   return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3f(0.0), vec3f(1.0));
 }
 
-fn linearToOklab(c: vec3f) -> vec3f {
-  let l = pow(max(0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b, 0.0), 1.0 / 3.0);
-  let m = pow(max(0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b, 0.0), 1.0 / 3.0);
-  let s = pow(max(0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b, 0.0), 1.0 / 3.0);
-  return vec3f(
-    0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
-    1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
-    0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
-  );
-}
-
 fn oklabToLinear(lab: vec3f) -> vec3f {
   let l = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
   let m = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
@@ -864,14 +866,14 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let intensity = dot(raw, vec3f(0.3, 0.6, 0.1));
 
   // Fluid base — gradient from accent (thin/wispy) to base (dense)
-  // Color blend controls transition sharpness: 0=gradual, 1=sharp cutoff
-  let baseCol = du.baseColor.rgb;
-  let accentCol = du.accentColor.rgb;
+  // Colors pre-converted to Oklab on CPU
+  let okBase = du.baseColor.rgb;
+  let okAccent = du.accentColor.rgb;
   let blend = du.accentColor.w;
   let lo = mix(0.0, 0.35, blend);
   let hi = mix(1.0, 0.4, blend);
   let densityT = smoothstep(lo, hi, intensity);
-  let fluidCol = oklabToLinear(mix(linearToOklab(accentCol), linearToOklab(baseCol), densityT));
+  let fluidCol = oklabToLinear(mix(okAccent, okBase, densityT));
   var color = fluidCol * intensity * 0.25;
 
   // Surface gradient for multi-lobe metallic sheen
@@ -972,6 +974,19 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   particles[idx] = part;
 }
 `;
+}
+
+// ─── CPU-side Oklab conversion (avoids per-particle GPU conversion) ──────────
+function linearToOklabCPU(rgb) {
+  const r = rgb[0], g = rgb[1], b = rgb[2];
+  const l = Math.cbrt(Math.max(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b, 0));
+  const m = Math.cbrt(Math.max(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b, 0));
+  const s = Math.cbrt(Math.max(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b, 0));
+  return [
+    0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+  ];
 }
 
 // ─── WebGPU Init ─────────────────────────────────────────────────────────────
@@ -1119,13 +1134,36 @@ async function main() {
     return { pipeline, layout };
   }
 
-  // Splat velocity: uniform, texture(src), storage(dst)
-  const splatVelPipe = buildPipeline(splatShaderVel, 'splatVel',
-    ['uniform', 'texture', 'storage']);
+  // Batch splat pipelines (shared layout: uniform, texture, storage-tex, storage-buf, uniform)
+  const batchSplatBGL = device.createBindGroupLayout({
+    label: 'batchSplat_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ],
+  });
+  const batchSplatLayout = device.createPipelineLayout({ bindGroupLayouts: [batchSplatBGL] });
 
-  // Splat dye: uniform, texture(src), storage(dst)
-  const splatDyePipe = buildPipeline(splatShaderDye, 'splatDye',
-    ['uniform', 'texture', 'storage']);
+  const batchSplatVelPipe = device.createComputePipeline({
+    label: 'batchSplatVel',
+    layout: batchSplatLayout,
+    compute: {
+      module: device.createShaderModule({ code: batchSplatShaderVel, label: 'batchSplatVel' }),
+      entryPoint: 'main',
+    },
+  });
+
+  const batchSplatDyePipe = device.createComputePipeline({
+    label: 'batchSplatDye',
+    layout: batchSplatLayout,
+    compute: {
+      module: device.createShaderModule({ code: batchSplatShaderDye, label: 'batchSplatDye' }),
+      entryPoint: 'main',
+    },
+  });
 
   // Curl: uniform, texture(vel), storage(curl)
   const curlPipe = buildPipeline(curlShader, 'curl',
@@ -1334,13 +1372,39 @@ async function main() {
   const advDyeBGFixed = bg(advectDyePipe.layout, [ubuf(paramBuf), tview(velA), tview(dyeA), linearSampler, tview(dyeB)]);
   const curlNoiseBGFixed = bg(curlNoisePipe.layout, [ubuf(noiseBuf), tview(velA), tview(velB)]);
   const displayBGFixed = bg(displayBGL, [tview(dyeA), linearSampler, ubuf(displayUB)]);
-  const MAX_SPLATS = 16;
-  const splatParamBufs = Array.from({length: MAX_SPLATS}, () =>
-    device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
-  const splatVelBGs = splatParamBufs.map(buf =>
-    bg(splatVelPipe.layout, [ubuf(buf), tview(velA), tview(velB)]));
-  const splatDyeBGs = splatParamBufs.map(buf =>
-    bg(splatDyePipe.layout, [ubuf(buf), tview(dyeA), tview(dyeB)]));
+  // Batch splat GPU resources
+  const splatBuf = device.createBuffer({
+    label: 'splatData',
+    size: MAX_SPLATS * 32, // 8 f32 per splat
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const splatCountBuf = device.createBuffer({
+    label: 'splatCount',
+    size: 16, // vec4u
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const splatArrayData = new Float32Array(MAX_SPLATS * 8);
+  const splatCountUData = new Uint32Array(4);
+
+  const batchSplatVelBG = bg(batchSplatBGL,
+    [ubuf(paramBuf), tview(velA), tview(velB), ubuf(splatBuf), ubuf(splatCountBuf)]);
+  const batchSplatDyeBG = bg(batchSplatBGL,
+    [ubuf(paramBuf), tview(dyeA), tview(dyeB), ubuf(splatBuf), ubuf(splatCountBuf)]);
+
+  let splatCount = 0;
+  function addSplat(x, y, dx, dy, r, g, b, radius) {
+    if (splatCount >= MAX_SPLATS) return;
+    const off = splatCount * 8;
+    splatArrayData[off]     = x;
+    splatArrayData[off + 1] = y;
+    splatArrayData[off + 2] = dx;
+    splatArrayData[off + 3] = dy;
+    splatArrayData[off + 4] = r;
+    splatArrayData[off + 5] = g;
+    splatArrayData[off + 6] = b;
+    splatArrayData[off + 7] = radius;
+    splatCount++;
+  }
 
   // ─── Rebuild particle system (called when count changes) ───────────────
   function rebuildParticleSystem(count) {
@@ -1500,11 +1564,15 @@ async function main() {
 
   const colormaps = [inferno, magma, plasma, viridis, liquidGold];
 
+  const _palOut = [0, 0, 0];
   function palette(t, mapIndex) {
     const cm = colormaps[mapIndex % colormaps.length];
     const remapped = 0.15 + (((t % 1) + 1) % 1) * 0.8;
     const col = cm(remapped);
-    return col.map(c => c * 2.0);
+    _palOut[0] = col[0] * 2.0;
+    _palOut[1] = col[1] * 2.0;
+    _palOut[2] = col[2] * 2.0;
+    return _palOut;
   }
 
   // ─── Auto-injectors ────────────────────────────────────────────────────
@@ -1524,18 +1592,24 @@ async function main() {
     const dt = 0.016;
     time += dt;
 
+    // Pre-convert colors to Oklab on CPU (avoids per-particle GPU conversion)
+    const okGlitBase = linearToOklabCPU(state.glitterColor);
+    const okGlitAccent = linearToOklabCPU(state.glitterAccent);
+    const okBaseCol = linearToOklabCPU(state.baseColor);
+    const okAccentCol = linearToOklabCPU(state.accentColor);
+
     // Update screen/particle/display uniform buffers
     particleUBData[0] = canvas.width;
     particleUBData[1] = canvas.height;
     particleUBData[2] = state.particleSize;
     particleUBData[3] = state.glintBrightness;
     particleUBData[4] = state.prismaticAmount;
-    particleUBData[5] = state.glitterColor[0];
-    particleUBData[6] = state.glitterColor[1];
-    particleUBData[7] = state.glitterColor[2];
-    particleUBData[8] = state.glitterAccent[0];
-    particleUBData[9] = state.glitterAccent[1];
-    particleUBData[10] = state.glitterAccent[2];
+    particleUBData[5] = okGlitBase[0];
+    particleUBData[6] = okGlitBase[1];
+    particleUBData[7] = okGlitBase[2];
+    particleUBData[8] = okGlitAccent[0];
+    particleUBData[9] = okGlitAccent[1];
+    particleUBData[10] = okGlitAccent[2];
     particleUBData[11] = state.colorBlend;
     particleUBData[12] = state.sizeRandomness;
     device.queue.writeBuffer(particleUB, 0, particleUBData);
@@ -1544,20 +1618,20 @@ async function main() {
     displayUBData[1] = canvas.height;
     displayUBData[2] = time;
     displayUBData[3] = state.sheenStrength;
-    displayUBData[4] = state.baseColor[0];
-    displayUBData[5] = state.baseColor[1];
-    displayUBData[6] = state.baseColor[2];
-    displayUBData[8] = state.accentColor[0];
-    displayUBData[9] = state.accentColor[1];
-    displayUBData[10] = state.accentColor[2];
+    displayUBData[4] = okBaseCol[0];
+    displayUBData[5] = okBaseCol[1];
+    displayUBData[6] = okBaseCol[2];
+    displayUBData[8] = okAccentCol[0];
+    displayUBData[9] = okAccentCol[1];
+    displayUBData[10] = okAccentCol[2];
     displayUBData[11] = state.colorBlend;
     displayUBData[12] = state.sheenColor[0];
     displayUBData[13] = state.sheenColor[1];
     displayUBData[14] = state.sheenColor[2];
     device.queue.writeBuffer(displayUB, 0, displayUBData);
 
-    // Collect splats for this frame
-    const splats = [];
+    // Collect splats into pre-allocated buffer
+    splatCount = 0;
 
     // Dye ramp: fade in over first 3 seconds (starting at t=1) to prevent initial blowout
     const dyeRamp = Math.min(1.0, (time - 1.0) / 3.0);
@@ -1592,13 +1666,11 @@ async function main() {
         const vx = -Math.sin(angle) * spd * inj.radius * 0.5;
         const vy = Math.cos(angle) * spd * inj.radius * 0.5;
         const col = palette(time * 0.12 + inj.colorOffset, inj.cmIndex);
-        splats.push({
-          x: cx, y: cy,
-          dx: vx * state.splatForce * 0.1 * injI,
-          dy: vy * state.splatForce * 0.1 * injI,
-          r: col[0] * dyeRamp * injI, g: col[1] * dyeRamp * injI, b: col[2] * dyeRamp * injI,
-          radius: injSplatRadius,
-        });
+        addSplat(cx, cy,
+          vx * state.splatForce * 0.1 * injI,
+          vy * state.splatForce * 0.1 * injI,
+          col[0] * dyeRamp * injI, col[1] * dyeRamp * injI, col[2] * dyeRamp * injI,
+          injSplatRadius);
       }
 
       // Random splat burst every 3-5 seconds (controlled by burstCount)
@@ -1610,14 +1682,13 @@ async function main() {
           const col = palette(Math.random(), 4);
           const angle = Math.random() * Math.PI * 2;
           const force = (500 + Math.random() * 1000) * injI;
-          splats.push({
-            x: 0.15 + Math.random() * 0.7,
-            y: 0.15 + Math.random() * 0.7,
-            dx: Math.cos(angle) * force,
-            dy: Math.sin(angle) * force,
-            r: col[0] * dyeRamp * injI, g: col[1] * dyeRamp * injI, b: col[2] * dyeRamp * injI,
-            radius: state.splatRadius * (2.0 + Math.random() * 3),
-          });
+          addSplat(
+            0.15 + Math.random() * 0.7,
+            0.15 + Math.random() * 0.7,
+            Math.cos(angle) * force,
+            Math.sin(angle) * force,
+            col[0] * dyeRamp * injI, col[1] * dyeRamp * injI, col[2] * dyeRamp * injI,
+            state.splatRadius * (2.0 + Math.random() * 3));
         }
       }
     }
@@ -1633,52 +1704,42 @@ async function main() {
       const col = palette(time * 0.3, 4);
       const str = state.clickStrength * 6.0;
       const sz = 1.0 + state.clickSize * 8.0;
-      splats.push({
-        x: pointer.x, y: pointer.y,
-        dx: pointer.dx * state.splatForce * str,
-        dy: pointer.dy * state.splatForce * str,
-        r: col[0] * str, g: col[1] * str, b: col[2] * str,
-        radius: state.splatRadius * sz * (1.0 + speed * 20),
-      });
+      addSplat(pointer.x, pointer.y,
+        pointer.dx * state.splatForce * str,
+        pointer.dy * state.splatForce * str,
+        col[0] * str, col[1] * str, col[2] * str,
+        state.splatRadius * sz * (1.0 + speed * 20));
     }
     if (pointer.moved) { pointer.moved = false; }
 
-    // ── Write all splat params to pre-allocated buffers ──
-    const activeSplats = splats.slice(0, MAX_SPLATS);
-    for (let i = 0; i < activeSplats.length; i++) {
-      const s = activeSplats[i];
-      writeParams({ dt, time, splatX: s.x, splatY: s.y,
-        splatDx: s.dx, splatDy: s.dy,
-        splatR: s.r, splatG: s.g, splatB: s.b,
-        splatRadius: s.radius }, splatParamBufs[i]);
+    // ── Upload batch splat data + write simulation params ──
+    splatCountUData[0] = splatCount;
+    device.queue.writeBuffer(splatCountBuf, 0, splatCountUData);
+    if (splatCount > 0) {
+      device.queue.writeBuffer(splatBuf, 0, splatArrayData);
     }
-
-    // Write simulation params
     writeParams({ dt, time });
 
     // ── Single encoder for all passes ──
     const enc = device.createCommandEncoder();
 
-    // ── Splat passes (each uses its own pre-allocated bind group) ──
-    for (let i = 0; i < activeSplats.length; i++) {
-      const s = activeSplats[i];
+    // ── Batch splat pass (1 vel dispatch + 1 dye dispatch instead of ~20) ──
+    if (splatCount > 0) {
       const p1 = enc.beginComputePass();
-      p1.setPipeline(splatVelPipe.pipeline);
-      p1.setBindGroup(0, splatVelBGs[i]);
+      p1.setPipeline(batchSplatVelPipe);
+      p1.setBindGroup(0, batchSplatVelBG);
       p1.dispatchWorkgroups(dispatch, dispatch);
       p1.end();
       enc.copyTextureToTexture(
         { texture: velB }, { texture: velA }, [SIM_RES, SIM_RES]);
 
-      if (s.r > 0 || s.g > 0 || s.b > 0) {
-        const p2 = enc.beginComputePass();
-        p2.setPipeline(splatDyePipe.pipeline);
-        p2.setBindGroup(0, splatDyeBGs[i]);
-        p2.dispatchWorkgroups(dispatch, dispatch);
-        p2.end();
-        enc.copyTextureToTexture(
-          { texture: dyeB }, { texture: dyeA }, [SIM_RES, SIM_RES]);
-      }
+      const p2 = enc.beginComputePass();
+      p2.setPipeline(batchSplatDyePipe);
+      p2.setBindGroup(0, batchSplatDyeBG);
+      p2.dispatchWorkgroups(dispatch, dispatch);
+      p2.end();
+      enc.copyTextureToTexture(
+        { texture: dyeB }, { texture: dyeA }, [SIM_RES, SIM_RES]);
     }
 
     // ── Pass 2: Curl ──
@@ -1861,10 +1922,23 @@ async function main() {
     const valSpan = document.getElementById(id + 'Val');
     slider.value = state[stateKey];
     if (valSpan) valSpan.textContent = fmt ? fmt(state[stateKey]) : state[stateKey];
+    let lastTextUpdate = 0;
     slider.addEventListener('input', () => {
       state[stateKey] = parseFloat(slider.value);
-      if (valSpan) valSpan.textContent = fmt ? fmt(state[stateKey]) : state[stateKey];
+      if (valSpan) {
+        const now = performance.now();
+        if (now - lastTextUpdate > 100) { // ~10Hz text updates
+          valSpan.textContent = fmt ? fmt(state[stateKey]) : state[stateKey];
+          lastTextUpdate = now;
+        }
+      }
     });
+    // Ensure final value shown on release
+    if (valSpan) {
+      slider.addEventListener('change', () => {
+        valSpan.textContent = fmt ? fmt(state[stateKey]) : state[stateKey];
+      });
+    }
   }
 
   wireSlider('particleSize', 'particleSize');
