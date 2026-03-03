@@ -15,11 +15,152 @@
       font: 1.2rem/1.6 monospace;
       padding: 2rem;
     }
+    #settingsToggle {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      z-index: 100;
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      border: 1px solid rgba(255,255,255,0.25);
+      background: rgba(0,0,0,0.5);
+      color: #ddd;
+      font-size: 20px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s;
+      line-height: 1;
+      padding: 0;
+    }
+    #settingsToggle:hover { background: rgba(255,255,255,0.15); }
+    #settingsPanel {
+      position: fixed;
+      top: 0;
+      right: -260px;
+      width: 260px;
+      height: 100vh;
+      z-index: 99;
+      transition: right 0.3s ease;
+      pointer-events: none;
+    }
+    #settingsPanel.open { right: 0; }
+    #settingsContent {
+      pointer-events: auto;
+      background: rgba(0,0,0,0.85);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      height: 100%;
+      padding: 48px 14px 14px;
+      overflow-y: auto;
+      color: #bbb;
+      font: 11px/1.6 system-ui, -apple-system, sans-serif;
+    }
+    .setting-group {
+      margin-bottom: 10px;
+    }
+    .setting-group label {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 2px;
+      color: #999;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .setting-group .val {
+      color: #ccc;
+      font-weight: 600;
+    }
+    .setting-group select,
+    .setting-group input[type="range"] {
+      width: 100%;
+    }
+    .setting-group select {
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: #ddd;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+    .setting-group select option { background: #222; color: #ddd; }
+    .setting-group input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      background: rgba(255,255,255,0.15);
+      border-radius: 2px;
+      outline: none;
+    }
+    .setting-group input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #c90;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
   <canvas id="canvas"></canvas>
   <div id="error"></div>
+
+  <button id="settingsToggle" title="Settings">&#9881;</button>
+  <div id="settingsPanel">
+    <div id="settingsContent">
+      <div class="setting-group">
+        <label>Particles</label>
+        <select id="particleCountSelect">
+          <option value="262144">262K</option>
+          <option value="1048576">1M</option>
+          <option value="4194304" selected>4M</option>
+          <option value="8388608">8M</option>
+          <option value="16777216">16M</option>
+        </select>
+      </div>
+      <div class="setting-group">
+        <label>Particle Size <span class="val" id="particleSizeVal">0.6</span></label>
+        <input type="range" id="particleSize" min="0.3" max="4.0" step="0.1" value="0.6">
+      </div>
+      <div class="setting-group">
+        <label>Glint Brightness <span class="val" id="glintBrightnessVal">1.2</span></label>
+        <input type="range" id="glintBrightness" min="0.1" max="5.0" step="0.1" value="1.2">
+      </div>
+      <div class="setting-group">
+        <label>Sheen Strength <span class="val" id="sheenStrengthVal">1.5</span></label>
+        <input type="range" id="sheenStrength" min="0.0" max="3.0" step="0.1" value="1.5">
+      </div>
+      <div class="setting-group">
+        <label>Curl Strength <span class="val" id="curlStrengthVal">15</span></label>
+        <input type="range" id="curlStrength" min="0" max="50" step="1" value="15">
+      </div>
+      <div class="setting-group">
+        <label>Splat Force <span class="val" id="splatForceVal">6000</span></label>
+        <input type="range" id="splatForce" min="1000" max="20000" step="100" value="6000">
+      </div>
+      <div class="setting-group">
+        <label>Vel Dissipation <span class="val" id="velDissipationVal">0.998</span></label>
+        <input type="range" id="velDissipation" min="0.99" max="1.0" step="0.001" value="0.998">
+      </div>
+      <div class="setting-group">
+        <label>Dye Dissipation <span class="val" id="dyeDissipationVal">0.993</span></label>
+        <input type="range" id="dyeDissipation" min="0.98" max="1.0" step="0.001" value="0.993">
+      </div>
+      <div class="setting-group">
+        <label>Pressure Iters <span class="val" id="pressureItersVal">30</span></label>
+        <input type="range" id="pressureIters" min="10" max="60" step="1" value="30">
+      </div>
+      <div class="setting-group">
+        <label>Pressure Decay <span class="val" id="pressureDecayVal">0.8</span></label>
+        <input type="range" id="pressureDecay" min="0.0" max="1.0" step="0.01" value="0.8">
+      </div>
+    </div>
+  </div>
+
   <script>
     (function() {
       function send(level, args) {

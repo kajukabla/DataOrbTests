@@ -1,19 +1,23 @@
 // ─── Configuration ───────────────────────────────────────────────────────────
 const SIM_RES = 512;
 const WORKGROUP = 8;
-const PRESSURE_ITERS = 30;
-const VEL_DISSIPATION = 0.998;
-const DYE_DISSIPATION = 0.993;
-const CURL_STRENGTH = 15.0;
-const SPLAT_RADIUS = 0.0015;
-const SPLAT_FORCE = 6000.0;
-const PRESSURE_DECAY = 0.8;
-const BLOOM_INTENSITY = 0.02;
 const TEX_FMT = 'rgba16float';
-const PARTICLE_COUNT = 262144;    // 2^18
 const PARTICLE_STRIDE = 32;       // 8 floats × 4 bytes
 const PARTICLE_WG = 256;
-const PARTICLE_DISPATCHES = Math.ceil(PARTICLE_COUNT / PARTICLE_WG); // 1024
+
+const state = {
+  particleCount: 4194304,   // 4M default
+  particleSize: 0.6,
+  glintBrightness: 1.2,
+  sheenStrength: 1.5,
+  splatForce: 6000,
+  curlStrength: 15,
+  pressureIters: 30,
+  pressureDecay: 0.8,
+  velDissipation: 0.998,
+  dyeDissipation: 0.993,
+  splatRadius: 0.0015,
+};
 
 // ─── WGSL Shaders ────────────────────────────────────────────────────────────
 
@@ -336,8 +340,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 `;
 
-// ─── Particle Update Compute Shader ──────────────────────────────────────────
-const particleUpdateShader = /* wgsl */`
+// ─── Particle Update Compute Shader (function — count baked in) ─────────────
+function makeParticleUpdateShader(count) {
+  return /* wgsl */`
 ${commonHeader}
 @group(0) @binding(1) var velTex: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
@@ -371,7 +376,7 @@ const SPHERE_RADIUS: f32 = 0.43;
 @compute @workgroup_size(${PARTICLE_WG})
 fn main(@builtin(global_invocation_id) id: vec3u) {
   let idx = id.x;
-  if (idx >= ${PARTICLE_COUNT}u) { return; }
+  if (idx >= ${count}u) { return; }
 
   var part = particles[idx];
 
@@ -465,6 +470,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   particles[idx] = part;
 }
 `;
+}
 
 // ─── Particle Render Vertex Shader ───────────────────────────────────────────
 const particleRenderVert = /* wgsl */`
@@ -508,8 +514,8 @@ fn main(
   let qp = quadPos[vi];
   let localUV = qp * 0.5 + 0.5;
 
-  // Particle size in pixels → clip space
-  let pixelSize: f32 = 1.0;
+  // Particle size in pixels → clip space (read from uniform)
+  let pixelSize = screen.z;
   let clipSize = vec2f(pixelSize * 2.0 / screen.x, pixelSize * 2.0 / screen.y);
 
   // UV to clip space
@@ -606,7 +612,8 @@ fn main(in: FSIn) -> @location(0) vec4f {
     tint = mix(tint, prismatic, 0.5);
   }
 
-  let brightness = glint * 1.2 + ambient;
+  // Glint brightness from uniform
+  let brightness = glint * screen.w + ambient;
 
   // Soft edge
   let edge = 1.0 - smoothstep(0.3, 0.5, d);
@@ -630,7 +637,7 @@ fn main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
 const displayShaderFrag = /* wgsl */`
 @group(0) @binding(0) var dyeTex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
-@group(0) @binding(2) var<uniform> displayParams: vec4f; // xy = screenSize, z = time
+@group(0) @binding(2) var<uniform> displayParams: vec4f; // xy = screenSize, z = time, w = sheenStrength
 
 fn aces(x: vec3f) -> vec3f {
   let a = 2.51; let b = 0.03; let c = 2.43; let d = 0.59; let e = 0.14;
@@ -641,6 +648,7 @@ fn aces(x: vec3f) -> vec3f {
 fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let screenSize = displayParams.xy;
   let time = displayParams.z;
+  let sheenStrength = displayParams.w;
   let uv = vec2f(pos.x, screenSize.y - pos.y) / screenSize;
 
   // Sphere mask
@@ -659,7 +667,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let gold = vec3f(1.0, 0.55, 0.1);
   var color = gold * intensity * 0.25;
 
-  // Surface gradient for broad specular sheen
+  // Surface gradient for multi-lobe metallic sheen
   let texel = 1.0 / screenSize;
   let iL = dot(textureSampleLevel(dyeTex, samp, uv - vec2f(texel.x * 2.0, 0.0), 0.0).rgb, vec3f(0.3, 0.6, 0.1));
   let iR = dot(textureSampleLevel(dyeTex, samp, uv + vec2f(texel.x * 2.0, 0.0), 0.0).rgb, vec3f(0.3, 0.6, 0.1));
@@ -669,7 +677,15 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let gradLen = length(grad);
   let sheenDir = normalize(vec2f(0.4, 0.6));
   let spec = max(dot(normalize(grad + vec2f(0.001)), sheenDir), 0.0);
-  let sheen = pow(spec, 5.0) * smoothstep(0.005, 0.06, gradLen) * 0.3;
+
+  // Sharp specular highlight
+  let sharpSheen = pow(spec, 8.0) * smoothstep(0.003, 0.04, gradLen);
+  // Broad soft metallic glow
+  let broadSpec = pow(spec, 2.0) * smoothstep(0.002, 0.08, gradLen);
+  // Fresnel-like rim sheen (edges of sphere glow)
+  let rimFactor = smoothstep(0.2, 0.42, screenDist / min(aspect, 1.0));
+
+  let sheen = (sharpSheen * 0.6 + broadSpec * 0.3 + rimFactor * 0.15) * sheenStrength;
   color += color * sheen;
 
   // Tone mapping
@@ -684,6 +700,72 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   return vec4f(color, 1.0);
 }
 `;
+
+// ─── GPU Particle Init Shader ────────────────────────────────────────────────
+function makeParticleInitShader(count) {
+  return /* wgsl */`
+struct Particle {
+  posX: f32,
+  posY: f32,
+  normalX: f32,
+  normalY: f32,
+  normalZ: f32,
+  angularVel: f32,
+  life: f32,
+  seed: f32,
+};
+
+@group(0) @binding(0) var<storage, read_write> particles: array<Particle>;
+
+fn pcg(inp: u32) -> u32 {
+  var state = inp * 747796405u + 2891336453u;
+  let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+
+fn randF(seed: u32) -> f32 {
+  return f32(pcg(seed)) / 4294967295.0;
+}
+
+@compute @workgroup_size(${PARTICLE_WG})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= ${count}u) { return; }
+  let idx = id.x;
+
+  let h1 = pcg(idx * 7919u + 1234567u);
+  let h2 = pcg(h1);
+  let h3 = pcg(h2);
+  let h4 = pcg(h3);
+  let h5 = pcg(h4);
+  let h6 = pcg(h5);
+  let h7 = pcg(h6);
+
+  let angle = randF(h1) * 6.2831853;
+  let radius = sqrt(randF(h2)) * 0.43 * 0.9;
+
+  var part: Particle;
+  part.posX = 0.5 + cos(angle) * radius;
+  part.posY = 0.5 + sin(angle) * radius;
+
+  let phi = randF(h3) * 6.2831853;
+  let cosTheta = randF(h4);
+  let sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+  part.normalX = sinTheta * cos(phi);
+  part.normalY = sinTheta * sin(phi);
+  part.normalZ = max(cosTheta, 0.3);
+  let nL = length(vec3f(part.normalX, part.normalY, part.normalZ));
+  part.normalX /= nL;
+  part.normalY /= nL;
+  part.normalZ /= nL;
+
+  part.angularVel = (randF(h5) - 0.5) * 2.0;
+  part.life = randF(h6) * 0.5;
+  part.seed = randF(h7);
+
+  particles[idx] = part;
+}
+`;
+}
 
 // ─── WebGPU Init ─────────────────────────────────────────────────────────────
 
@@ -706,8 +788,19 @@ async function main() {
     return;
   }
 
-  const device = await adapter.requestDevice();
+  // Request higher device limits for large particle buffers
+  const device = await adapter.requestDevice({
+    requiredLimits: {
+      maxBufferSize: Math.min(adapter.limits.maxBufferSize, 1024 * 1024 * 1024),
+      maxStorageBufferBindingSize: Math.min(adapter.limits.maxStorageBufferBindingSize, 1024 * 1024 * 1024),
+    },
+  });
   device.lost.then(info => console.error('WebGPU device lost:', info.message));
+
+  // Derive max particle count from granted limits
+  const maxParticles = Math.min(16777216, Math.floor(device.limits.maxStorageBufferBindingSize / PARTICLE_STRIDE));
+  state.particleCount = Math.min(state.particleCount, maxParticles);
+  console.log(`GPU limits: maxStorageBuffer=${(device.limits.maxStorageBufferBindingSize / 1024 / 1024).toFixed(0)}MB, maxParticles=${maxParticles}`);
 
   const ctx = canvas.getContext('webgpu');
   const canvasFmt = navigator.gpu.getPreferredCanvasFormat();
@@ -753,7 +846,7 @@ async function main() {
     addressModeU: 'clamp-to-edge', addressModeV: 'clamp-to-edge',
   });
 
-  // ─── Uniform buffer ─────────────────────────────────────────────────────
+  // ─── Uniform buffer (simulation params) ────────────────────────────────
   const paramBuf = device.createBuffer({
     size: 64, // 16 floats × 4 bytes
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -764,9 +857,9 @@ async function main() {
     const d = { dt: 0.016, dx: 1 / SIM_RES, simRes: SIM_RES, time: 0,
       splatX: 0, splatY: 0, splatDx: 0, splatDy: 0,
       splatR: 0, splatG: 0, splatB: 0,
-      splatRadius: SPLAT_RADIUS, curlStrength: CURL_STRENGTH,
-      pressureDecay: PRESSURE_DECAY,
-      velDissipation: VEL_DISSIPATION, dyeDissipation: DYE_DISSIPATION,
+      splatRadius: state.splatRadius, curlStrength: state.curlStrength,
+      pressureDecay: state.pressureDecay,
+      velDissipation: state.velDissipation, dyeDissipation: state.dyeDissipation,
       ...overrides };
     paramData[0]  = d.dt;
     paramData[1]  = d.dx;
@@ -787,10 +880,18 @@ async function main() {
     device.queue.writeBuffer(paramBuf, 0, paramData);
   }
 
-  // ─── Screen size uniform ────────────────────────────────────────────────
-  const screenBuf = device.createBuffer({
+  // ─── Split screen uniforms: particle UB + display UB ───────────────────
+  // particleUB: [width, height, particleSize, glintBrightness]
+  const particleUB = device.createBuffer({
     size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
+  const particleUBData = new Float32Array(4);
+
+  // displayUB: [width, height, time, sheenStrength]
+  const displayUB = device.createBuffer({
+    size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const displayUBData = new Float32Array(4);
 
   // ─── Pipeline helpers ───────────────────────────────────────────────────
   function buildPipeline(code, label, bindingDescs) {
@@ -875,38 +976,39 @@ async function main() {
   });
 
   // ─── Particle GPU Resources ────────────────────────────────────────────
-  const particleBufSize = PARTICLE_COUNT * PARTICLE_STRIDE;
-  const particleBuf = device.createBuffer({
+  let particleDispatches = Math.ceil(state.particleCount / PARTICLE_WG);
+
+  let particleBuf = device.createBuffer({
     label: 'particles',
-    size: particleBufSize,
+    size: state.particleCount * PARTICLE_STRIDE,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
 
-  // CPU-initialize particles with random positions inside sphere
-  {
-    const initData = new Float32Array(PARTICLE_COUNT * 8);
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
-      const base = i * 8;
-      const angle = Math.random() * Math.PI * 2;
-      const r = Math.sqrt(Math.random()) * 0.43 * 0.9;
-      initData[base + 0] = 0.5 + Math.cos(angle) * r; // posX
-      initData[base + 1] = 0.5 + Math.sin(angle) * r; // posY
-      const phi = Math.random() * Math.PI * 2;
-      const cosTheta = Math.random();
-      const sinTheta = Math.sqrt(1 - cosTheta * cosTheta);
-      let nx = sinTheta * Math.cos(phi);
-      let ny = sinTheta * Math.sin(phi);
-      let nz = Math.max(cosTheta, 0.3);
-      const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
-      initData[base + 2] = nx / len; // normalX
-      initData[base + 3] = ny / len; // normalY
-      initData[base + 4] = nz / len; // normalZ
-      initData[base + 5] = (Math.random() - 0.5) * 2; // angularVel
-      initData[base + 6] = Math.random() * 0.5;          // life (short so they respawn quickly)
-      initData[base + 7] = Math.random();               // seed
-    }
-    device.queue.writeBuffer(particleBuf, 0, initData);
+  // GPU-based particle initialization (avoids 512MB CPU allocation for 16M particles)
+  function gpuInitParticles(buf, count) {
+    const initCode = makeParticleInitShader(count);
+    const initModule = device.createShaderModule({ code: initCode, label: 'particleInit' });
+    const initBGL = device.createBindGroupLayout({
+      entries: [{ binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } }],
+    });
+    const initPipeline = device.createComputePipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [initBGL] }),
+      compute: { module: initModule, entryPoint: 'main' },
+    });
+    const initBG = device.createBindGroup({
+      layout: initBGL,
+      entries: [{ binding: 0, resource: { buffer: buf } }],
+    });
+    const enc = device.createCommandEncoder();
+    const pass = enc.beginComputePass();
+    pass.setPipeline(initPipeline);
+    pass.setBindGroup(0, initBG);
+    pass.dispatchWorkgroups(Math.ceil(count / PARTICLE_WG));
+    pass.end();
+    device.queue.submit([enc.finish()]);
   }
+
+  gpuInitParticles(particleBuf, state.particleCount);
 
   // Particle update compute pipeline
   const particleUpdateBGL = device.createBindGroupLayout({
@@ -919,16 +1021,16 @@ async function main() {
     ],
   });
 
-  const particleUpdatePipeline = device.createComputePipeline({
+  let particleUpdatePipeline = device.createComputePipeline({
     label: 'particleUpdate',
     layout: device.createPipelineLayout({ bindGroupLayouts: [particleUpdateBGL] }),
     compute: {
-      module: device.createShaderModule({ code: particleUpdateShader, label: 'particleUpdate' }),
+      module: device.createShaderModule({ code: makeParticleUpdateShader(state.particleCount), label: 'particleUpdate' }),
       entryPoint: 'main',
     },
   });
 
-  const particleUpdateBG = device.createBindGroup({
+  let particleUpdateBG = device.createBindGroup({
     layout: particleUpdateBGL,
     entries: [
       { binding: 0, resource: { buffer: paramBuf } },
@@ -970,15 +1072,63 @@ async function main() {
     primitive: { topology: 'triangle-list' },
   });
 
-  const particleRenderBG = device.createBindGroup({
+  let particleRenderBG = device.createBindGroup({
     layout: particleRenderBGL,
     entries: [
       { binding: 0, resource: { buffer: particleBuf } },
-      { binding: 1, resource: { buffer: screenBuf } },
+      { binding: 1, resource: { buffer: particleUB } },
       { binding: 2, resource: dyeA.createView() },
       { binding: 3, resource: linearSampler },
     ],
   });
+
+  // ─── Rebuild particle system (called when count changes) ───────────────
+  function rebuildParticleSystem(count) {
+    count = Math.min(count, maxParticles);
+
+    const newBuf = device.createBuffer({
+      label: 'particles',
+      size: count * PARTICLE_STRIDE,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    gpuInitParticles(newBuf, count);
+
+    particleUpdatePipeline = device.createComputePipeline({
+      label: 'particleUpdate',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [particleUpdateBGL] }),
+      compute: {
+        module: device.createShaderModule({ code: makeParticleUpdateShader(count), label: 'particleUpdate' }),
+        entryPoint: 'main',
+      },
+    });
+
+    particleUpdateBG = device.createBindGroup({
+      layout: particleUpdateBGL,
+      entries: [
+        { binding: 0, resource: { buffer: paramBuf } },
+        { binding: 1, resource: velA.createView() },
+        { binding: 2, resource: linearSampler },
+        { binding: 3, resource: { buffer: newBuf } },
+      ],
+    });
+
+    particleRenderBG = device.createBindGroup({
+      layout: particleRenderBGL,
+      entries: [
+        { binding: 0, resource: { buffer: newBuf } },
+        { binding: 1, resource: { buffer: particleUB } },
+        { binding: 2, resource: dyeA.createView() },
+        { binding: 3, resource: linearSampler },
+      ],
+    });
+
+    particleBuf = newBuf;
+    state.particleCount = count;
+    particleDispatches = Math.ceil(count / PARTICLE_WG);
+
+    console.log(`Rebuilt particle system: ${count} particles (${(count * PARTICLE_STRIDE / 1024 / 1024).toFixed(1)} MB)`);
+  }
 
   // ─── Bind group helpers ─────────────────────────────────────────────────
   function bg(layout, resources) {
@@ -1080,7 +1230,6 @@ async function main() {
   }
 
   const colormaps = [inferno, magma, plasma, viridis, liquidGold];
-  const colormapNames = ['inferno', 'magma', 'plasma', 'viridis', 'liquidGold'];
 
   function palette(t, mapIndex) {
     const cm = colormaps[mapIndex % colormaps.length];
@@ -1106,8 +1255,18 @@ async function main() {
     const dt = 0.016;
     time += dt;
 
-    // Update screen size uniform
-    device.queue.writeBuffer(screenBuf, 0, new Float32Array([canvas.width, canvas.height, time, 0]));
+    // Update screen/particle/display uniform buffers
+    particleUBData[0] = canvas.width;
+    particleUBData[1] = canvas.height;
+    particleUBData[2] = state.particleSize;
+    particleUBData[3] = state.glintBrightness;
+    device.queue.writeBuffer(particleUB, 0, particleUBData);
+
+    displayUBData[0] = canvas.width;
+    displayUBData[1] = canvas.height;
+    displayUBData[2] = time;
+    displayUBData[3] = state.sheenStrength;
+    device.queue.writeBuffer(displayUB, 0, displayUBData);
 
     // Collect splats for this frame
     const splats = [];
@@ -1126,10 +1285,10 @@ async function main() {
       const col = palette(time * 0.12 + inj.colorOffset, inj.cmIndex);
       splats.push({
         x: cx, y: cy,
-        dx: vx * SPLAT_FORCE * 0.1,
-        dy: vy * SPLAT_FORCE * 0.1,
+        dx: vx * state.splatForce * 0.1,
+        dy: vy * state.splatForce * 0.1,
         r: col[0] * dyeRamp, g: col[1] * dyeRamp, b: col[2] * dyeRamp,
-        radius: SPLAT_RADIUS * 2.0,
+        radius: state.splatRadius * 2.0,
       });
     }
 
@@ -1147,7 +1306,7 @@ async function main() {
           dx: Math.cos(angle) * force,
           dy: Math.sin(angle) * force,
           r: col[0] * dyeRamp, g: col[1] * dyeRamp, b: col[2] * dyeRamp,
-          radius: SPLAT_RADIUS * (2.0 + Math.random() * 3),
+          radius: state.splatRadius * (2.0 + Math.random() * 3),
         });
       }
     }
@@ -1158,20 +1317,20 @@ async function main() {
       const col = palette(time * 0.3, 4);
       splats.push({
         x: pointer.x, y: pointer.y,
-        dx: pointer.dx * SPLAT_FORCE,
-        dy: pointer.dy * SPLAT_FORCE,
+        dx: pointer.dx * state.splatForce,
+        dy: pointer.dy * state.splatForce,
         r: col[0], g: col[1], b: col[2],
-        radius: SPLAT_RADIUS * (1.0 + speed * 20),
+        radius: state.splatRadius * (1.0 + speed * 20),
       });
       pointer.moved = false;
     } else if (pointer.moved) {
       // Gentle nudge without dye when hovering
       splats.push({
         x: pointer.x, y: pointer.y,
-        dx: pointer.dx * SPLAT_FORCE * 0.3,
-        dy: pointer.dy * SPLAT_FORCE * 0.3,
+        dx: pointer.dx * state.splatForce * 0.3,
+        dy: pointer.dy * state.splatForce * 0.3,
         r: 0, g: 0, b: 0,
-        radius: SPLAT_RADIUS,
+        radius: state.splatRadius,
       });
       pointer.moved = false;
     }
@@ -1264,8 +1423,8 @@ async function main() {
         { texture: pressB }, { texture: pressA }, [SIM_RES, SIM_RES]);
     }
 
-    // ── Pass 6: Jacobi Pressure Solve (×30) ──
-    for (let i = 0; i < PRESSURE_ITERS; i++) {
+    // ── Pass 6: Jacobi Pressure Solve ──
+    for (let i = 0; i < state.pressureIters; i++) {
       const readTex = (i % 2 === 0) ? pressA : pressB;
       const writeTex = (i % 2 === 0) ? pressB : pressA;
       const jBG = bg(jacobiPipe.layout, [
@@ -1277,7 +1436,7 @@ async function main() {
       p.end();
     }
     // After even iterations, result is in pressA; after odd, in pressB
-    if (PRESSURE_ITERS % 2 !== 0) {
+    if (state.pressureIters % 2 !== 0) {
       enc.copyTextureToTexture(
         { texture: pressB }, { texture: pressA }, [SIM_RES, SIM_RES]);
     }
@@ -1326,7 +1485,7 @@ async function main() {
       const p = enc.beginComputePass();
       p.setPipeline(particleUpdatePipeline);
       p.setBindGroup(0, particleUpdateBG);
-      p.dispatchWorkgroups(PARTICLE_DISPATCHES);
+      p.dispatchWorkgroups(particleDispatches);
       p.end();
     }
 
@@ -1334,7 +1493,7 @@ async function main() {
     const canvasView = ctx.getCurrentTexture().createView();
     {
       const displayBG = bg(displayBGL, [
-        tview(dyeA), linearSampler, ubuf(screenBuf)]);
+        tview(dyeA), linearSampler, ubuf(displayUB)]);
       const rp = enc.beginRenderPass({
         colorAttachments: [{
           view: canvasView,
@@ -1360,12 +1519,57 @@ async function main() {
       });
       rp.setPipeline(particleRenderPipeline);
       rp.setBindGroup(0, particleRenderBG);
-      rp.draw(6, PARTICLE_COUNT);
+      rp.draw(6, state.particleCount);
       rp.end();
     }
 
     device.queue.submit([enc.finish()]);
   }
+
+  // ─── Wire Settings UI ──────────────────────────────────────────────────
+  const settingsToggle = document.getElementById('settingsToggle');
+  const settingsPanel = document.getElementById('settingsPanel');
+  settingsToggle.addEventListener('click', () => {
+    settingsPanel.classList.toggle('open');
+  });
+
+  // Particle count dropdown
+  const particleCountSelect = document.getElementById('particleCountSelect');
+  // Disable options exceeding GPU limit
+  for (const opt of particleCountSelect.options) {
+    if (parseInt(opt.value) > maxParticles) {
+      opt.disabled = true;
+      opt.textContent += ' (GPU limit)';
+    }
+  }
+  // Set initial selection to match state
+  particleCountSelect.value = String(state.particleCount);
+  particleCountSelect.addEventListener('change', () => {
+    const count = parseInt(particleCountSelect.value);
+    rebuildParticleSystem(count);
+  });
+
+  // Wire sliders to state
+  function wireSlider(id, stateKey, fmt) {
+    const slider = document.getElementById(id);
+    const valSpan = document.getElementById(id + 'Val');
+    slider.value = state[stateKey];
+    if (valSpan) valSpan.textContent = fmt ? fmt(state[stateKey]) : state[stateKey];
+    slider.addEventListener('input', () => {
+      state[stateKey] = parseFloat(slider.value);
+      if (valSpan) valSpan.textContent = fmt ? fmt(state[stateKey]) : state[stateKey];
+    });
+  }
+
+  wireSlider('particleSize', 'particleSize');
+  wireSlider('glintBrightness', 'glintBrightness');
+  wireSlider('sheenStrength', 'sheenStrength');
+  wireSlider('curlStrength', 'curlStrength', v => Math.round(v));
+  wireSlider('splatForce', 'splatForce', v => Math.round(v));
+  wireSlider('velDissipation', 'velDissipation', v => v.toFixed(3));
+  wireSlider('dyeDissipation', 'dyeDissipation', v => v.toFixed(3));
+  wireSlider('pressureIters', 'pressureIters', v => Math.round(v));
+  wireSlider('pressureDecay', 'pressureDecay', v => v.toFixed(2));
 
   console.log('Fluid simulation starting...');
   requestAnimationFrame(frame);
