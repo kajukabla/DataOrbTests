@@ -10,6 +10,8 @@ const state = {
   particleSize: 0.6,
   glintBrightness: 1.2,
   prismaticAmount: 5.0,
+  baseColor: [1.0, 0.55, 0.1],
+  glitterColor: [1.0, 1.0, 1.0],
   sheenStrength: 1.5,
   splatForce: 6000,
   curlStrength: 15,
@@ -579,7 +581,7 @@ fn main(
   let h4 = f32(pcgVert(seedU + 419u)) / 4294967295.0;
   var tint = grainTintVert(h3);
 
-  // Prismatic iridescence — adds rainbow color variety
+  // Prismatic iridescence — shifts tint color without adding brightness
   let pa = pp.extra.x;
   let hueAngle = h4 * 6.283;
   let prismatic = vec3f(
@@ -588,21 +590,20 @@ fn main(
     0.5 + 0.5 * cos(hueAngle + 4.189)
   );
 
-  // Tint shift: more particles get rainbow tint as pa increases (decoupled from glint)
+  // Tint shift: more particles get rainbow tint as pa increases
   let prisThreshold = max(1.0 - pa * 0.05, 0.0);
-  let prisMix = clamp(pa * 0.05, 0.0, 1.0);
+  let prisMix = clamp(pa * 0.06, 0.0, 1.0);
   if (h4 > prisThreshold) {
     tint = mix(tint, prismatic, prisMix);
   }
 
-  // Iridescent ambient: colored glow visible even on non-glinting particles
-  let diffuse = max(dot(n, lightDir), 0.0);
-  let iriBoost = clamp(pa * 0.015, 0.0, 0.3);
-  let iriAmbient = prismatic * iriBoost * diffuse;
+  // Glitter color multiplier
+  let glitCol = pp.extra.yzw;
+  tint *= glitCol;
 
   let brightness = glint * pp.screen.w + ambient;
-  out.color = (tint * brightness + iriAmbient) * fluidGate;
-  out.alpha = (brightness + iriBoost * diffuse) * fluidGate;
+  out.color = tint * brightness * fluidGate;
+  out.alpha = brightness * fluidGate;
   out.pos = vec4f(clipPos + qp * clipSize, 0.0, 1.0);
   return out;
 }
@@ -654,7 +655,12 @@ fn main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
 const displayShaderFrag = /* wgsl */`
 @group(0) @binding(0) var dyeTex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
-@group(0) @binding(2) var<uniform> displayParams: vec4f; // xy = screenSize, z = time, w = sheenStrength
+
+struct DisplayUniforms {
+  screen: vec4f,    // xy=screenSize, z=time, w=sheenStrength
+  baseColor: vec4f, // xyz=baseColor RGB
+};
+@group(0) @binding(2) var<uniform> du: DisplayUniforms;
 
 fn aces(x: vec3f) -> vec3f {
   let a = 2.51; let b = 0.03; let c = 2.43; let d = 0.59; let e = 0.14;
@@ -663,9 +669,9 @@ fn aces(x: vec3f) -> vec3f {
 
 @fragment
 fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-  let screenSize = displayParams.xy;
-  let time = displayParams.z;
-  let sheenStrength = displayParams.w;
+  let screenSize = du.screen.xy;
+  let time = du.screen.z;
+  let sheenStrength = du.screen.w;
   let uv = vec2f(pos.x, screenSize.y - pos.y) / screenSize;
 
   // Sphere mask
@@ -680,9 +686,9 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let raw = textureSampleLevel(dyeTex, samp, uv, 0.0).rgb;
   let intensity = dot(raw, vec3f(0.3, 0.6, 0.1));
 
-  // Warm gold fluid base — dark amber substrate, rich where fluid is dense
-  let gold = vec3f(1.0, 0.55, 0.1);
-  var color = gold * intensity * 0.25;
+  // Fluid base — color from uniform, rich where fluid is dense
+  let baseCol = du.baseColor.rgb;
+  var color = baseCol * intensity * 0.25;
 
   // Surface gradient for multi-lobe metallic sheen
   let texel = 1.0 / screenSize;
@@ -904,11 +910,11 @@ async function main() {
   });
   const particleUBData = new Float32Array(8);
 
-  // displayUB: [width, height, time, sheenStrength]
+  // displayUB: [width, height, time, sheenStrength, baseR, baseG, baseB, pad]
   const displayUB = device.createBuffer({
-    size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const displayUBData = new Float32Array(4);
+  const displayUBData = new Float32Array(8);
 
   // ─── Pipeline helpers ───────────────────────────────────────────────────
   function buildPipeline(code, label, bindingDescs) {
@@ -1296,12 +1302,18 @@ async function main() {
     particleUBData[2] = state.particleSize;
     particleUBData[3] = state.glintBrightness;
     particleUBData[4] = state.prismaticAmount;
+    particleUBData[5] = state.glitterColor[0];
+    particleUBData[6] = state.glitterColor[1];
+    particleUBData[7] = state.glitterColor[2];
     device.queue.writeBuffer(particleUB, 0, particleUBData);
 
     displayUBData[0] = canvas.width;
     displayUBData[1] = canvas.height;
     displayUBData[2] = time;
     displayUBData[3] = state.sheenStrength;
+    displayUBData[4] = state.baseColor[0];
+    displayUBData[5] = state.baseColor[1];
+    displayUBData[6] = state.baseColor[2];
     device.queue.writeBuffer(displayUB, 0, displayUBData);
 
     // Collect splats for this frame
@@ -1577,6 +1589,28 @@ async function main() {
   wireSlider('particleSize', 'particleSize');
   wireSlider('glintBrightness', 'glintBrightness');
   wireSlider('prismaticAmount', 'prismaticAmount');
+
+  // Wire color pickers
+  function hexToRGB(hex) {
+    return [
+      parseInt(hex.slice(1, 3), 16) / 255,
+      parseInt(hex.slice(3, 5), 16) / 255,
+      parseInt(hex.slice(5, 7), 16) / 255,
+    ];
+  }
+  function rgbToHex(rgb) {
+    return '#' + rgb.map(c => Math.round(Math.min(1, Math.max(0, c)) * 255).toString(16).padStart(2, '0')).join('');
+  }
+  function wireColor(id, stateKey) {
+    const picker = document.getElementById(id);
+    picker.value = rgbToHex(state[stateKey]);
+    picker.addEventListener('input', () => {
+      state[stateKey] = hexToRGB(picker.value);
+    });
+  }
+  wireColor('baseColor', 'baseColor');
+  wireColor('glitterColor', 'glitterColor');
+
   wireSlider('sheenStrength', 'sheenStrength');
   wireSlider('curlStrength', 'curlStrength', v => Math.round(v));
   wireSlider('splatForce', 'splatForce', v => Math.round(v));
