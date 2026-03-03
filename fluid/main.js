@@ -1444,11 +1444,11 @@ async function main() {
       }
     }
 
-    // Mouse splat — clamp to sphere
-    const SPHERE_R = 0.42;
+    // Mouse splat — clamp to sphere (tighter than visual edge to keep splat radius inside)
+    const INTERACT_R = 0.38;
     const pdx = pointer.x - 0.5, pdy = pointer.y - 0.5;
     const pDist = Math.sqrt(pdx * pdx + pdy * pdy);
-    const inSphere = pDist < SPHERE_R;
+    const inSphere = pDist < INTERACT_R;
 
     if (pointer.moved && pointer.down && inSphere) {
       const speed = Math.sqrt(pointer.dx * pointer.dx + pointer.dy * pointer.dy);
