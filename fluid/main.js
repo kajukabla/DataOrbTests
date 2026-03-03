@@ -352,6 +352,83 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 `;
 
+// ─── Curl Noise Compute Shader ──────────────────────────────────────────────
+const curlNoiseShader = /* wgsl */`
+struct NoiseParams {
+  time: f32,
+  amount: f32,
+  simRes: f32,
+  pad: f32,
+};
+
+@group(0) @binding(0) var<uniform> np: NoiseParams;
+@group(0) @binding(1) var velSrc: texture_2d<f32>;
+@group(0) @binding(2) var velDst: texture_storage_2d<rgba16float, write>;
+
+fn hash(p: vec2f) -> f32 {
+  return fract(sin(dot(p, vec2f(127.1, 311.7))) * 43758.5453);
+}
+
+fn vnoise(p: vec2f) -> f32 {
+  let i = floor(p);
+  let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  return mix(
+    mix(hash(i), hash(i + vec2f(1.0, 0.0)), u.x),
+    mix(hash(i + vec2f(0.0, 1.0)), hash(i + vec2f(1.0, 1.0)), u.x),
+    u.y
+  );
+}
+
+const SPHERE_CENTER = vec2f(0.5, 0.5);
+const SPHERE_RADIUS = 0.43;
+
+@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let res = u32(np.simRes);
+  if (id.x >= res || id.y >= res) { return; }
+  let uv = (vec2f(id.xy) + 0.5) / np.simRes;
+
+  if (length(uv - SPHERE_CENTER) > SPHERE_RADIUS) {
+    textureStore(velDst, id.xy, textureLoad(velSrc, id.xy, 0));
+    return;
+  }
+
+  var vel = textureLoad(velSrc, id.xy, 0).xy;
+
+  let t = np.time;
+  var curl = vec2f(0.0);
+  let eps = 1.0 / np.simRes;
+
+  // Octave 1 — large swirls
+  let s1 = 4.0;
+  let p1 = uv * s1 + vec2f(t * 0.3, t * 0.2);
+  let n1c = vnoise(p1);
+  let n1x = vnoise(p1 + vec2f(eps * s1, 0.0));
+  let n1y = vnoise(p1 + vec2f(0.0, eps * s1));
+  curl += vec2f(n1y - n1c, -(n1x - n1c)) / eps * 0.5;
+
+  // Octave 2 — medium detail
+  let s2 = 8.0;
+  let p2 = uv * s2 + vec2f(-t * 0.5, t * 0.4);
+  let n2c = vnoise(p2);
+  let n2x = vnoise(p2 + vec2f(eps * s2, 0.0));
+  let n2y = vnoise(p2 + vec2f(0.0, eps * s2));
+  curl += vec2f(n2y - n2c, -(n2x - n2c)) / eps * 0.3;
+
+  // Octave 3 — fine detail
+  let s3 = 16.0;
+  let p3 = uv * s3 + vec2f(t * 0.7, -t * 0.3);
+  let n3c = vnoise(p3);
+  let n3x = vnoise(p3 + vec2f(eps * s3, 0.0));
+  let n3y = vnoise(p3 + vec2f(0.0, eps * s3));
+  curl += vec2f(n3y - n3c, -(n3x - n3c)) / eps * 0.2;
+
+  vel += curl * np.amount * 8.0;
+  textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
+}
+`;
+
 // ─── Particle Update Compute Shader (function — count baked in) ─────────────
 function makeParticleUpdateShader(count) {
   return /* wgsl */`
@@ -1025,6 +1102,15 @@ async function main() {
   const advectDyePipe = buildPipeline(advectDyeShader, 'advectDye',
     ['uniform', 'texture', 'texture', 'sampler', 'storage']);
 
+  // Curl noise pipeline
+  const curlNoisePipe = buildPipeline(curlNoiseShader, 'curlNoise',
+    ['uniform', 'texture', 'storage']);
+
+  const noiseBuf = device.createBuffer({
+    size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const noiseData = new Float32Array(4); // [time, noiseAmount, simRes, pad]
+
   // ─── Display render pipeline ────────────────────────────────────────────
   const displayBGL = device.createBindGroupLayout({
     entries: [
@@ -1189,6 +1275,7 @@ async function main() {
   const gradSubBGFixed = bg(gradSubPipe.layout, [ubuf(paramBuf), tview(velA), tview(pressA), tview(velB)]);
   const advVelBGFixed = bg(advectVelPipe.layout, [ubuf(paramBuf), tview(velA), linearSampler, tview(velB)]);
   const advDyeBGFixed = bg(advectDyePipe.layout, [ubuf(paramBuf), tview(velA), tview(dyeA), linearSampler, tview(dyeB)]);
+  const curlNoiseBGFixed = bg(curlNoisePipe.layout, [ubuf(noiseBuf), tview(velA), tview(velB)]);
   const displayBGFixed = bg(displayBGL, [tview(dyeA), linearSampler, ubuf(displayUB)]);
   const MAX_SPLATS = 16;
   const splatParamBufs = Array.from({length: MAX_SPLATS}, () =>
@@ -1458,29 +1545,6 @@ async function main() {
       }
     }
 
-    // Curl noise injection — velocity + subtle dye for sustained organic turbulence
-    const noiseA = state.noiseAmount;
-    if (noiseA > 0.01) {
-      const noiseCount = Math.ceil(noiseA * 8);
-      for (let i = 0; i < noiseCount; i++) {
-        const a = time * 0.5 + i * 2.399;  // golden angle spacing
-        const r = 0.08 + Math.abs(Math.sin(a * 3.7 + time * 0.8)) * 0.28;
-        const px = 0.5 + Math.cos(a) * r;
-        const py = 0.5 + Math.sin(a) * r;
-        const va = a * 1.7 + time * 1.3;
-        const force = noiseA * 3000;
-        const col = palette(a * 0.15 + time * 0.05, 4);
-        const dyeStr = noiseA * 0.4 * dyeRamp;
-        splats.push({
-          x: px, y: py,
-          dx: Math.cos(va) * force,
-          dy: Math.sin(va) * force,
-          r: col[0] * dyeStr, g: col[1] * dyeStr, b: col[2] * dyeStr,
-          radius: state.splatRadius * (2.0 + noiseA * 4),
-        });
-      }
-    }
-
     // Mouse splat — clamp to sphere (tighter than visual edge to keep splat radius inside)
     const INTERACT_R = 0.38;
     const pdx = pointer.x - 0.5, pdy = pointer.y - 0.5;
@@ -1626,6 +1690,21 @@ async function main() {
       p.end();
       enc.copyTextureToTexture(
         { texture: dyeB }, { texture: dyeA }, [SIM_RES, SIM_RES]);
+    }
+
+    // ── Curl Noise (field-wide velocity perturbation) ──
+    if (state.noiseAmount > 0.01) {
+      noiseData[0] = time;
+      noiseData[1] = state.noiseAmount;
+      noiseData[2] = SIM_RES;
+      device.queue.writeBuffer(noiseBuf, 0, noiseData);
+      const p = enc.beginComputePass();
+      p.setPipeline(curlNoisePipe.pipeline);
+      p.setBindGroup(0, curlNoiseBGFixed);
+      p.dispatchWorkgroups(dispatch, dispatch);
+      p.end();
+      enc.copyTextureToTexture(
+        { texture: velB }, { texture: velA }, [SIM_RES, SIM_RES]);
     }
 
     // ── Pass 10: Particle Update (compute) ──
