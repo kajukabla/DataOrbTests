@@ -17,6 +17,11 @@ const state = {
   glitterAccent: [0.3, 0.5, 1.0],
   colorBlend: 0.5,
   sheenStrength: 1.5,
+  clickSize: 0.5,
+  clickStrength: 0.5,
+  injectorIntensity: 1.0,
+  noiseAmount: 0.0,
+  sheenColor: [1.0, 0.9, 0.7],
   splatForce: 6000,
   curlStrength: 15,
   pressureIters: 30,
@@ -535,11 +540,10 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   // Glitter color: blend base→accent based on dye density
   let glitBase = pp.extra.yzw;
   let glitAccent = pp.extra2.xyz;
-  let blend = pp.extra2.w;  // 0=all base, 1=all accent
-  let gLo = max(0.0, 0.5 - blend * 0.5);
-  let gHi = min(1.0, 1.5 - blend * 0.5);
-  let densityT = smoothstep(gLo, gHi, intensity);
-  let glitCol = mix(glitAccent, glitBase, densityT);
+  let blend = pp.extra2.w;  // 0=all base, 0.5=gradient, 1=all accent
+  let densityT = smoothstep(0.05, 0.8, intensity);
+  let biasedT = clamp(densityT + 1.0 - blend * 2.0, 0.0, 1.0);
+  let glitCol = mix(glitAccent, glitBase, biasedT);
   tint *= glitCol;
 
   let brightness = glint * pp.screen.w + ambient;
@@ -690,6 +694,7 @@ struct DisplayUniforms {
   screen: vec4f,      // xy=screenSize, z=time, w=sheenStrength
   baseColor: vec4f,   // xyz=baseColor RGB
   accentColor: vec4f, // xyz=accentColor RGB, w=colorBlend
+  sheenColor: vec4f,  // xyz=sheenColor RGB
 };
 @group(0) @binding(2) var<uniform> du: DisplayUniforms;
 
@@ -725,11 +730,10 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // Fluid base — gradient from accent (thin/wispy) to base (dense)
   let baseCol = du.baseColor.rgb;
   let accentCol = du.accentColor.rgb;
-  let blend = du.accentColor.w;  // 0=all base, 1=all accent
-  let lo = max(0.0, 0.5 - blend * 0.5);
-  let hi = min(1.0, 1.5 - blend * 0.5);
-  let densityT = smoothstep(lo, hi, intensity);
-  let fluidCol = mix(accentCol, baseCol, densityT);
+  let blend = du.accentColor.w;  // 0=all base, 0.5=gradient, 1=all accent
+  let densityT = smoothstep(0.05, 0.8, intensity);
+  let biasedT = clamp(densityT + 1.0 - blend * 2.0, 0.0, 1.0);
+  let fluidCol = mix(accentCol, baseCol, biasedT);
   var color = fluidCol * intensity * 0.25;
 
   // Surface gradient for multi-lobe metallic sheen
@@ -751,7 +755,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let rimFactor = smoothstep(0.2, 0.42, screenDist);
 
   let sheen = (sharpSheen * 0.6 + broadSpec * 0.3 + rimFactor * 0.15) * sheenStrength;
-  color += color * sheen;
+  color += color * sheen * du.sheenColor.rgb;
 
   // Tone mapping
   color = aces(color * 1.6);
@@ -952,11 +956,11 @@ async function main() {
   });
   const particleUBData = new Float32Array(16);
 
-  // displayUB: [width, height, time, sheenStrength, baseR, baseG, baseB, pad, accentR, accentG, accentB, pad]
+  // displayUB: [width, height, time, sheenStrength, baseR, baseG, baseB, pad, accentR, accentG, accentB, colorBlend, sheenR, sheenG, sheenB, pad]
   const displayUB = device.createBuffer({
-    size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const displayUBData = new Float32Array(12);
+  const displayUBData = new Float32Array(16);
 
   // ─── Pipeline helpers ───────────────────────────────────────────────────
   function buildPipeline(code, label, bindingDescs) {
@@ -1399,6 +1403,9 @@ async function main() {
     displayUBData[9] = state.accentColor[1];
     displayUBData[10] = state.accentColor[2];
     displayUBData[11] = state.colorBlend;
+    displayUBData[12] = state.sheenColor[0];
+    displayUBData[13] = state.sheenColor[1];
+    displayUBData[14] = state.sheenColor[2];
     device.queue.writeBuffer(displayUB, 0, displayUBData);
 
     // Collect splats for this frame
@@ -1407,39 +1414,63 @@ async function main() {
     // Dye ramp: fade in over first 3 seconds (starting at t=1) to prevent initial blowout
     const dyeRamp = Math.min(1.0, (time - 1.0) / 3.0);
 
-    // Auto-injectors (skip first second to avoid initial white splats)
-    for (const inj of injectors) {
-      if (time < 1.0) { continue; }
-      const angle = time * inj.speed + inj.phase;
-      const cx = 0.5 + Math.cos(angle) * inj.radius;
-      const cy = 0.5 + Math.sin(angle) * inj.radius;
-      const vx = -Math.sin(angle) * inj.speed * inj.radius * 0.5;
-      const vy = Math.cos(angle) * inj.speed * inj.radius * 0.5;
-      const col = palette(time * 0.12 + inj.colorOffset, inj.cmIndex);
-      splats.push({
-        x: cx, y: cy,
-        dx: vx * state.splatForce * 0.1,
-        dy: vy * state.splatForce * 0.1,
-        r: col[0] * dyeRamp, g: col[1] * dyeRamp, b: col[2] * dyeRamp,
-        radius: state.splatRadius * 2.0,
-      });
+    // Auto-injectors (scaled by injectorIntensity; 0 = off)
+    const injI = state.injectorIntensity;
+    if (injI > 0.01) {
+      for (const inj of injectors) {
+        if (time < 1.0) { continue; }
+        const angle = time * inj.speed + inj.phase;
+        const cx = 0.5 + Math.cos(angle) * inj.radius;
+        const cy = 0.5 + Math.sin(angle) * inj.radius;
+        const vx = -Math.sin(angle) * inj.speed * inj.radius * 0.5;
+        const vy = Math.cos(angle) * inj.speed * inj.radius * 0.5;
+        const col = palette(time * 0.12 + inj.colorOffset, inj.cmIndex);
+        splats.push({
+          x: cx, y: cy,
+          dx: vx * state.splatForce * 0.1 * injI,
+          dy: vy * state.splatForce * 0.1 * injI,
+          r: col[0] * dyeRamp * injI, g: col[1] * dyeRamp * injI, b: col[2] * dyeRamp * injI,
+          radius: state.splatRadius * 2.0,
+        });
+      }
+
+      // Random splat burst every 3-5 seconds
+      if (time - lastSplatTime > 2.0 + Math.random() * 1.5) {
+        lastSplatTime = time;
+        const count = 2 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < count; i++) {
+          const col = palette(Math.random(), 4);
+          const angle = Math.random() * Math.PI * 2;
+          const force = (500 + Math.random() * 1000) * injI;
+          splats.push({
+            x: 0.15 + Math.random() * 0.7,
+            y: 0.15 + Math.random() * 0.7,
+            dx: Math.cos(angle) * force,
+            dy: Math.sin(angle) * force,
+            r: col[0] * dyeRamp * injI, g: col[1] * dyeRamp * injI, b: col[2] * dyeRamp * injI,
+            radius: state.splatRadius * (2.0 + Math.random() * 3),
+          });
+        }
+      }
     }
 
-    // Random splat burst every 3-5 seconds
-    if (time - lastSplatTime > 2.0 + Math.random() * 1.5) {
-      lastSplatTime = time;
-      const count = 2 + Math.floor(Math.random() * 3);
-      for (let i = 0; i < count; i++) {
-        const col = palette(Math.random(), 4);
-        const angle = Math.random() * Math.PI * 2;
-        const force = 500 + Math.random() * 1000;
+    // Curl noise injection — random velocity-only splats for organic turbulence
+    const noiseA = state.noiseAmount;
+    if (noiseA > 0.01) {
+      const noiseCount = Math.ceil(noiseA * 6);
+      for (let i = 0; i < noiseCount; i++) {
+        const a = time * 0.7 + i * 2.399;  // golden angle spacing
+        const r = 0.1 + Math.abs(Math.sin(a * 3.7 + time)) * 0.25;
+        const px = 0.5 + Math.cos(a) * r;
+        const py = 0.5 + Math.sin(a) * r;
+        const va = a * 1.3 + time * 2.1;
+        const force = noiseA * 2000;
         splats.push({
-          x: 0.15 + Math.random() * 0.7,
-          y: 0.15 + Math.random() * 0.7,
-          dx: Math.cos(angle) * force,
-          dy: Math.sin(angle) * force,
-          r: col[0] * dyeRamp, g: col[1] * dyeRamp, b: col[2] * dyeRamp,
-          radius: state.splatRadius * (2.0 + Math.random() * 3),
+          x: px, y: py,
+          dx: Math.cos(va) * force,
+          dy: Math.sin(va) * force,
+          r: 0, g: 0, b: 0,
+          radius: state.splatRadius * (1.5 + noiseA * 3),
         });
       }
     }
@@ -1453,22 +1484,24 @@ async function main() {
     if (pointer.moved && pointer.down && inSphere) {
       const speed = Math.sqrt(pointer.dx * pointer.dx + pointer.dy * pointer.dy);
       const col = palette(time * 0.3, 4);
+      const str = state.clickStrength * 6.0;   // 0→0x, 0.5→3x, 1→6x force
+      const sz = 1.0 + state.clickSize * 8.0;  // 0→1x, 0.5→5x, 1→9x radius
       splats.push({
         x: pointer.x, y: pointer.y,
-        dx: pointer.dx * state.splatForce * 3.0,
-        dy: pointer.dy * state.splatForce * 3.0,
-        r: col[0] * 2.0, g: col[1] * 2.0, b: col[2] * 2.0,
-        radius: state.splatRadius * (4.0 + speed * 40),
+        dx: pointer.dx * state.splatForce * str,
+        dy: pointer.dy * state.splatForce * str,
+        r: col[0] * str, g: col[1] * str, b: col[2] * str,
+        radius: state.splatRadius * sz * (1.0 + speed * 20),
       });
       pointer.moved = false;
     } else if (pointer.moved && inSphere) {
-      // Gentle nudge without dye when hovering
+      const str = state.clickStrength * 2.0;
       splats.push({
         x: pointer.x, y: pointer.y,
-        dx: pointer.dx * state.splatForce * 0.3,
-        dy: pointer.dy * state.splatForce * 0.3,
+        dx: pointer.dx * state.splatForce * str,
+        dy: pointer.dy * state.splatForce * str,
         r: 0, g: 0, b: 0,
-        radius: state.splatRadius,
+        radius: state.splatRadius * (1.0 + state.clickSize * 4.0),
       });
       pointer.moved = false;
     } else if (pointer.moved) {
@@ -1710,6 +1743,11 @@ async function main() {
   wireSlider('colorBlend', 'colorBlend', v => v.toFixed(2));
 
   wireSlider('sheenStrength', 'sheenStrength');
+  wireColor('sheenColor', 'sheenColor');
+  wireSlider('clickSize', 'clickSize');
+  wireSlider('clickStrength', 'clickStrength');
+  wireSlider('injectorIntensity', 'injectorIntensity');
+  wireSlider('noiseAmount', 'noiseAmount');
   wireSlider('curlStrength', 'curlStrength', v => Math.round(v));
   wireSlider('splatForce', 'splatForce', v => Math.round(v));
   wireSlider('velDissipation', 'velDissipation', v => v.toFixed(3));
