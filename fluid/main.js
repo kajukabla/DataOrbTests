@@ -509,7 +509,7 @@ fn main(
   let localUV = qp * 0.5 + 0.5;
 
   // Particle size in pixels → clip space
-  let pixelSize: f32 = 1.2;
+  let pixelSize: f32 = 1.0;
   let clipSize = vec2f(pixelSize * 2.0 / screen.x, pixelSize * 2.0 / screen.y);
 
   // UV to clip space
@@ -562,7 +562,7 @@ fn main(in: FSIn) -> @location(0) vec4f {
   let centered = uv - vec2f(0.5, 0.5);
   let corrected = vec2f(centered.x * aspect, centered.y);
   let screenDist = length(corrected);
-  let screenRadius = 0.45 * min(aspect, 1.0);
+  let screenRadius = 0.42 * min(aspect, 1.0);
   if (screenDist > screenRadius) { discard; }
 
   // Gate by fluid presence — no fluid, no glitter
@@ -606,7 +606,7 @@ fn main(in: FSIn) -> @location(0) vec4f {
     tint = mix(tint, prismatic, 0.5);
   }
 
-  let brightness = glint * 1.5 + ambient;
+  let brightness = glint * 1.2 + ambient;
 
   // Soft edge
   let edge = 1.0 - smoothstep(0.3, 0.5, d);
@@ -648,17 +648,16 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let centered = uv - vec2f(0.5, 0.5);
   let corrected = vec2f(centered.x * aspect, centered.y);
   let screenDist = length(corrected);
-  let screenRadius = 0.45 * min(aspect, 1.0);
+  let screenRadius = 0.42 * min(aspect, 1.0);
   let mask = 1.0 - smoothstep(screenRadius - 0.005, screenRadius + 0.005, screenDist);
 
   // Sample fluid dye
   let raw = textureSampleLevel(dyeTex, samp, uv, 0.0).rgb;
   let intensity = dot(raw, vec3f(0.3, 0.6, 0.1));
 
-  // Warm gold fluid base — deep amber to rich orange-gold
-  let gold = vec3f(1.0, 0.72, 0.28);
-  let brightGold = vec3f(1.0, 0.85, 0.45);
-  var color = mix(gold, brightGold, clamp(intensity * 0.5, 0.0, 1.0)) * intensity * 0.45;
+  // Warm gold fluid base — dark amber substrate, rich where fluid is dense
+  let gold = vec3f(1.0, 0.55, 0.1);
+  var color = gold * intensity * 0.25;
 
   // Surface gradient for broad specular sheen
   let texel = 1.0 / screenSize;
@@ -674,7 +673,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   color += color * sheen;
 
   // Tone mapping
-  color = aces(color * 1.8);
+  color = aces(color * 1.6);
 
   // Gamma
   color = pow(clamp(color, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2));
