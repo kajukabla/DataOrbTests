@@ -21,6 +21,12 @@ const state = {
   clickStrength: 0.5,
   injectorIntensity: 1.0,
   noiseAmount: 0.0,
+  noiseFrequency: 0.5,
+  noiseSpeed: 0.5,
+  injectorSize: 0.5,
+  injectorCount: 4,
+  injectorSpeed: 0.5,
+  burstCount: 3,
   sheenColor: [1.0, 0.9, 0.7],
   splatForce: 6000,
   curlStrength: 15,
@@ -80,7 +86,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let diff = uv - point;
   let dist2 = dot(diff, diff);
   let strength = exp(-dist2 / (2.0 * p.splatRadius * p.splatRadius));
-  vel += strength * vec2f(p.splatDx, p.splatDy);
+  let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.06, SPHERE_RADIUS, dist);
+  vel += strength * boundaryFade * vec2f(p.splatDx, p.splatDy);
   textureStore(dst, id.xy, vec4f(vel, 0.0, 1.0));
 }
 `;
@@ -109,9 +116,10 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let diff = uv - point;
   let dist2 = dot(diff, diff);
   let strength = exp(-dist2 / (2.0 * p.splatRadius * p.splatRadius));
+  let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.06, SPHERE_RADIUS, dist);
   // Mix-blend instead of additive: new color replaces old, keeping hues saturated
   let incoming = vec3f(p.splatR, p.splatG, p.splatB);
-  dye = vec4f(mix(dye.rgb, incoming, min(strength, 1.0)), 1.0);
+  dye = vec4f(mix(dye.rgb, incoming, min(strength * boundaryFade, 1.0)), 1.0);
   textureStore(dst, id.xy, dye);
 }
 `;
@@ -358,7 +366,11 @@ struct NoiseParams {
   time: f32,
   amount: f32,
   simRes: f32,
-  pad: f32,
+  frequency: f32,
+  speed: f32,
+  pad1: f32,
+  pad2: f32,
+  pad3: f32,
 };
 
 @group(0) @binding(0) var<uniform> np: NoiseParams;
@@ -396,29 +408,30 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
   var vel = textureLoad(velSrc, id.xy, 0).xy;
 
-  let t = np.time;
+  let baseScale = 2.0 + np.frequency * 14.0;
+  let ts = np.time * (0.1 + np.speed * 2.0);
   var curl = vec2f(0.0);
   let eps = 1.0 / np.simRes;
 
   // Octave 1 — large swirls
-  let s1 = 4.0;
-  let p1 = uv * s1 + vec2f(t * 0.3, t * 0.2);
+  let s1 = baseScale;
+  let p1 = uv * s1 + vec2f(ts * 0.3, ts * 0.2);
   let n1c = vnoise(p1);
   let n1x = vnoise(p1 + vec2f(eps * s1, 0.0));
   let n1y = vnoise(p1 + vec2f(0.0, eps * s1));
   curl += vec2f(n1y - n1c, -(n1x - n1c)) / eps * 0.5;
 
   // Octave 2 — medium detail
-  let s2 = 8.0;
-  let p2 = uv * s2 + vec2f(-t * 0.5, t * 0.4);
+  let s2 = baseScale * 2.0;
+  let p2 = uv * s2 + vec2f(-ts * 0.5, ts * 0.4);
   let n2c = vnoise(p2);
   let n2x = vnoise(p2 + vec2f(eps * s2, 0.0));
   let n2y = vnoise(p2 + vec2f(0.0, eps * s2));
   curl += vec2f(n2y - n2c, -(n2x - n2c)) / eps * 0.3;
 
   // Octave 3 — fine detail
-  let s3 = 16.0;
-  let p3 = uv * s3 + vec2f(t * 0.7, -t * 0.3);
+  let s3 = baseScale * 4.0;
+  let p3 = uv * s3 + vec2f(ts * 0.7, -ts * 0.3);
   let n3c = vnoise(p3);
   let n3x = vnoise(p3 + vec2f(eps * s3, 0.0));
   let n3y = vnoise(p3 + vec2f(0.0, eps * s3));
@@ -1107,9 +1120,9 @@ async function main() {
     ['uniform', 'texture', 'storage']);
 
   const noiseBuf = device.createBuffer({
-    size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const noiseData = new Float32Array(4); // [time, noiseAmount, simRes, pad]
+  const noiseData = new Float32Array(8); // [time, amount, simRes, frequency, speed, pad, pad, pad]
 
   // ─── Display render pipeline ────────────────────────────────────────────
   const displayBGL = device.createBindGroupLayout({
@@ -1507,28 +1520,48 @@ async function main() {
 
     // Auto-injectors (scaled by injectorIntensity; 0 = off)
     const injI = state.injectorIntensity;
-    if (injI > 0.01) {
-      for (const inj of injectors) {
+    const injCount = Math.round(state.injectorCount);
+    if (injI > 0.01 && injCount > 0) {
+      // Build up to 8 injectors by duplicating base 4 with offset phases
+      const allInjectors = [];
+      for (let i = 0; i < Math.min(injCount, injectors.length); i++) {
+        allInjectors.push(injectors[i]);
+      }
+      for (let i = injectors.length; i < injCount; i++) {
+        const base = injectors[i % injectors.length];
+        allInjectors.push({
+          phase: base.phase + Math.PI * 0.5,
+          radius: base.radius * 0.85,
+          speed: base.speed * 1.2,
+          colorOffset: base.colorOffset + 0.3,
+          cmIndex: base.cmIndex,
+        });
+      }
+      const injSplatRadius = state.splatRadius * 2.0 * (0.5 + state.injectorSize * 3.0);
+      const spdMul = 0.2 + state.injectorSpeed * 3.6;
+      for (const inj of allInjectors) {
         if (time < 1.0) { continue; }
-        const angle = time * inj.speed + inj.phase;
+        const spd = inj.speed * spdMul;
+        const angle = time * spd + inj.phase;
         const cx = 0.5 + Math.cos(angle) * inj.radius;
         const cy = 0.5 + Math.sin(angle) * inj.radius;
-        const vx = -Math.sin(angle) * inj.speed * inj.radius * 0.5;
-        const vy = Math.cos(angle) * inj.speed * inj.radius * 0.5;
+        const vx = -Math.sin(angle) * spd * inj.radius * 0.5;
+        const vy = Math.cos(angle) * spd * inj.radius * 0.5;
         const col = palette(time * 0.12 + inj.colorOffset, inj.cmIndex);
         splats.push({
           x: cx, y: cy,
           dx: vx * state.splatForce * 0.1 * injI,
           dy: vy * state.splatForce * 0.1 * injI,
           r: col[0] * dyeRamp * injI, g: col[1] * dyeRamp * injI, b: col[2] * dyeRamp * injI,
-          radius: state.splatRadius * 2.0,
+          radius: injSplatRadius,
         });
       }
 
-      // Random splat burst every 3-5 seconds
-      if (time - lastSplatTime > 2.0 + Math.random() * 1.5) {
+      // Random splat burst every 3-5 seconds (controlled by burstCount)
+      const bc = Math.round(state.burstCount);
+      if (bc > 0 && time - lastSplatTime > 2.0 + Math.random() * 1.5) {
         lastSplatTime = time;
-        const count = 2 + Math.floor(Math.random() * 3);
+        const count = Math.max(1, bc - 1) + Math.floor(Math.random() * (bc + 1));
         for (let i = 0; i < count; i++) {
           const col = palette(Math.random(), 4);
           const angle = Math.random() * Math.PI * 2;
@@ -1546,7 +1579,7 @@ async function main() {
     }
 
     // Mouse splat — clamp to sphere (tighter than visual edge to keep splat radius inside)
-    const INTERACT_R = 0.38;
+    const INTERACT_R = 0.35;
     const pdx = pointer.x - 0.5, pdy = pointer.y - 0.5;
     const pDist = Math.sqrt(pdx * pdx + pdy * pdy);
     const inSphere = pDist < INTERACT_R;
@@ -1695,8 +1728,12 @@ async function main() {
     // ── Curl Noise (field-wide velocity perturbation) ──
     if (state.noiseAmount > 0.01) {
       noiseData[0] = time;
-      noiseData[1] = state.noiseAmount;
+      // Cubic curve so slider gives fine control at low values
+      const na = state.noiseAmount;
+      noiseData[1] = na * na * na;
       noiseData[2] = SIM_RES;
+      noiseData[3] = state.noiseFrequency;
+      noiseData[4] = state.noiseSpeed;
       device.queue.writeBuffer(noiseBuf, 0, noiseData);
       const p = enc.beginComputePass();
       p.setPipeline(curlNoisePipe.pipeline);
@@ -1821,6 +1858,12 @@ async function main() {
   wireSlider('clickStrength', 'clickStrength');
   wireSlider('injectorIntensity', 'injectorIntensity');
   wireSlider('noiseAmount', 'noiseAmount');
+  wireSlider('noiseFrequency', 'noiseFrequency');
+  wireSlider('noiseSpeed', 'noiseSpeed');
+  wireSlider('injectorSize', 'injectorSize');
+  wireSlider('injectorCount', 'injectorCount', v => Math.round(v));
+  wireSlider('injectorSpeed', 'injectorSpeed');
+  wireSlider('burstCount', 'burstCount', v => Math.round(v));
   wireSlider('curlStrength', 'curlStrength', v => Math.round(v));
   wireSlider('splatForce', 'splatForce', v => Math.round(v));
   wireSlider('velDissipation', 'velDissipation', v => v.toFixed(3));
