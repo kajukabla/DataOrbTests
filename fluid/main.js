@@ -9,6 +9,7 @@ const state = {
   particleCount: 4194304,   // 4M default
   particleSize: 0.6,
   glintBrightness: 1.2,
+  prismaticAmount: 1.2,
   sheenStrength: 1.5,
   splatForce: 6000,
   curlStrength: 15,
@@ -481,7 +482,13 @@ struct Particle {
 };
 
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
-@group(0) @binding(1) var<uniform> screen: vec4f;
+
+struct PParams {
+  screen: vec4f,
+  extra: vec4f,
+};
+@group(0) @binding(1) var<uniform> pp: PParams;
+
 @group(0) @binding(2) var dyeTex: texture_2d<f32>;
 @group(0) @binding(3) var dyeSamp: sampler;
 
@@ -526,8 +533,8 @@ fn main(
   let qp = quadPos[vi];
   let localUV = qp * 0.5 + 0.5;
 
-  let screenSize = screen.xy;
-  let pixelSize = screen.z;
+  let screenSize = pp.screen.xy;
+  let pixelSize = pp.screen.z;
   let clipSize = vec2f(pixelSize * 2.0 / screenSize.x, pixelSize * 2.0 / screenSize.y);
   let clipPos = vec2f(part.posX, part.posY) * 2.0 - 1.0;
 
@@ -572,18 +579,22 @@ fn main(
   let h4 = f32(pcgVert(seedU + 419u)) / 4294967295.0;
   var tint = grainTintVert(h3);
 
-  // Prismatic flash on ~10% of bright particles
-  if (h4 > 0.9 && glint > 0.1) {
+  // Prismatic flash — amount controls frequency + mix strength
+  let pa = pp.extra.x;
+  let prisThreshold = 1.0 - pa * 0.125;
+  let prisMix = clamp(pa * 0.45, 0.0, 0.9);
+  let glintThresh = max(0.15 - pa * 0.05, 0.02);
+  if (h4 > prisThreshold && glint > glintThresh) {
     let hueAngle = h4 * 6.283;
     let prismatic = vec3f(
       0.5 + 0.5 * cos(hueAngle),
       0.5 + 0.5 * cos(hueAngle + 2.094),
       0.5 + 0.5 * cos(hueAngle + 4.189)
     );
-    tint = mix(tint, prismatic, 0.5);
+    tint = mix(tint, prismatic, prisMix);
   }
 
-  let brightness = glint * screen.w + ambient;
+  let brightness = glint * pp.screen.w + ambient;
   out.color = tint * brightness * fluidGate;
   out.alpha = brightness * fluidGate;
   out.pos = vec4f(clipPos + qp * clipSize, 0.0, 1.0);
@@ -593,7 +604,11 @@ fn main(
 
 // ─── Particle Render Fragment Shader ─────────────────────────────────────────
 const particleRenderFrag = /* wgsl */`
-@group(0) @binding(1) var<uniform> screen: vec4f;
+struct PParams {
+  screen: vec4f,
+  extra: vec4f,
+};
+@group(0) @binding(1) var<uniform> pp: PParams;
 
 struct FSIn {
   @builtin(position) fragPos: vec4f,
@@ -605,7 +620,7 @@ struct FSIn {
 @fragment
 fn main(in: FSIn) -> @location(0) vec4f {
   // Sphere mask (safety for large particle sizes)
-  let screenSize = screen.xy;
+  let screenSize = pp.screen.xy;
   let uv = vec2f(in.fragPos.x, screenSize.y - in.fragPos.y) / screenSize;
   let aspect = screenSize.x / screenSize.y;
   let centered = uv - vec2f(0.5, 0.5);
@@ -877,11 +892,11 @@ async function main() {
   }
 
   // ─── Split screen uniforms: particle UB + display UB ───────────────────
-  // particleUB: [width, height, particleSize, glintBrightness]
+  // particleUB: [width, height, particleSize, glintBrightness, prismaticAmount, pad, pad, pad]
   const particleUB = device.createBuffer({
-    size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const particleUBData = new Float32Array(4);
+  const particleUBData = new Float32Array(8);
 
   // displayUB: [width, height, time, sheenStrength]
   const displayUB = device.createBuffer({
@@ -1274,6 +1289,7 @@ async function main() {
     particleUBData[1] = canvas.height;
     particleUBData[2] = state.particleSize;
     particleUBData[3] = state.glintBrightness;
+    particleUBData[4] = state.prismaticAmount;
     device.queue.writeBuffer(particleUB, 0, particleUBData);
 
     displayUBData[0] = canvas.width;
@@ -1554,6 +1570,7 @@ async function main() {
 
   wireSlider('particleSize', 'particleSize');
   wireSlider('glintBrightness', 'glintBrightness');
+  wireSlider('prismaticAmount', 'prismaticAmount');
   wireSlider('sheenStrength', 'sheenStrength');
   wireSlider('curlStrength', 'curlStrength', v => Math.round(v));
   wireSlider('splatForce', 'splatForce', v => Math.round(v));
