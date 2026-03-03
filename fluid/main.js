@@ -9,7 +9,7 @@ const state = {
   particleCount: 4194304,   // 4M default
   particleSize: 0.6,
   glintBrightness: 1.2,
-  prismaticAmount: 1.2,
+  prismaticAmount: 5.0,
   sheenStrength: 1.5,
   splatForce: 6000,
   curlStrength: 15,
@@ -579,24 +579,30 @@ fn main(
   let h4 = f32(pcgVert(seedU + 419u)) / 4294967295.0;
   var tint = grainTintVert(h3);
 
-  // Prismatic flash — amount controls frequency + mix strength
+  // Prismatic iridescence — adds rainbow color variety
   let pa = pp.extra.x;
-  let prisThreshold = 1.0 - pa * 0.125;
-  let prisMix = clamp(pa * 0.45, 0.0, 0.9);
-  let glintThresh = max(0.15 - pa * 0.05, 0.02);
-  if (h4 > prisThreshold && glint > glintThresh) {
-    let hueAngle = h4 * 6.283;
-    let prismatic = vec3f(
-      0.5 + 0.5 * cos(hueAngle),
-      0.5 + 0.5 * cos(hueAngle + 2.094),
-      0.5 + 0.5 * cos(hueAngle + 4.189)
-    );
+  let hueAngle = h4 * 6.283;
+  let prismatic = vec3f(
+    0.5 + 0.5 * cos(hueAngle),
+    0.5 + 0.5 * cos(hueAngle + 2.094),
+    0.5 + 0.5 * cos(hueAngle + 4.189)
+  );
+
+  // Tint shift: more particles get rainbow tint as pa increases (decoupled from glint)
+  let prisThreshold = max(1.0 - pa * 0.05, 0.0);
+  let prisMix = clamp(pa * 0.05, 0.0, 1.0);
+  if (h4 > prisThreshold) {
     tint = mix(tint, prismatic, prisMix);
   }
 
+  // Iridescent ambient: colored glow visible even on non-glinting particles
+  let diffuse = max(dot(n, lightDir), 0.0);
+  let iriBoost = clamp(pa * 0.015, 0.0, 0.3);
+  let iriAmbient = prismatic * iriBoost * diffuse;
+
   let brightness = glint * pp.screen.w + ambient;
-  out.color = tint * brightness * fluidGate;
-  out.alpha = brightness * fluidGate;
+  out.color = (tint * brightness + iriAmbient) * fluidGate;
+  out.alpha = (brightness + iriBoost * diffuse) * fluidGate;
   out.pos = vec4f(clipPos + qp * clipSize, 0.0, 1.0);
   return out;
 }
