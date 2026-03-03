@@ -538,12 +538,14 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   }
 
   // Glitter color: blend base→accent based on dye density
+  // blend controls transition sharpness: 0=gradual, 1=sharp cutoff
   let glitBase = pp.extra.yzw;
   let glitAccent = pp.extra2.xyz;
-  let blend = pp.extra2.w;  // 0=all base, 0.5=gradient, 1=all accent
-  let densityT = smoothstep(0.05, 0.8, intensity);
-  let biasedT = clamp(densityT + 1.0 - blend * 2.0, 0.0, 1.0);
-  let glitCol = mix(glitAccent, glitBase, biasedT);
+  let blend = pp.extra2.w;
+  let gLo = mix(0.0, 0.35, blend);
+  let gHi = mix(1.0, 0.4, blend);
+  let densityT = smoothstep(gLo, gHi, intensity);
+  let glitCol = mix(glitAccent, glitBase, densityT);
   tint *= glitCol;
 
   let brightness = glint * pp.screen.w + ambient;
@@ -728,12 +730,14 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let intensity = dot(raw, vec3f(0.3, 0.6, 0.1));
 
   // Fluid base — gradient from accent (thin/wispy) to base (dense)
+  // Color blend controls transition sharpness: 0=gradual, 1=sharp cutoff
   let baseCol = du.baseColor.rgb;
   let accentCol = du.accentColor.rgb;
-  let blend = du.accentColor.w;  // 0=all base, 0.5=gradient, 1=all accent
-  let densityT = smoothstep(0.05, 0.8, intensity);
-  let biasedT = clamp(densityT + 1.0 - blend * 2.0, 0.0, 1.0);
-  let fluidCol = mix(accentCol, baseCol, biasedT);
+  let blend = du.accentColor.w;
+  let lo = mix(0.0, 0.35, blend);
+  let hi = mix(1.0, 0.4, blend);
+  let densityT = smoothstep(lo, hi, intensity);
+  let fluidCol = mix(accentCol, baseCol, densityT);
   var color = fluidCol * intensity * 0.25;
 
   // Surface gradient for multi-lobe metallic sheen
