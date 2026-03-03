@@ -482,6 +482,28 @@ fn randF(seed: u32) -> f32 {
   return f32(pcg(seed)) / 4294967295.0;
 }
 
+fn linearToOklab(c: vec3f) -> vec3f {
+  let l = pow(max(0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b, 0.0), 1.0 / 3.0);
+  let m = pow(max(0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b, 0.0), 1.0 / 3.0);
+  let s = pow(max(0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b, 0.0), 1.0 / 3.0);
+  return vec3f(
+    0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+  );
+}
+
+fn oklabToLinear(lab: vec3f) -> vec3f {
+  let l = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+  let m = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+  let s = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+  return max(vec3f(
+    4.0767416621 * l*l*l - 3.3077115913 * m*m*m + 0.2309699292 * s*s*s,
+   -1.2684380046 * l*l*l + 2.6097574011 * m*m*m - 0.3413193965 * s*s*s,
+   -0.0041960863 * l*l*l - 0.7034186147 * m*m*m + 1.7076147010 * s*s*s
+  ), vec3f(0.0));
+}
+
 fn grainTint(h: f32) -> vec3f {
   if (h < 0.6) { return mix(vec3f(1.0, 0.75, 0.3), vec3f(1.0, 0.85, 0.45), h / 0.6); }
   if (h < 0.75) { return vec3f(1.0, 0.6, 0.25); }
@@ -635,7 +657,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let gLo = mix(0.0, 0.35, blend);
   let gHi = mix(1.0, 0.4, blend);
   let densityT = smoothstep(gLo, gHi, intensity);
-  let glitCol = mix(glitAccent, glitBase, densityT);
+  let glitCol = oklabToLinear(mix(linearToOklab(glitAccent), linearToOklab(glitBase), densityT));
   tint *= glitCol;
 
   let brightness = glint * pp.screen.w + ambient;
@@ -795,6 +817,28 @@ fn aces(x: vec3f) -> vec3f {
   return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3f(0.0), vec3f(1.0));
 }
 
+fn linearToOklab(c: vec3f) -> vec3f {
+  let l = pow(max(0.4122214708 * c.r + 0.5363325363 * c.g + 0.0514459929 * c.b, 0.0), 1.0 / 3.0);
+  let m = pow(max(0.2119034982 * c.r + 0.6806995451 * c.g + 0.1073969566 * c.b, 0.0), 1.0 / 3.0);
+  let s = pow(max(0.0883024619 * c.r + 0.2817188376 * c.g + 0.6299787005 * c.b, 0.0), 1.0 / 3.0);
+  return vec3f(
+    0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s
+  );
+}
+
+fn oklabToLinear(lab: vec3f) -> vec3f {
+  let l = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
+  let m = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
+  let s = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
+  return max(vec3f(
+    4.0767416621 * l*l*l - 3.3077115913 * m*m*m + 0.2309699292 * s*s*s,
+   -1.2684380046 * l*l*l + 2.6097574011 * m*m*m - 0.3413193965 * s*s*s,
+   -0.0041960863 * l*l*l - 0.7034186147 * m*m*m + 1.7076147010 * s*s*s
+  ), vec3f(0.0));
+}
+
 @fragment
 fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let screenSize = du.screen.xy;
@@ -827,7 +871,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let lo = mix(0.0, 0.35, blend);
   let hi = mix(1.0, 0.4, blend);
   let densityT = smoothstep(lo, hi, intensity);
-  let fluidCol = mix(accentCol, baseCol, densityT);
+  let fluidCol = oklabToLinear(mix(linearToOklab(accentCol), linearToOklab(baseCol), densityT));
   var color = fluidCol * intensity * 0.25;
 
   // Surface gradient for multi-lobe metallic sheen
