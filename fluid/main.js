@@ -8,10 +8,14 @@ const PARTICLE_WG = 256;
 const state = {
   particleCount: 4194304,   // 4M default
   particleSize: 0.6,
+  sizeRandomness: 0.3,
   glintBrightness: 1.2,
   prismaticAmount: 5.0,
   baseColor: [1.0, 0.55, 0.1],
+  accentColor: [0.15, 0.3, 0.8],
   glitterColor: [1.0, 1.0, 1.0],
+  glitterAccent: [0.3, 0.5, 1.0],
+  colorBlend: 0.5,
   sheenStrength: 1.5,
   splatForce: 6000,
   curlStrength: 15,
@@ -367,6 +371,8 @@ struct Particle {
 struct PParams {
   screen: vec4f,
   extra: vec4f,
+  extra2: vec4f,
+  extra3: vec4f,
 };
 @group(0) @binding(5) var<uniform> pp: PParams;
 @group(0) @binding(6) var<storage, read_write> colors: array<vec4f>;
@@ -526,7 +532,14 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     tint = mix(tint, prismatic, prisMix);
   }
 
-  let glitCol = pp.extra.yzw;
+  // Glitter color: blend base→accent based on dye density
+  let glitBase = pp.extra.yzw;
+  let glitAccent = pp.extra2.xyz;
+  let blend = pp.extra2.w;  // 0=all base, 1=all accent
+  let gLo = max(0.0, 0.5 - blend * 0.5);
+  let gHi = min(1.0, 1.5 - blend * 0.5);
+  let densityT = smoothstep(gLo, gHi, intensity);
+  let glitCol = mix(glitAccent, glitBase, densityT);
   tint *= glitCol;
 
   let brightness = glint * pp.screen.w + ambient;
@@ -553,6 +566,8 @@ struct Particle {
 struct PParams {
   screen: vec4f,
   extra: vec4f,
+  extra2: vec4f,
+  extra3: vec4f,
 };
 @group(0) @binding(1) var<uniform> pp: PParams;
 @group(0) @binding(2) var<storage, read> colors: array<vec4f>;
@@ -596,7 +611,11 @@ fn main(
   let localUV = qp * 0.5 + 0.5;
 
   let screenSize = pp.screen.xy;
-  let pixelSize = pp.screen.z;
+  let basePixelSize = pp.screen.z;
+  let sizeRand = pp.extra3.x;
+  // Per-particle size variation: seed drives a 0.2..1.8 range scaled by randomness
+  let sizeScale = mix(1.0, 0.2 + part.seed * 1.6, sizeRand);
+  let pixelSize = basePixelSize * sizeScale;
   let aspect = screenSize.x / screenSize.y;
   let clipSize = vec2f(pixelSize * 2.0 / screenSize.x, pixelSize * 2.0 / screenSize.y);
 
@@ -619,6 +638,8 @@ const particleRenderFrag = /* wgsl */`
 struct PParams {
   screen: vec4f,
   extra: vec4f,
+  extra2: vec4f,
+  extra3: vec4f,
 };
 @group(0) @binding(1) var<uniform> pp: PParams;
 
@@ -666,8 +687,9 @@ const displayShaderFrag = /* wgsl */`
 @group(0) @binding(1) var samp: sampler;
 
 struct DisplayUniforms {
-  screen: vec4f,    // xy=screenSize, z=time, w=sheenStrength
-  baseColor: vec4f, // xyz=baseColor RGB
+  screen: vec4f,      // xy=screenSize, z=time, w=sheenStrength
+  baseColor: vec4f,   // xyz=baseColor RGB
+  accentColor: vec4f, // xyz=accentColor RGB, w=colorBlend
 };
 @group(0) @binding(2) var<uniform> du: DisplayUniforms;
 
@@ -700,9 +722,15 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let raw = textureSampleLevel(dyeTex, samp, uv, 0.0).rgb;
   let intensity = dot(raw, vec3f(0.3, 0.6, 0.1));
 
-  // Fluid base — color from uniform, rich where fluid is dense
+  // Fluid base — gradient from accent (thin/wispy) to base (dense)
   let baseCol = du.baseColor.rgb;
-  var color = baseCol * intensity * 0.25;
+  let accentCol = du.accentColor.rgb;
+  let blend = du.accentColor.w;  // 0=all base, 1=all accent
+  let lo = max(0.0, 0.5 - blend * 0.5);
+  let hi = min(1.0, 1.5 - blend * 0.5);
+  let densityT = smoothstep(lo, hi, intensity);
+  let fluidCol = mix(accentCol, baseCol, densityT);
+  var color = fluidCol * intensity * 0.25;
 
   // Surface gradient for multi-lobe metallic sheen
   let texel = vec2f(1.0 / 512.0);
@@ -918,17 +946,17 @@ async function main() {
   }
 
   // ─── Split screen uniforms: particle UB + display UB ───────────────────
-  // particleUB: [width, height, particleSize, glintBrightness, prismaticAmount, pad, pad, pad]
+  // particleUB: [width, height, particleSize, glintBrightness, prismaticAmount, glitR, glitG, glitB, accentGlitR, accentGlitG, accentGlitB, colorBlend, sizeRandomness, pad, pad, pad]
   const particleUB = device.createBuffer({
-    size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const particleUBData = new Float32Array(8);
+  const particleUBData = new Float32Array(16);
 
-  // displayUB: [width, height, time, sheenStrength, baseR, baseG, baseB, pad]
+  // displayUB: [width, height, time, sheenStrength, baseR, baseG, baseB, pad, accentR, accentG, accentB, pad]
   const displayUB = device.createBuffer({
-    size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const displayUBData = new Float32Array(8);
+  const displayUBData = new Float32Array(12);
 
   // ─── Pipeline helpers ───────────────────────────────────────────────────
   function buildPipeline(code, label, bindingDescs) {
@@ -1343,6 +1371,11 @@ async function main() {
     particleUBData[5] = state.glitterColor[0];
     particleUBData[6] = state.glitterColor[1];
     particleUBData[7] = state.glitterColor[2];
+    particleUBData[8] = state.glitterAccent[0];
+    particleUBData[9] = state.glitterAccent[1];
+    particleUBData[10] = state.glitterAccent[2];
+    particleUBData[11] = state.colorBlend;
+    particleUBData[12] = state.sizeRandomness;
     device.queue.writeBuffer(particleUB, 0, particleUBData);
 
     displayUBData[0] = canvas.width;
@@ -1352,6 +1385,10 @@ async function main() {
     displayUBData[4] = state.baseColor[0];
     displayUBData[5] = state.baseColor[1];
     displayUBData[6] = state.baseColor[2];
+    displayUBData[8] = state.accentColor[0];
+    displayUBData[9] = state.accentColor[1];
+    displayUBData[10] = state.accentColor[2];
+    displayUBData[11] = state.colorBlend;
     device.queue.writeBuffer(displayUB, 0, displayUBData);
 
     // Collect splats for this frame
@@ -1401,12 +1438,13 @@ async function main() {
     if (pointer.moved && pointer.down) {
       const speed = Math.sqrt(pointer.dx * pointer.dx + pointer.dy * pointer.dy);
       const col = palette(time * 0.3, 4);
+      // Strong click effect — 3x force, 4x radius, extra dye intensity
       splats.push({
         x: pointer.x, y: pointer.y,
-        dx: pointer.dx * state.splatForce,
-        dy: pointer.dy * state.splatForce,
-        r: col[0], g: col[1], b: col[2],
-        radius: state.splatRadius * (1.0 + speed * 20),
+        dx: pointer.dx * state.splatForce * 3.0,
+        dy: pointer.dy * state.splatForce * 3.0,
+        r: col[0] * 2.0, g: col[1] * 2.0, b: col[2] * 2.0,
+        radius: state.splatRadius * (4.0 + speed * 40),
       });
       pointer.moved = false;
     } else if (pointer.moved) {
@@ -1628,6 +1666,7 @@ async function main() {
 
   wireSlider('particleSize', 'particleSize');
   wireSlider('glintBrightness', 'glintBrightness');
+  wireSlider('sizeRandomness', 'sizeRandomness');
   wireSlider('prismaticAmount', 'prismaticAmount');
 
   // Wire color pickers
@@ -1649,7 +1688,10 @@ async function main() {
     });
   }
   wireColor('baseColor', 'baseColor');
+  wireColor('accentColor', 'accentColor');
   wireColor('glitterColor', 'glitterColor');
+  wireColor('glitterAccent', 'glitterAccent');
+  wireSlider('colorBlend', 'colorBlend', v => v.toFixed(2));
 
   wireSlider('sheenStrength', 'sheenStrength');
   wireSlider('curlStrength', 'curlStrength', v => Math.round(v));

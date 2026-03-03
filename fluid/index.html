@@ -140,12 +140,28 @@
         <input type="range" id="glintBrightness" min="0.1" max="5.0" step="0.1" value="1.2">
       </div>
       <div class="setting-group">
+        <label>Size Randomness <span class="val" id="sizeRandomnessVal">0.3</span></label>
+        <input type="range" id="sizeRandomness" min="0.0" max="1.0" step="0.05" value="0.3">
+      </div>
+      <div class="setting-group">
         <label>Base Color</label>
         <input type="color" id="baseColor" value="#ff8c1a">
       </div>
       <div class="setting-group">
-        <label>Glitter Color</label>
+        <label>Accent Color</label>
+        <input type="color" id="accentColor" value="#264dcc">
+      </div>
+      <div class="setting-group">
+        <label>Glitter Base</label>
         <input type="color" id="glitterColor" value="#ffffff">
+      </div>
+      <div class="setting-group">
+        <label>Glitter Accent</label>
+        <input type="color" id="glitterAccent" value="#4d80ff">
+      </div>
+      <div class="setting-group">
+        <label>Color Blend <span class="val" id="colorBlendVal">0.5</span></label>
+        <input type="range" id="colorBlend" min="0.0" max="1.0" step="0.05" value="0.5">
       </div>
       <div class="setting-group">
         <label>Prismatic Amount <span class="val" id="prismaticAmountVal">5.0</span></label>
@@ -153,7 +169,7 @@
       </div>
       <div class="setting-group">
         <label>Sheen Strength <span class="val" id="sheenStrengthVal">1.5</span></label>
-        <input type="range" id="sheenStrength" min="0.0" max="3.0" step="0.1" value="1.5">
+        <input type="range" id="sheenStrength" min="0.0" max="100.0" step="0.5" value="1.5">
       </div>
       <div class="setting-group">
         <label>Curl Strength <span class="val" id="curlStrengthVal">15</span></label>
