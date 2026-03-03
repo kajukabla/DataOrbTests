@@ -1257,8 +1257,8 @@ async function main() {
   // Convert screen coords to simulation UV (aspect-corrected 1:1 square)
   function screenToSimUV(clientX, clientY) {
     const rect = canvas.getBoundingClientRect();
-    const rawX = clientX / rect.width;
-    const rawY = 1.0 - clientY / rect.height;
+    const rawX = (clientX - rect.left) / rect.width;
+    const rawY = 1.0 - (clientY - rect.top) / rect.height;
     const aspect = rect.width / rect.height;
     const simX = (rawX - 0.5) * Math.max(aspect, 1.0) + 0.5;
     const simY = (rawY - 0.5) * Math.max(1.0 / aspect, 1.0) + 0.5;
@@ -1454,23 +1454,25 @@ async function main() {
       }
     }
 
-    // Curl noise injection — random velocity-only splats for organic turbulence
+    // Curl noise injection — velocity + subtle dye for sustained organic turbulence
     const noiseA = state.noiseAmount;
     if (noiseA > 0.01) {
-      const noiseCount = Math.ceil(noiseA * 6);
+      const noiseCount = Math.ceil(noiseA * 8);
       for (let i = 0; i < noiseCount; i++) {
-        const a = time * 0.7 + i * 2.399;  // golden angle spacing
-        const r = 0.1 + Math.abs(Math.sin(a * 3.7 + time)) * 0.25;
+        const a = time * 0.5 + i * 2.399;  // golden angle spacing
+        const r = 0.08 + Math.abs(Math.sin(a * 3.7 + time * 0.8)) * 0.28;
         const px = 0.5 + Math.cos(a) * r;
         const py = 0.5 + Math.sin(a) * r;
-        const va = a * 1.3 + time * 2.1;
-        const force = noiseA * 2000;
+        const va = a * 1.7 + time * 1.3;
+        const force = noiseA * 3000;
+        const col = palette(a * 0.15 + time * 0.05, 4);
+        const dyeStr = noiseA * 0.4 * dyeRamp;
         splats.push({
           x: px, y: py,
           dx: Math.cos(va) * force,
           dy: Math.sin(va) * force,
-          r: 0, g: 0, b: 0,
-          radius: state.splatRadius * (1.5 + noiseA * 3),
+          r: col[0] * dyeStr, g: col[1] * dyeStr, b: col[2] * dyeStr,
+          radius: state.splatRadius * (2.0 + noiseA * 4),
         });
       }
     }
@@ -1484,8 +1486,8 @@ async function main() {
     if (pointer.moved && pointer.down && inSphere) {
       const speed = Math.sqrt(pointer.dx * pointer.dx + pointer.dy * pointer.dy);
       const col = palette(time * 0.3, 4);
-      const str = state.clickStrength * 6.0;   // 0→0x, 0.5→3x, 1→6x force
-      const sz = 1.0 + state.clickSize * 8.0;  // 0→1x, 0.5→5x, 1→9x radius
+      const str = state.clickStrength * 6.0;
+      const sz = 1.0 + state.clickSize * 8.0;
       splats.push({
         x: pointer.x, y: pointer.y,
         dx: pointer.dx * state.splatForce * str,
@@ -1493,20 +1495,8 @@ async function main() {
         r: col[0] * str, g: col[1] * str, b: col[2] * str,
         radius: state.splatRadius * sz * (1.0 + speed * 20),
       });
-      pointer.moved = false;
-    } else if (pointer.moved && inSphere) {
-      const str = state.clickStrength * 2.0;
-      splats.push({
-        x: pointer.x, y: pointer.y,
-        dx: pointer.dx * state.splatForce * str,
-        dy: pointer.dy * state.splatForce * str,
-        r: 0, g: 0, b: 0,
-        radius: state.splatRadius * (1.0 + state.clickSize * 4.0),
-      });
-      pointer.moved = false;
-    } else if (pointer.moved) {
-      pointer.moved = false;
     }
+    if (pointer.moved) { pointer.moved = false; }
 
     // ── Write all splat params to pre-allocated buffers ──
     const activeSplats = splats.slice(0, MAX_SPLATS);
