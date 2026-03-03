@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fluid Simulation</title>
+  <style>
+    * { margin: 0; padding: 0; }
+    body { background: #000; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #error {
+      display: none;
+      position: fixed; inset: 0;
+      color: #f88; background: #111;
+      font: 1.2rem/1.6 monospace;
+      padding: 2rem;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="error"></div>
+  <script>
+    (function() {
+      function send(level, args) {
+        try {
+          fetch('/log', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ level, args: args.map(a =>
+              typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)
+            )}),
+          }).catch(() => {});
+        } catch {}
+      }
+      ['log', 'warn', 'error'].forEach(level => {
+        const orig = console[level].bind(console);
+        console[level] = (...args) => { orig(...args); send(level, args); };
+      });
+      window.addEventListener('error', e => send('error', [`Uncaught: ${e.message} at ${e.filename}:${e.lineno}`]));
+      window.addEventListener('unhandledrejection', e => send('error', [`Unhandled rejection: ${e.reason}`]));
+    })();
+  </script>
+  <script type="module" src="main.js"></script>
+</body>
+</html>
