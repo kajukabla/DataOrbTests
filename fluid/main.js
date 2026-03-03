@@ -1249,17 +1249,27 @@ async function main() {
 
   // ─── Mouse / Pointer State ──────────────────────────────────────────────
   const pointer = { x: 0.5, y: 0.5, dx: 0, dy: 0, down: false, moved: false };
+
+  // Convert screen coords to simulation UV (aspect-corrected 1:1 square)
+  function screenToSimUV(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const rawX = clientX / rect.width;
+    const rawY = 1.0 - clientY / rect.height;
+    const aspect = rect.width / rect.height;
+    const simX = (rawX - 0.5) * Math.max(aspect, 1.0) + 0.5;
+    const simY = (rawY - 0.5) * Math.max(1.0 / aspect, 1.0) + 0.5;
+    return [simX, simY];
+  }
+
   canvas.addEventListener('pointerdown', e => {
     pointer.down = true;
-    const rect = canvas.getBoundingClientRect();
-    pointer.x = e.clientX / rect.width;
-    pointer.y = 1.0 - e.clientY / rect.height;
+    const [sx, sy] = screenToSimUV(e.clientX, e.clientY);
+    pointer.x = sx;
+    pointer.y = sy;
   });
   canvas.addEventListener('pointerup', () => { pointer.down = false; });
   canvas.addEventListener('pointermove', e => {
-    const rect = canvas.getBoundingClientRect();
-    const nx = e.clientX / rect.width;
-    const ny = 1.0 - e.clientY / rect.height;
+    const [nx, ny] = screenToSimUV(e.clientX, e.clientY);
     pointer.dx = nx - pointer.x;
     pointer.dy = ny - pointer.y;
     pointer.x = nx;
@@ -1434,11 +1444,15 @@ async function main() {
       }
     }
 
-    // Mouse splat
-    if (pointer.moved && pointer.down) {
+    // Mouse splat — clamp to sphere
+    const SPHERE_R = 0.42;
+    const pdx = pointer.x - 0.5, pdy = pointer.y - 0.5;
+    const pDist = Math.sqrt(pdx * pdx + pdy * pdy);
+    const inSphere = pDist < SPHERE_R;
+
+    if (pointer.moved && pointer.down && inSphere) {
       const speed = Math.sqrt(pointer.dx * pointer.dx + pointer.dy * pointer.dy);
       const col = palette(time * 0.3, 4);
-      // Strong click effect — 3x force, 4x radius, extra dye intensity
       splats.push({
         x: pointer.x, y: pointer.y,
         dx: pointer.dx * state.splatForce * 3.0,
@@ -1447,7 +1461,7 @@ async function main() {
         radius: state.splatRadius * (4.0 + speed * 40),
       });
       pointer.moved = false;
-    } else if (pointer.moved) {
+    } else if (pointer.moved && inSphere) {
       // Gentle nudge without dye when hovering
       splats.push({
         x: pointer.x, y: pointer.y,
@@ -1456,6 +1470,8 @@ async function main() {
         r: 0, g: 0, b: 0,
         radius: state.splatRadius,
       });
+      pointer.moved = false;
+    } else if (pointer.moved) {
       pointer.moved = false;
     }
 
