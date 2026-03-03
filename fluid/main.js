@@ -362,6 +362,14 @@ struct Particle {
 };
 
 @group(0) @binding(3) var<storage, read_write> particles: array<Particle>;
+@group(0) @binding(4) var dyeTex: texture_2d<f32>;
+
+struct PParams {
+  screen: vec4f,
+  extra: vec4f,
+};
+@group(0) @binding(5) var<uniform> pp: PParams;
+@group(0) @binding(6) var<storage, read_write> colors: array<vec4f>;
 
 fn pcg(inp: u32) -> u32 {
   var state = inp * 747796405u + 2891336453u;
@@ -371,6 +379,15 @@ fn pcg(inp: u32) -> u32 {
 
 fn randF(seed: u32) -> f32 {
   return f32(pcg(seed)) / 4294967295.0;
+}
+
+fn grainTint(h: f32) -> vec3f {
+  if (h < 0.6) { return mix(vec3f(1.0, 0.75, 0.3), vec3f(1.0, 0.85, 0.45), h / 0.6); }
+  if (h < 0.75) { return vec3f(1.0, 0.6, 0.25); }
+  if (h < 0.85) { return vec3f(1.0, 0.88, 0.55); }
+  if (h < 0.92) { return vec3f(0.85, 0.92, 1.0); }
+  if (h < 0.96) { return vec3f(1.0, 0.75, 0.88); }
+  return vec3f(0.75, 1.0, 0.82);
 }
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
@@ -466,6 +483,54 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   }
 
   particles[idx] = part;
+
+  // ── Color computation (moved from vertex shader) ──
+  let particleUV = vec2f(part.posX, part.posY);
+  let centered = particleUV - vec2f(0.5, 0.5);
+  if (length(centered) > 0.42) {
+    colors[idx] = vec4f(0.0);
+    return;
+  }
+
+  let dye = textureSampleLevel(dyeTex, samp, particleUV, 0.0).rgb;
+  let intensity = dot(dye, vec3f(0.3, 0.6, 0.1));
+  let fluidGate = smoothstep(0.0, 0.15, intensity);
+  if (fluidGate < 0.01) {
+    colors[idx] = vec4f(0.0);
+    return;
+  }
+
+  let n = normalize(vec3f(part.normalX, part.normalY, part.normalZ));
+  let lightDir = normalize(vec3f(0.4, 0.6, 1.0));
+  let viewDir = vec3f(0.0, 0.0, 1.0);
+  let reflected = reflect(-lightDir, n);
+  let specAngle = dot(reflected, viewDir);
+  let glint = smoothstep(0.92, 1.0, specAngle);
+  let ambient = max(dot(n, lightDir), 0.0) * 0.02;
+
+  let seedU = u32(part.seed * 4294967295.0);
+  let ch3 = f32(pcg(seedU + 269u)) / 4294967295.0;
+  let ch4 = f32(pcg(seedU + 419u)) / 4294967295.0;
+  var tint = grainTint(ch3);
+
+  let pa = pp.extra.x;
+  let hueAngle = ch4 * 6.283;
+  let prismatic = vec3f(
+    0.5 + 0.5 * cos(hueAngle),
+    0.5 + 0.5 * cos(hueAngle + 2.094),
+    0.5 + 0.5 * cos(hueAngle + 4.189)
+  );
+  let prisThreshold = max(1.0 - pa * 0.05, 0.0);
+  let prisMix = clamp(pa * 0.06, 0.0, 1.0);
+  if (ch4 > prisThreshold) {
+    tint = mix(tint, prismatic, prisMix);
+  }
+
+  let glitCol = pp.extra.yzw;
+  tint *= glitCol;
+
+  let brightness = glint * pp.screen.w + ambient;
+  colors[idx] = vec4f(tint * brightness * fluidGate, brightness * fluidGate);
 }
 `;
 }
@@ -490,24 +555,7 @@ struct PParams {
   extra: vec4f,
 };
 @group(0) @binding(1) var<uniform> pp: PParams;
-
-@group(0) @binding(2) var dyeTex: texture_2d<f32>;
-@group(0) @binding(3) var dyeSamp: sampler;
-
-fn pcgVert(inp: u32) -> u32 {
-  var state = inp * 747796405u + 2891336453u;
-  let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-  return (word >> 22u) ^ word;
-}
-
-fn grainTintVert(h: f32) -> vec3f {
-  if (h < 0.6) { return mix(vec3f(1.0, 0.75, 0.3), vec3f(1.0, 0.85, 0.45), h / 0.6); }
-  if (h < 0.75) { return vec3f(1.0, 0.6, 0.25); }
-  if (h < 0.85) { return vec3f(1.0, 0.88, 0.55); }
-  if (h < 0.92) { return vec3f(0.85, 0.92, 1.0); }
-  if (h < 0.96) { return vec3f(1.0, 0.75, 0.88); }
-  return vec3f(0.75, 1.0, 0.82);
-}
+@group(0) @binding(2) var<storage, read> colors: array<vec4f>;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -521,14 +569,26 @@ fn main(
   @builtin(vertex_index) vi: u32,
   @builtin(instance_index) ii: u32
 ) -> VSOut {
+  let col = colors[ii];
+
+  var out: VSOut;
+
+  // Early cull: pre-computed alpha <= 0
+  if (col.a <= 0.0) {
+    out.pos = vec4f(2.0, 2.0, 0.0, 1.0);
+    out.color = vec3f(0.0);
+    out.alpha = 0.0;
+    out.localUV = vec2f(0.0);
+    return out;
+  }
+
   let part = particles[ii];
 
-  var quadPos = array<vec2f, 6>(
+  // Triangle-strip quad: 4 vertices
+  var quadPos = array<vec2f, 4>(
     vec2f(-1.0, -1.0),
     vec2f( 1.0, -1.0),
     vec2f(-1.0,  1.0),
-    vec2f(-1.0,  1.0),
-    vec2f( 1.0, -1.0),
     vec2f( 1.0,  1.0)
   );
 
@@ -540,76 +600,16 @@ fn main(
   let aspect = screenSize.x / screenSize.y;
   let clipSize = vec2f(pixelSize * 2.0 / screenSize.x, pixelSize * 2.0 / screenSize.y);
 
-  // Aspect-correct clip position so simulation renders as centered 1:1 square
   let rawClip = vec2f(part.posX, part.posY) * 2.0 - 1.0;
   let clipPos = vec2f(
     rawClip.x / max(aspect, 1.0),
     rawClip.y / max(1.0 / aspect, 1.0)
   );
 
-  var out: VSOut;
-  out.localUV = localUV;
-
-  // ── Early cull: sphere mask in simulation UV (1:1) ──
-  let particleUV = vec2f(part.posX, part.posY);
-  let centered = particleUV - vec2f(0.5, 0.5);
-  if (length(centered) > 0.42) {
-    out.pos = vec4f(2.0, 2.0, 0.0, 1.0);
-    out.color = vec3f(0.0);
-    out.alpha = 0.0;
-    return out;
-  }
-
-  // ── Early cull: fluid gate ──
-  let dye = textureSampleLevel(dyeTex, dyeSamp, particleUV, 0.0).rgb;
-  let intensity = dot(dye, vec3f(0.3, 0.6, 0.1));
-  let fluidGate = smoothstep(0.0, 0.15, intensity);
-  if (fluidGate < 0.01) {
-    out.pos = vec4f(2.0, 2.0, 0.0, 1.0);
-    out.color = vec3f(0.0);
-    out.alpha = 0.0;
-    return out;
-  }
-
-  // ── Lighting (moved from fragment) ──
-  let n = normalize(vec3f(part.normalX, part.normalY, part.normalZ));
-  let lightDir = normalize(vec3f(0.4, 0.6, 1.0));
-  let viewDir = vec3f(0.0, 0.0, 1.0);
-  let reflected = reflect(-lightDir, n);
-  let specAngle = dot(reflected, viewDir);
-  let glint = smoothstep(0.92, 1.0, specAngle);
-  let ambient = max(dot(n, lightDir), 0.0) * 0.02;
-
-  // ── Color tint from seed (moved from fragment) ──
-  let seedU = u32(part.seed * 4294967295.0);
-  let h3 = f32(pcgVert(seedU + 269u)) / 4294967295.0;
-  let h4 = f32(pcgVert(seedU + 419u)) / 4294967295.0;
-  var tint = grainTintVert(h3);
-
-  // Prismatic iridescence — shifts tint color without adding brightness
-  let pa = pp.extra.x;
-  let hueAngle = h4 * 6.283;
-  let prismatic = vec3f(
-    0.5 + 0.5 * cos(hueAngle),
-    0.5 + 0.5 * cos(hueAngle + 2.094),
-    0.5 + 0.5 * cos(hueAngle + 4.189)
-  );
-
-  // Tint shift: more particles get rainbow tint as pa increases
-  let prisThreshold = max(1.0 - pa * 0.05, 0.0);
-  let prisMix = clamp(pa * 0.06, 0.0, 1.0);
-  if (h4 > prisThreshold) {
-    tint = mix(tint, prismatic, prisMix);
-  }
-
-  // Glitter color multiplier
-  let glitCol = pp.extra.yzw;
-  tint *= glitCol;
-
-  let brightness = glint * pp.screen.w + ambient;
-  out.color = tint * brightness * fluidGate;
-  out.alpha = brightness * fluidGate;
   out.pos = vec4f(clipPos + qp * clipSize, 0.0, 1.0);
+  out.color = col.rgb;
+  out.alpha = col.a;
+  out.localUV = localUV;
   return out;
 }
 `;
@@ -890,7 +890,7 @@ async function main() {
   });
   const paramData = new Float32Array(16);
 
-  function writeParams(overrides = {}) {
+  function writeParams(overrides = {}, buf = paramBuf) {
     const d = { dt: 0.016, dx: 1 / SIM_RES, simRes: SIM_RES, time: 0,
       splatX: 0, splatY: 0, splatDx: 0, splatDy: 0,
       splatR: 0, splatG: 0, splatB: 0,
@@ -914,7 +914,7 @@ async function main() {
     paramData[13] = d.pressureDecay;
     paramData[14] = d.velDissipation;
     paramData[15] = d.dyeDissipation;
-    device.queue.writeBuffer(paramBuf, 0, paramData);
+    device.queue.writeBuffer(buf, 0, paramData);
   }
 
   // ─── Split screen uniforms: particle UB + display UB ───────────────────
@@ -1035,6 +1035,12 @@ async function main() {
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
 
+  let colorBuf = device.createBuffer({
+    label: 'particleColors',
+    size: state.particleCount * 16,  // vec4f per particle
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+
   // GPU-based particle initialization (avoids 512MB CPU allocation for 16M particles)
   function gpuInitParticles(buf, count) {
     const initCode = makeParticleInitShader(count);
@@ -1069,6 +1075,9 @@ async function main() {
       { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, sampler: {} },
       { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
     ],
   });
 
@@ -1088,6 +1097,9 @@ async function main() {
       { binding: 1, resource: tview(velA) },
       { binding: 2, resource: linearSampler },
       { binding: 3, resource: { buffer: particleBuf } },
+      { binding: 4, resource: tview(dyeA) },
+      { binding: 5, resource: { buffer: particleUB } },
+      { binding: 6, resource: { buffer: colorBuf } },
     ],
   });
 
@@ -1097,8 +1109,7 @@ async function main() {
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      { binding: 2, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-      { binding: 3, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, sampler: {} },
+      { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
     ],
   });
 
@@ -1120,7 +1131,7 @@ async function main() {
         },
       }],
     },
-    primitive: { topology: 'triangle-list' },
+    primitive: { topology: 'triangle-strip' },
   });
 
   let particleRenderBG = device.createBindGroup({
@@ -1128,8 +1139,7 @@ async function main() {
     entries: [
       { binding: 0, resource: { buffer: particleBuf } },
       { binding: 1, resource: { buffer: particleUB } },
-      { binding: 2, resource: tview(dyeA) },
-      { binding: 3, resource: linearSampler },
+      { binding: 2, resource: { buffer: colorBuf } },
     ],
   });
 
@@ -1144,8 +1154,13 @@ async function main() {
   const advVelBGFixed = bg(advectVelPipe.layout, [ubuf(paramBuf), tview(velA), linearSampler, tview(velB)]);
   const advDyeBGFixed = bg(advectDyePipe.layout, [ubuf(paramBuf), tview(velA), tview(dyeA), linearSampler, tview(dyeB)]);
   const displayBGFixed = bg(displayBGL, [tview(dyeA), linearSampler, ubuf(displayUB)]);
-  const splatVelBGFixed = bg(splatVelPipe.layout, [ubuf(paramBuf), tview(velA), tview(velB)]);
-  const splatDyeBGFixed = bg(splatDyePipe.layout, [ubuf(paramBuf), tview(dyeA), tview(dyeB)]);
+  const MAX_SPLATS = 16;
+  const splatParamBufs = Array.from({length: MAX_SPLATS}, () =>
+    device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
+  const splatVelBGs = splatParamBufs.map(buf =>
+    bg(splatVelPipe.layout, [ubuf(buf), tview(velA), tview(velB)]));
+  const splatDyeBGs = splatParamBufs.map(buf =>
+    bg(splatDyePipe.layout, [ubuf(buf), tview(dyeA), tview(dyeB)]));
 
   // ─── Rebuild particle system (called when count changes) ───────────────
   function rebuildParticleSystem(count) {
@@ -1154,6 +1169,12 @@ async function main() {
     const newBuf = device.createBuffer({
       label: 'particles',
       size: count * PARTICLE_STRIDE,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    const newColorBuf = device.createBuffer({
+      label: 'particleColors',
+      size: count * 16,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
 
@@ -1175,6 +1196,9 @@ async function main() {
         { binding: 1, resource: tview(velA) },
         { binding: 2, resource: linearSampler },
         { binding: 3, resource: { buffer: newBuf } },
+        { binding: 4, resource: tview(dyeA) },
+        { binding: 5, resource: { buffer: particleUB } },
+        { binding: 6, resource: { buffer: newColorBuf } },
       ],
     });
 
@@ -1183,12 +1207,12 @@ async function main() {
       entries: [
         { binding: 0, resource: { buffer: newBuf } },
         { binding: 1, resource: { buffer: particleUB } },
-        { binding: 2, resource: tview(dyeA) },
-        { binding: 3, resource: linearSampler },
+        { binding: 2, resource: { buffer: newColorBuf } },
       ],
     });
 
     particleBuf = newBuf;
+    colorBuf = newColorBuf;
     state.particleCount = count;
     particleDispatches = Math.ceil(count / PARTICLE_WG);
 
@@ -1397,41 +1421,43 @@ async function main() {
       pointer.moved = false;
     }
 
-    // ── Pass 1: Splats (each needs own submit for correct uniform values) ──
-    for (const s of splats) {
+    // ── Write all splat params to pre-allocated buffers ──
+    const activeSplats = splats.slice(0, MAX_SPLATS);
+    for (let i = 0; i < activeSplats.length; i++) {
+      const s = activeSplats[i];
       writeParams({ dt, time, splatX: s.x, splatY: s.y,
         splatDx: s.dx, splatDy: s.dy,
         splatR: s.r, splatG: s.g, splatB: s.b,
-        splatRadius: s.radius });
-
-      const sEnc = device.createCommandEncoder();
-
-      // Splat velocity: read velA → write velB
-      const p1 = sEnc.beginComputePass();
-      p1.setPipeline(splatVelPipe.pipeline);
-      p1.setBindGroup(0, splatVelBGFixed);
-      p1.dispatchWorkgroups(dispatch, dispatch);
-      p1.end();
-      sEnc.copyTextureToTexture(
-        { texture: velB }, { texture: velA }, [SIM_RES, SIM_RES]);
-
-      // Splat dye (only if color > 0)
-      if (s.r > 0 || s.g > 0 || s.b > 0) {
-        const p2 = sEnc.beginComputePass();
-        p2.setPipeline(splatDyePipe.pipeline);
-        p2.setBindGroup(0, splatDyeBGFixed);
-        p2.dispatchWorkgroups(dispatch, dispatch);
-        p2.end();
-        sEnc.copyTextureToTexture(
-          { texture: dyeB }, { texture: dyeA }, [SIM_RES, SIM_RES]);
-      }
-
-      device.queue.submit([sEnc.finish()]);
+        splatRadius: s.radius }, splatParamBufs[i]);
     }
 
-    // ── Simulation passes (all share same uniform values) ──
+    // Write simulation params
     writeParams({ dt, time });
+
+    // ── Single encoder for all passes ──
     const enc = device.createCommandEncoder();
+
+    // ── Splat passes (each uses its own pre-allocated bind group) ──
+    for (let i = 0; i < activeSplats.length; i++) {
+      const s = activeSplats[i];
+      const p1 = enc.beginComputePass();
+      p1.setPipeline(splatVelPipe.pipeline);
+      p1.setBindGroup(0, splatVelBGs[i]);
+      p1.dispatchWorkgroups(dispatch, dispatch);
+      p1.end();
+      enc.copyTextureToTexture(
+        { texture: velB }, { texture: velA }, [SIM_RES, SIM_RES]);
+
+      if (s.r > 0 || s.g > 0 || s.b > 0) {
+        const p2 = enc.beginComputePass();
+        p2.setPipeline(splatDyePipe.pipeline);
+        p2.setBindGroup(0, splatDyeBGs[i]);
+        p2.dispatchWorkgroups(dispatch, dispatch);
+        p2.end();
+        enc.copyTextureToTexture(
+          { texture: dyeB }, { texture: dyeA }, [SIM_RES, SIM_RES]);
+      }
+    }
 
     // ── Pass 2: Curl ──
     {
@@ -1558,7 +1584,7 @@ async function main() {
       });
       rp.setPipeline(particleRenderPipeline);
       rp.setBindGroup(0, particleRenderBG);
-      rp.draw(6, state.particleCount);
+      rp.draw(4, state.particleCount);
       rp.end();
     }
 
