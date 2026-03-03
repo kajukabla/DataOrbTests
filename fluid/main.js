@@ -388,16 +388,15 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   part.posX += vel.x * dt * p.dx;
   part.posY += vel.y * dt * p.dx;
 
-  // Velocity gradient for 3D tumble
+  // Velocity gradient for 3D tumble (forward difference — 2 samples instead of 4)
   let eps = 2.0 / p.simRes;
-  let vL = textureSampleLevel(velTex, samp, vec2f(part.posX - eps, part.posY), 0.0).xy;
-  let vR = textureSampleLevel(velTex, samp, vec2f(part.posX + eps, part.posY), 0.0).xy;
-  let vB = textureSampleLevel(velTex, samp, vec2f(part.posX, part.posY - eps), 0.0).xy;
-  let vT = textureSampleLevel(velTex, samp, vec2f(part.posX, part.posY + eps), 0.0).xy;
+  let pos = vec2f(part.posX, part.posY);
+  let vR = textureSampleLevel(velTex, samp, pos + vec2f(eps, 0.0), 0.0).xy;
+  let vT = textureSampleLevel(velTex, samp, pos + vec2f(0.0, eps), 0.0).xy;
 
-  let curl = (vR.y - vL.y) - (vT.x - vB.x);
-  let shearX = (vR.x - vL.x) * 0.5;
-  let shearY = (vT.y - vB.y) * 0.5;
+  let curl = ((vR.y - vel.y) - (vT.x - vel.x)) * 2.0;
+  let shearX = vR.x - vel.x;
+  let shearY = vT.y - vel.y;
 
   // Update angular velocity with curl (damped for slower, smoother shimmer)
   part.angularVel = part.angularVel * 0.92 + curl * 1.0;
@@ -416,18 +415,14 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   part.normalX = nx + tiltX;
   part.normalY = ny + tiltY;
 
-  // Re-normalize, keep Z positive (facing camera)
-  var nLen = length(vec3f(part.normalX, part.normalY, part.normalZ));
+  // Keep Z positive (facing camera) — render shader re-normalizes
+  part.normalZ = max(abs(part.normalZ), 0.3);
+  let nLen = length(vec3f(part.normalX, part.normalY, part.normalZ));
   if (nLen > 0.001) {
     part.normalX /= nLen;
     part.normalY /= nLen;
     part.normalZ /= nLen;
   }
-  part.normalZ = max(abs(part.normalZ), 0.3);
-  nLen = length(vec3f(part.normalX, part.normalY, part.normalZ));
-  part.normalX /= nLen;
-  part.normalY /= nLen;
-  part.normalZ /= nLen;
 
   // Life decay
   part.life -= dt;
@@ -487,11 +482,28 @@ struct Particle {
 
 @group(0) @binding(0) var<storage, read> particles: array<Particle>;
 @group(0) @binding(1) var<uniform> screen: vec4f;
+@group(0) @binding(2) var dyeTex: texture_2d<f32>;
+@group(0) @binding(3) var dyeSamp: sampler;
+
+fn pcgVert(inp: u32) -> u32 {
+  var state = inp * 747796405u + 2891336453u;
+  let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+
+fn grainTintVert(h: f32) -> vec3f {
+  if (h < 0.6) { return mix(vec3f(1.0, 0.75, 0.3), vec3f(1.0, 0.85, 0.45), h / 0.6); }
+  if (h < 0.75) { return vec3f(1.0, 0.6, 0.25); }
+  if (h < 0.85) { return vec3f(1.0, 0.88, 0.55); }
+  if (h < 0.92) { return vec3f(0.85, 0.92, 1.0); }
+  if (h < 0.96) { return vec3f(1.0, 0.75, 0.88); }
+  return vec3f(0.75, 1.0, 0.82);
+}
 
 struct VSOut {
   @builtin(position) pos: vec4f,
-  @location(0) normal: vec3f,
-  @location(1) seed: f32,
+  @location(0) @interpolate(flat) color: vec3f,
+  @location(1) @interpolate(flat) alpha: f32,
   @location(2) localUV: vec2f,
 };
 
@@ -514,92 +526,51 @@ fn main(
   let qp = quadPos[vi];
   let localUV = qp * 0.5 + 0.5;
 
-  // Particle size in pixels → clip space (read from uniform)
+  let screenSize = screen.xy;
   let pixelSize = screen.z;
-  let clipSize = vec2f(pixelSize * 2.0 / screen.x, pixelSize * 2.0 / screen.y);
-
-  // UV to clip space
+  let clipSize = vec2f(pixelSize * 2.0 / screenSize.x, pixelSize * 2.0 / screenSize.y);
   let clipPos = vec2f(part.posX, part.posY) * 2.0 - 1.0;
 
   var out: VSOut;
-  out.pos = vec4f(clipPos + qp * clipSize, 0.0, 1.0);
-  out.normal = vec3f(part.normalX, part.normalY, part.normalZ);
-  out.seed = part.seed;
   out.localUV = localUV;
-  return out;
-}
-`;
 
-// ─── Particle Render Fragment Shader ─────────────────────────────────────────
-const particleRenderFrag = /* wgsl */`
-@group(0) @binding(1) var<uniform> screen: vec4f;
-@group(0) @binding(2) var dyeTex: texture_2d<f32>;
-@group(0) @binding(3) var dyeSamp: sampler;
-
-fn pcgFrag(inp: u32) -> u32 {
-  var state = inp * 747796405u + 2891336453u;
-  let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-  return (word >> 22u) ^ word;
-}
-
-fn grainTintFrag(h: f32) -> vec3f {
-  if (h < 0.6) { return mix(vec3f(1.0, 0.75, 0.3), vec3f(1.0, 0.85, 0.45), h / 0.6); }
-  if (h < 0.75) { return vec3f(1.0, 0.6, 0.25); }  // deep copper
-  if (h < 0.85) { return vec3f(1.0, 0.88, 0.55); }  // warm pale gold
-  if (h < 0.92) { return vec3f(0.85, 0.92, 1.0); }  // cool prismatic
-  if (h < 0.96) { return vec3f(1.0, 0.75, 0.88); }  // pink prismatic
-  return vec3f(0.75, 1.0, 0.82);                      // green prismatic
-}
-
-struct FSIn {
-  @builtin(position) fragPos: vec4f,
-  @location(0) normal: vec3f,
-  @location(1) seed: f32,
-  @location(2) localUV: vec2f,
-};
-
-@fragment
-fn main(in: FSIn) -> @location(0) vec4f {
-  let screenSize = screen.xy;
-
-  // Screen-space sphere mask (same as display shader)
-  let uv = vec2f(in.fragPos.x, screenSize.y - in.fragPos.y) / screenSize;
+  // ── Early cull: sphere mask ──
+  let particleUV = vec2f(part.posX, part.posY);
   let aspect = screenSize.x / screenSize.y;
-  let centered = uv - vec2f(0.5, 0.5);
+  let centered = particleUV - vec2f(0.5, 0.5);
   let corrected = vec2f(centered.x * aspect, centered.y);
-  let screenDist = length(corrected);
-  let screenRadius = 0.42 * min(aspect, 1.0);
-  if (screenDist > screenRadius) { discard; }
+  if (length(corrected) > 0.42 * min(aspect, 1.0)) {
+    out.pos = vec4f(2.0, 2.0, 0.0, 1.0);
+    out.color = vec3f(0.0);
+    out.alpha = 0.0;
+    return out;
+  }
 
-  // Gate by fluid presence — no fluid, no glitter
-  let dye = textureSampleLevel(dyeTex, dyeSamp, uv, 0.0).rgb;
+  // ── Early cull: fluid gate ──
+  let dye = textureSampleLevel(dyeTex, dyeSamp, particleUV, 0.0).rgb;
   let intensity = dot(dye, vec3f(0.3, 0.6, 0.1));
   let fluidGate = smoothstep(0.0, 0.15, intensity);
-  if (fluidGate < 0.01) { discard; }
+  if (fluidGate < 0.01) {
+    out.pos = vec4f(2.0, 2.0, 0.0, 1.0);
+    out.color = vec3f(0.0);
+    out.alpha = 0.0;
+    return out;
+  }
 
-  // Circular cutout
-  let center = in.localUV - vec2f(0.5);
-  let d = length(center);
-  if (d > 0.5) { discard; }
-
-  let n = normalize(in.normal);
+  // ── Lighting (moved from fragment) ──
+  let n = normalize(vec3f(part.normalX, part.normalY, part.normalZ));
   let lightDir = normalize(vec3f(0.4, 0.6, 1.0));
   let viewDir = vec3f(0.0, 0.0, 1.0);
-
-  // Specular reflection → glint
   let reflected = reflect(-lightDir, n);
   let specAngle = dot(reflected, viewDir);
   let glint = smoothstep(0.92, 1.0, specAngle);
-
-  // Very dim ambient for non-glinting particles (dark substrate between glints)
   let ambient = max(dot(n, lightDir), 0.0) * 0.02;
 
-  // Color tint from seed
-  let seedU = u32(in.seed * 4294967295.0);
-  let h3 = f32(pcgFrag(seedU + 269u)) / 4294967295.0;
-  let h4 = f32(pcgFrag(seedU + 419u)) / 4294967295.0;
-
-  var tint = grainTintFrag(h3);
+  // ── Color tint from seed (moved from fragment) ──
+  let seedU = u32(part.seed * 4294967295.0);
+  let h3 = f32(pcgVert(seedU + 269u)) / 4294967295.0;
+  let h4 = f32(pcgVert(seedU + 419u)) / 4294967295.0;
+  var tint = grainTintVert(h3);
 
   // Prismatic flash on ~10% of bright particles
   if (h4 > 0.9 && glint > 0.1) {
@@ -612,15 +583,40 @@ fn main(in: FSIn) -> @location(0) vec4f {
     tint = mix(tint, prismatic, 0.5);
   }
 
-  // Glint brightness from uniform
   let brightness = glint * screen.w + ambient;
+  out.color = tint * brightness * fluidGate;
+  out.alpha = brightness * fluidGate;
+  out.pos = vec4f(clipPos + qp * clipSize, 0.0, 1.0);
+  return out;
+}
+`;
 
-  // Soft edge
+// ─── Particle Render Fragment Shader ─────────────────────────────────────────
+const particleRenderFrag = /* wgsl */`
+@group(0) @binding(1) var<uniform> screen: vec4f;
+
+struct FSIn {
+  @builtin(position) fragPos: vec4f,
+  @location(0) @interpolate(flat) color: vec3f,
+  @location(1) @interpolate(flat) alpha: f32,
+  @location(2) localUV: vec2f,
+};
+
+@fragment
+fn main(in: FSIn) -> @location(0) vec4f {
+  // Sphere mask (safety for large particle sizes)
+  let screenSize = screen.xy;
+  let uv = vec2f(in.fragPos.x, screenSize.y - in.fragPos.y) / screenSize;
+  let aspect = screenSize.x / screenSize.y;
+  let centered = uv - vec2f(0.5, 0.5);
+  let corrected = vec2f(centered.x * aspect, centered.y);
+  if (length(corrected) > 0.42 * min(aspect, 1.0)) { discard; }
+
+  // Circular cutout + soft edge
+  let d = length(in.localUV - vec2f(0.5));
+  if (d > 0.5) { discard; }
   let edge = 1.0 - smoothstep(0.3, 0.5, d);
-
-  let color = tint * brightness * edge * fluidGate;
-  let alpha = brightness * edge * fluidGate;
-  return vec4f(color, alpha);
+  return vec4f(in.color * edge, in.alpha * edge);
 }
 `;
 
@@ -975,6 +971,20 @@ async function main() {
     primitive: { topology: 'triangle-list' },
   });
 
+  // ─── Bind group helpers ─────────────────────────────────────────────────
+  function bg(layout, resources) {
+    return device.createBindGroup({
+      layout,
+      entries: resources.map((r, i) => ({ binding: i, resource: r })),
+    });
+  }
+  function ubuf(b) { return { buffer: b }; }
+  const viewCache = new Map();
+  function tview(t) {
+    if (!viewCache.has(t)) viewCache.set(t, t.createView());
+    return viewCache.get(t);
+  }
+
   // ─── Particle GPU Resources ────────────────────────────────────────────
   let particleDispatches = Math.ceil(state.particleCount / PARTICLE_WG);
 
@@ -1034,7 +1044,7 @@ async function main() {
     layout: particleUpdateBGL,
     entries: [
       { binding: 0, resource: { buffer: paramBuf } },
-      { binding: 1, resource: velA.createView() },
+      { binding: 1, resource: tview(velA) },
       { binding: 2, resource: linearSampler },
       { binding: 3, resource: { buffer: particleBuf } },
     ],
@@ -1046,8 +1056,8 @@ async function main() {
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-      { binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+      { binding: 2, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 3, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, sampler: {} },
     ],
   });
 
@@ -1077,10 +1087,24 @@ async function main() {
     entries: [
       { binding: 0, resource: { buffer: particleBuf } },
       { binding: 1, resource: { buffer: particleUB } },
-      { binding: 2, resource: dyeA.createView() },
+      { binding: 2, resource: tview(dyeA) },
       { binding: 3, resource: linearSampler },
     ],
   });
+
+  // ─── Pre-allocated simulation bind groups (persistent textures) ────────
+  const curlBGFixed = bg(curlPipe.layout, [ubuf(paramBuf), tview(velA), tview(curlTex)]);
+  const vortBGFixed = bg(vortPipe.layout, [ubuf(paramBuf), tview(velA), tview(curlTex), tview(velB)]);
+  const divBGFixed = bg(divPipe.layout, [ubuf(paramBuf), tview(velA), tview(divTex)]);
+  const clearPressBGFixed = bg(clearPressPipe.layout, [ubuf(paramBuf), tview(pressA), tview(pressB)]);
+  const jacobiBG_AtoB = bg(jacobiPipe.layout, [ubuf(paramBuf), tview(pressA), tview(divTex), tview(pressB)]);
+  const jacobiBG_BtoA = bg(jacobiPipe.layout, [ubuf(paramBuf), tview(pressB), tview(divTex), tview(pressA)]);
+  const gradSubBGFixed = bg(gradSubPipe.layout, [ubuf(paramBuf), tview(velA), tview(pressA), tview(velB)]);
+  const advVelBGFixed = bg(advectVelPipe.layout, [ubuf(paramBuf), tview(velA), linearSampler, tview(velB)]);
+  const advDyeBGFixed = bg(advectDyePipe.layout, [ubuf(paramBuf), tview(velA), tview(dyeA), linearSampler, tview(dyeB)]);
+  const displayBGFixed = bg(displayBGL, [tview(dyeA), linearSampler, ubuf(displayUB)]);
+  const splatVelBGFixed = bg(splatVelPipe.layout, [ubuf(paramBuf), tview(velA), tview(velB)]);
+  const splatDyeBGFixed = bg(splatDyePipe.layout, [ubuf(paramBuf), tview(dyeA), tview(dyeB)]);
 
   // ─── Rebuild particle system (called when count changes) ───────────────
   function rebuildParticleSystem(count) {
@@ -1107,7 +1131,7 @@ async function main() {
       layout: particleUpdateBGL,
       entries: [
         { binding: 0, resource: { buffer: paramBuf } },
-        { binding: 1, resource: velA.createView() },
+        { binding: 1, resource: tview(velA) },
         { binding: 2, resource: linearSampler },
         { binding: 3, resource: { buffer: newBuf } },
       ],
@@ -1118,7 +1142,7 @@ async function main() {
       entries: [
         { binding: 0, resource: { buffer: newBuf } },
         { binding: 1, resource: { buffer: particleUB } },
-        { binding: 2, resource: dyeA.createView() },
+        { binding: 2, resource: tview(dyeA) },
         { binding: 3, resource: linearSampler },
       ],
     });
@@ -1129,16 +1153,6 @@ async function main() {
 
     console.log(`Rebuilt particle system: ${count} particles (${(count * PARTICLE_STRIDE / 1024 / 1024).toFixed(1)} MB)`);
   }
-
-  // ─── Bind group helpers ─────────────────────────────────────────────────
-  function bg(layout, resources) {
-    return device.createBindGroup({
-      layout,
-      entries: resources.map((r, i) => ({ binding: i, resource: r })),
-    });
-  }
-  function ubuf(b) { return { buffer: b }; }
-  function tview(t) { return t.createView(); }
 
   // ─── Mouse / Pointer State ──────────────────────────────────────────────
   const pointer = { x: 0.5, y: 0.5, dx: 0, dy: 0, down: false, moved: false };
@@ -1345,11 +1359,9 @@ async function main() {
       const sEnc = device.createCommandEncoder();
 
       // Splat velocity: read velA → write velB
-      const splatVelBG = bg(splatVelPipe.layout, [
-        ubuf(paramBuf), tview(velA), tview(velB)]);
       const p1 = sEnc.beginComputePass();
       p1.setPipeline(splatVelPipe.pipeline);
-      p1.setBindGroup(0, splatVelBG);
+      p1.setBindGroup(0, splatVelBGFixed);
       p1.dispatchWorkgroups(dispatch, dispatch);
       p1.end();
       sEnc.copyTextureToTexture(
@@ -1357,11 +1369,9 @@ async function main() {
 
       // Splat dye (only if color > 0)
       if (s.r > 0 || s.g > 0 || s.b > 0) {
-        const splatDyeBG = bg(splatDyePipe.layout, [
-          ubuf(paramBuf), tview(dyeA), tview(dyeB)]);
         const p2 = sEnc.beginComputePass();
         p2.setPipeline(splatDyePipe.pipeline);
-        p2.setBindGroup(0, splatDyeBG);
+        p2.setBindGroup(0, splatDyeBGFixed);
         p2.dispatchWorkgroups(dispatch, dispatch);
         p2.end();
         sEnc.copyTextureToTexture(
@@ -1377,22 +1387,18 @@ async function main() {
 
     // ── Pass 2: Curl ──
     {
-      const curlBG = bg(curlPipe.layout, [
-        ubuf(paramBuf), tview(velA), tview(curlTex)]);
       const p = enc.beginComputePass();
       p.setPipeline(curlPipe.pipeline);
-      p.setBindGroup(0, curlBG);
+      p.setBindGroup(0, curlBGFixed);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
     }
 
     // ── Pass 3: Vorticity Confinement ──
     {
-      const vortBG = bg(vortPipe.layout, [
-        ubuf(paramBuf), tview(velA), tview(curlTex), tview(velB)]);
       const p = enc.beginComputePass();
       p.setPipeline(vortPipe.pipeline);
-      p.setBindGroup(0, vortBG);
+      p.setBindGroup(0, vortBGFixed);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
       enc.copyTextureToTexture(
@@ -1401,22 +1407,18 @@ async function main() {
 
     // ── Pass 4: Divergence ──
     {
-      const divBG = bg(divPipe.layout, [
-        ubuf(paramBuf), tview(velA), tview(divTex)]);
       const p = enc.beginComputePass();
       p.setPipeline(divPipe.pipeline);
-      p.setBindGroup(0, divBG);
+      p.setBindGroup(0, divBGFixed);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
     }
 
     // ── Pass 5: Clear Pressure ──
     {
-      const clearBG = bg(clearPressPipe.layout, [
-        ubuf(paramBuf), tview(pressA), tview(pressB)]);
       const p = enc.beginComputePass();
       p.setPipeline(clearPressPipe.pipeline);
-      p.setBindGroup(0, clearBG);
+      p.setBindGroup(0, clearPressBGFixed);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
       enc.copyTextureToTexture(
@@ -1425,10 +1427,7 @@ async function main() {
 
     // ── Pass 6: Jacobi Pressure Solve ──
     for (let i = 0; i < state.pressureIters; i++) {
-      const readTex = (i % 2 === 0) ? pressA : pressB;
-      const writeTex = (i % 2 === 0) ? pressB : pressA;
-      const jBG = bg(jacobiPipe.layout, [
-        ubuf(paramBuf), tview(readTex), tview(divTex), tview(writeTex)]);
+      const jBG = (i % 2 === 0) ? jacobiBG_AtoB : jacobiBG_BtoA;
       const p = enc.beginComputePass();
       p.setPipeline(jacobiPipe.pipeline);
       p.setBindGroup(0, jBG);
@@ -1443,11 +1442,9 @@ async function main() {
 
     // ── Pass 7: Gradient Subtraction ──
     {
-      const gBG = bg(gradSubPipe.layout, [
-        ubuf(paramBuf), tview(velA), tview(pressA), tview(velB)]);
       const p = enc.beginComputePass();
       p.setPipeline(gradSubPipe.pipeline);
-      p.setBindGroup(0, gBG);
+      p.setBindGroup(0, gradSubBGFixed);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
       enc.copyTextureToTexture(
@@ -1456,11 +1453,9 @@ async function main() {
 
     // ── Pass 8: Advect Velocity ──
     {
-      const aBG = bg(advectVelPipe.layout, [
-        ubuf(paramBuf), tview(velA), linearSampler, tview(velB)]);
       const p = enc.beginComputePass();
       p.setPipeline(advectVelPipe.pipeline);
-      p.setBindGroup(0, aBG);
+      p.setBindGroup(0, advVelBGFixed);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
       enc.copyTextureToTexture(
@@ -1469,11 +1464,9 @@ async function main() {
 
     // ── Pass 9: Advect Dye ──
     {
-      const dBG = bg(advectDyePipe.layout, [
-        ubuf(paramBuf), tview(velA), tview(dyeA), linearSampler, tview(dyeB)]);
       const p = enc.beginComputePass();
       p.setPipeline(advectDyePipe.pipeline);
-      p.setBindGroup(0, dBG);
+      p.setBindGroup(0, advDyeBGFixed);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
       enc.copyTextureToTexture(
@@ -1492,8 +1485,6 @@ async function main() {
     // ── Pass 11: Display Render (fluid base) ──
     const canvasView = ctx.getCurrentTexture().createView();
     {
-      const displayBG = bg(displayBGL, [
-        tview(dyeA), linearSampler, ubuf(displayUB)]);
       const rp = enc.beginRenderPass({
         colorAttachments: [{
           view: canvasView,
@@ -1503,7 +1494,7 @@ async function main() {
         }],
       });
       rp.setPipeline(displayPipeline);
-      rp.setBindGroup(0, displayBG);
+      rp.setBindGroup(0, displayBGFixed);
       rp.draw(3);
       rp.end();
     }
