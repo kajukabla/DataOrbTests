@@ -537,18 +537,23 @@ fn main(
 
   let screenSize = pp.screen.xy;
   let pixelSize = pp.screen.z;
+  let aspect = screenSize.x / screenSize.y;
   let clipSize = vec2f(pixelSize * 2.0 / screenSize.x, pixelSize * 2.0 / screenSize.y);
-  let clipPos = vec2f(part.posX, part.posY) * 2.0 - 1.0;
+
+  // Aspect-correct clip position so simulation renders as centered 1:1 square
+  let rawClip = vec2f(part.posX, part.posY) * 2.0 - 1.0;
+  let clipPos = vec2f(
+    rawClip.x / max(aspect, 1.0),
+    rawClip.y / max(1.0 / aspect, 1.0)
+  );
 
   var out: VSOut;
   out.localUV = localUV;
 
-  // ── Early cull: sphere mask ──
+  // ── Early cull: sphere mask in simulation UV (1:1) ──
   let particleUV = vec2f(part.posX, part.posY);
-  let aspect = screenSize.x / screenSize.y;
   let centered = particleUV - vec2f(0.5, 0.5);
-  let corrected = vec2f(centered.x * aspect, centered.y);
-  if (length(corrected) > 0.42 * min(aspect, 1.0)) {
+  if (length(centered) > 0.42) {
     out.pos = vec4f(2.0, 2.0, 0.0, 1.0);
     out.color = vec3f(0.0);
     out.alpha = 0.0;
@@ -628,11 +633,15 @@ struct FSIn {
 fn main(in: FSIn) -> @location(0) vec4f {
   // Sphere mask (safety for large particle sizes)
   let screenSize = pp.screen.xy;
-  let uv = vec2f(in.fragPos.x, screenSize.y - in.fragPos.y) / screenSize;
   let aspect = screenSize.x / screenSize.y;
+  let rawUV = vec2f(in.fragPos.x, screenSize.y - in.fragPos.y) / screenSize;
+  // Convert to simulation UV (1:1 square)
+  let uv = vec2f(
+    (rawUV.x - 0.5) * max(aspect, 1.0) + 0.5,
+    (rawUV.y - 0.5) * max(1.0 / aspect, 1.0) + 0.5
+  );
   let centered = uv - vec2f(0.5, 0.5);
-  let corrected = vec2f(centered.x * aspect, centered.y);
-  if (length(corrected) > 0.42 * min(aspect, 1.0)) { discard; }
+  if (length(centered) > 0.42) { discard; }
 
   // Circular cutout + soft edge
   let d = length(in.localUV - vec2f(0.5));
@@ -672,14 +681,19 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let screenSize = du.screen.xy;
   let time = du.screen.z;
   let sheenStrength = du.screen.w;
-  let uv = vec2f(pos.x, screenSize.y - pos.y) / screenSize;
+  let rawUV = vec2f(pos.x, screenSize.y - pos.y) / screenSize;
 
-  // Sphere mask
+  // Aspect-correct UV so simulation renders as centered 1:1 square
   let aspect = screenSize.x / screenSize.y;
+  let uv = vec2f(
+    (rawUV.x - 0.5) * max(aspect, 1.0) + 0.5,
+    (rawUV.y - 0.5) * max(1.0 / aspect, 1.0) + 0.5
+  );
+
+  // Sphere mask in simulation UV space (already 1:1)
   let centered = uv - vec2f(0.5, 0.5);
-  let corrected = vec2f(centered.x * aspect, centered.y);
-  let screenDist = length(corrected);
-  let screenRadius = 0.42 * min(aspect, 1.0);
+  let screenDist = length(centered);
+  let screenRadius = 0.42;
   let mask = 1.0 - smoothstep(screenRadius - 0.005, screenRadius + 0.005, screenDist);
 
   // Sample fluid dye
@@ -691,7 +705,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   var color = baseCol * intensity * 0.25;
 
   // Surface gradient for multi-lobe metallic sheen
-  let texel = 1.0 / screenSize;
+  let texel = vec2f(1.0 / 512.0);
   let iL = dot(textureSampleLevel(dyeTex, samp, uv - vec2f(texel.x * 2.0, 0.0), 0.0).rgb, vec3f(0.3, 0.6, 0.1));
   let iR = dot(textureSampleLevel(dyeTex, samp, uv + vec2f(texel.x * 2.0, 0.0), 0.0).rgb, vec3f(0.3, 0.6, 0.1));
   let iB = dot(textureSampleLevel(dyeTex, samp, uv - vec2f(0.0, texel.y * 2.0), 0.0).rgb, vec3f(0.3, 0.6, 0.1));
@@ -706,7 +720,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // Broad soft metallic glow
   let broadSpec = pow(spec, 2.0) * smoothstep(0.002, 0.08, gradLen);
   // Fresnel-like rim sheen (edges of sphere glow)
-  let rimFactor = smoothstep(0.2, 0.42, screenDist / min(aspect, 1.0));
+  let rimFactor = smoothstep(0.2, 0.42, screenDist);
 
   let sheen = (sharpSheen * 0.6 + broadSpec * 0.3 + rimFactor * 0.15) * sheenStrength;
   color += color * sheen;
