@@ -2109,6 +2109,93 @@ async function main() {
   wireSlider('pressureIters', 'pressureIters', v => Math.round(v));
   wireSlider('pressureDecay', 'pressureDecay', v => v.toFixed(2));
 
+  // ─── Sync UI from state (for randomize) ─────────────────────────────
+  function syncSlider(id, stateKey, fmt) {
+    const slider = document.getElementById(id);
+    const valSpan = document.getElementById(id + 'Val');
+    if (slider) slider.value = state[stateKey];
+    if (valSpan) valSpan.textContent = fmt ? fmt(state[stateKey]) : state[stateKey];
+  }
+  function syncColor(id, stateKey) {
+    const picker = document.getElementById(id);
+    if (picker) picker.value = rgbToHex(state[stateKey]);
+  }
+  function syncAllUI() {
+    syncSlider('particleSize', 'particleSize');
+    syncSlider('glintBrightness', 'glintBrightness');
+    syncSlider('sizeRandomness', 'sizeRandomness');
+    syncSlider('prismaticAmount', 'prismaticAmount');
+    syncSlider('colorBlend', 'colorBlend', v => v.toFixed(2));
+    syncSlider('sheenStrength', 'sheenStrength');
+    syncSlider('clickSize', 'clickSize');
+    syncSlider('clickStrength', 'clickStrength');
+    syncSlider('injectorIntensity', 'injectorIntensity');
+    syncSlider('noiseAmount', 'noiseAmount');
+    syncSlider('noiseFrequency', 'noiseFrequency');
+    syncSlider('noiseSpeed', 'noiseSpeed');
+    syncSlider('injectorSize', 'injectorSize');
+    syncSlider('injectorCount', 'injectorCount', v => Math.round(v));
+    syncSlider('injectorSpeed', 'injectorSpeed');
+    syncSlider('burstCount', 'burstCount', v => Math.round(v));
+    syncSlider('curlStrength', 'curlStrength', v => Math.round(v));
+    syncSlider('splatForce', 'splatForce', v => Math.round(v));
+    syncSlider('velDissipation', 'velDissipation', v => v.toFixed(3));
+    syncSlider('dyeDissipation', 'dyeDissipation', v => v.toFixed(3));
+    syncSlider('pressureIters', 'pressureIters', v => Math.round(v));
+    syncSlider('pressureDecay', 'pressureDecay', v => v.toFixed(2));
+    syncColor('baseColor', 'baseColor');
+    syncColor('accentColor', 'accentColor');
+    syncColor('glitterColor', 'glitterColor');
+    syncColor('glitterAccent', 'glitterAccent');
+    syncColor('sheenColor', 'sheenColor');
+  }
+
+  // ─── Randomize helpers ────────────────────────────────────────────────
+  function randRange(lo, hi) { return lo + Math.random() * (hi - lo); }
+  function randColor() { return [Math.random(), Math.random(), Math.random()]; }
+  function snapTo(val, step) { return Math.round(val / step) * step; }
+
+  document.getElementById('randomizeColors').addEventListener('click', () => {
+    state.baseColor = randColor();
+    state.accentColor = randColor();
+    state.glitterColor = randColor();
+    state.glitterAccent = randColor();
+    state.sheenColor = randColor();
+    state.colorBlend = randRange(0, 1);
+    state.prismaticAmount = randRange(0, 20);
+    syncAllUI();
+  });
+
+  document.getElementById('randomizeParams').addEventListener('click', () => {
+    // Particle appearance
+    state.particleSize = snapTo(randRange(0.3, 4.0), 0.1);
+    state.glintBrightness = snapTo(randRange(0.1, 5.0), 0.1);
+    state.sizeRandomness = snapTo(randRange(0, 1), 0.01);
+    state.sheenStrength = snapTo(randRange(0, 100), 0.5);
+    // Interaction
+    state.clickSize = snapTo(randRange(0, 1), 0.01);
+    state.clickStrength = snapTo(randRange(0, 1), 0.01);
+    // Injectors
+    state.injectorIntensity = snapTo(randRange(0, 1), 0.01);
+    state.injectorSize = snapTo(randRange(0, 1), 0.01);
+    state.injectorCount = Math.round(randRange(0, 8));
+    state.injectorSpeed = snapTo(randRange(0, 1), 0.01);
+    state.burstCount = Math.round(randRange(0, 8));
+    // Noise
+    state.noiseAmount = snapTo(randRange(0, 1), 0.01);
+    state.noiseFrequency = snapTo(randRange(0, 1), 0.01);
+    state.noiseSpeed = snapTo(randRange(0, 1), 0.01);
+    // Fluid sim
+    state.curlStrength = Math.round(randRange(0, 50));
+    state.splatForce = snapTo(randRange(1000, 20000), 100);
+    state.velDissipation = snapTo(randRange(0.99, 1.0), 0.001);
+    state.dyeDissipation = snapTo(randRange(0.98, 1.0), 0.001);
+    state.pressureIters = Math.round(randRange(10, 60));
+    state.pressureDecay = snapTo(randRange(0, 1), 0.01);
+    // NOTE: particleCount is intentionally NOT randomized
+    syncAllUI();
+  });
+
   console.log('Fluid simulation starting...');
   requestAnimationFrame(frame);
 }

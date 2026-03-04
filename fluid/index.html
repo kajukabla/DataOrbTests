@@ -110,6 +110,26 @@
       background: #c90;
       cursor: pointer;
     }
+    .randomize-row {
+      display: flex;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+    .randomize-row button {
+      flex: 1;
+      padding: 6px 4px;
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 4px;
+      background: rgba(255,255,255,0.08);
+      color: #ccc;
+      font: 10px/1.2 system-ui, -apple-system, sans-serif;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .randomize-row button:hover { background: rgba(255,255,255,0.18); }
+    .randomize-row button:active { background: rgba(255,255,255,0.25); }
   </style>
 </head>
 <body>
@@ -119,6 +139,10 @@
   <button id="settingsToggle" title="Settings">&#9881;</button>
   <div id="settingsPanel">
     <div id="settingsContent">
+      <div class="randomize-row">
+        <button id="randomizeColors">Randomize Colors</button>
+        <button id="randomizeParams">Randomize Params</button>
+      </div>
       <div class="setting-group">
         <label>Particles</label>
         <select id="particleCountSelect">
