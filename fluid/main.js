@@ -28,6 +28,9 @@ const state = {
   injectorSpeed: 0.5,
   burstCount: 3,
   sheenColor: [1.0, 0.9, 0.7],
+  rimIntensity: 0.5,
+  chromaticStrength: 1.0,
+  causticIntensity: 0.2,
   splatForce: 6000,
   curlStrength: 15,
   pressureIters: 30,
@@ -60,6 +63,9 @@ struct Params {
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
+
+const SPHERE_CENTER = vec2f(0.5, 0.5);
+const SPHERE_RADIUS: f32 = 0.43;
 `;
 
 const MAX_SPLATS = 16;
@@ -76,9 +82,6 @@ struct Splat {
 @group(0) @binding(2) var dst: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(3) var<storage, read> splats: array<Splat>;
 @group(0) @binding(4) var<uniform> splatMeta: vec4u;
-
-const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS = 0.43;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -117,9 +120,6 @@ struct Splat {
 @group(0) @binding(2) var dst: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(3) var<storage, read> splats: array<Splat>;
 @group(0) @binding(4) var<uniform> splatMeta: vec4u;
-
-const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS = 0.43;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -163,7 +163,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let B = textureLoad(vel, vec2u(id.x, u32(max(i32(id.y)-1, 0))), 0).xy;
   let T = textureLoad(vel, vec2u(id.x, min(id.y+1, res-1)), 0).xy;
   let curl = 0.5 * ((R.y - L.y) - (T.x - B.x));
-  textureStore(dst, id.xy, vec4f(curl, 0.0, 0.0, 1.0));
+  let shearX = 0.5 * (R.x - L.x);
+  let shearY = 0.5 * (T.y - B.y);
+  textureStore(dst, id.xy, vec4f(curl, shearX, shearY, 1.0));
 }
 `;
 
@@ -172,9 +174,6 @@ ${commonHeader}
 @group(0) @binding(1) var velTex: texture_2d<f32>;
 @group(0) @binding(2) var curlTex: texture_2d<f32>;
 @group(0) @binding(3) var dst: texture_storage_2d<rgba16float, write>;
-
-const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS = 0.43;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -263,9 +262,6 @@ ${commonHeader}
 @group(0) @binding(2) var pressTex: texture_2d<f32>;
 @group(0) @binding(3) var dst: texture_storage_2d<rgba16float, write>;
 
-const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS = 0.43;
-
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
   let res = u32(p.simRes);
@@ -300,9 +296,6 @@ ${commonHeader}
 @group(0) @binding(1) var src: texture_2d<f32>;
 @group(0) @binding(2) var sampl: sampler;
 @group(0) @binding(3) var dst: texture_storage_2d<rgba16float, write>;
-
-const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS = 0.43;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -349,9 +342,6 @@ ${commonHeader}
 @group(0) @binding(2) var dyeSrc: texture_2d<f32>;
 @group(0) @binding(3) var sampl: sampler;
 @group(0) @binding(4) var dst: texture_storage_2d<rgba16float, write>;
-
-const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS = 0.43;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -473,6 +463,7 @@ function makeParticleUpdateShader(count) {
 ${commonHeader}
 @group(0) @binding(1) var velTex: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
+@group(0) @binding(7) var curlTex: texture_2d<f32>;
 
 struct Particle {
   posX: f32,
@@ -527,9 +518,6 @@ fn grainTint(h: f32) -> vec3f {
   return vec3f(0.75, 1.0, 0.82);
 }
 
-const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS: f32 = 0.43;
-
 @compute @workgroup_size(${PARTICLE_WG})
 fn main(@builtin(global_invocation_id) id: vec3u) {
   let idx = id.x;
@@ -540,20 +528,31 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   // Sample velocity at particle position
   let vel = textureSampleLevel(velTex, samp, vec2f(part.posX, part.posY), 0.0).xy;
 
+  // ── Glass marble velocity fix (commented out) ─────────────────────────
+  // var vel = ... (use var instead of let above to enable this)
+  // let pToC = vec2f(part.posX, part.posY) - SPHERE_CENTER;
+  // let pDst = length(pToC);
+  // if (pDst > SPHERE_RADIUS - 0.08) {
+  //   let pN = pToC / max(pDst, 0.001);
+  //   let radial = dot(vel, pN);
+  //   if (radial < 0.0) {
+  //     let prox = smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS, pDst);
+  //     vel -= pN * radial * prox;
+  //   }
+  // }
+  // ─────────────────────────────────────────────────────────────────────
+
   // Advect particle with fluid
   let dt = p.dt;
   part.posX += vel.x * dt * p.dx;
   part.posY += vel.y * dt * p.dx;
 
-  // Velocity gradient for 3D tumble (forward difference — 2 samples instead of 4)
-  let eps = 2.0 / p.simRes;
+  // Read curl + shear from pre-computed curl texture (saves 2 velocity samples)
   let pos = vec2f(part.posX, part.posY);
-  let vR = textureSampleLevel(velTex, samp, pos + vec2f(eps, 0.0), 0.0).xy;
-  let vT = textureSampleLevel(velTex, samp, pos + vec2f(0.0, eps), 0.0).xy;
-
-  let curl = ((vR.y - vel.y) - (vT.x - vel.x)) * 2.0;
-  let shearX = vR.x - vel.x;
-  let shearY = vT.y - vel.y;
+  let curlData = textureSampleLevel(curlTex, samp, pos, 0.0);
+  let curl = curlData.x * 2.0;
+  let shearX = curlData.y;
+  let shearY = curlData.z;
 
   // Update angular velocity with curl (damped for slower, smoother shimmer)
   part.angularVel = part.angularVel * 0.92 + curl * 1.0;
@@ -628,6 +627,16 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     colors[idx] = vec4f(0.0);
     return;
   }
+
+  // ── Glass marble dye warp + rimOverride (commented out) ───────────────
+  // let pNorm = centered / 0.43;
+  // let pR = min(length(pNorm), 0.999);
+  // let pZ = sqrt(max(1.0 - pR * pR, 0.0));
+  // let warpedPUV = particleUV - centered * (1.0 - pZ) * 0.3;
+  // let dye = textureSampleLevel(dyeTex, samp, warpedPUV, 0.0).rgb;
+  // let rimOverride = smoothstep(0.28, 0.43, pDist);
+  // let fluidGate = max(smoothstep(0.0, 0.15, intensity), rimOverride);
+  // ─────────────────────────────────────────────────────────────────────
 
   let dye = textureSampleLevel(dyeTex, samp, particleUV, 0.0).rgb;
   let intensity = dot(dye, vec3f(0.3, 0.6, 0.1));
@@ -750,6 +759,17 @@ fn main(
   let aspect = screenSize.x / screenSize.y;
   let clipSize = vec2f(pixelSize * 2.0 / screenSize.x, pixelSize * 2.0 / screenSize.y);
 
+  // ── Glass marble inverse warp (commented out) ─────────────────────────
+  // let pCen = vec2f(part.posX, part.posY) - vec2f(0.5, 0.5);
+  // let pDistN = min(length(pCen) / 0.43, 0.999);
+  // let pZV = sqrt(max(1.0 - pDistN * pDistN, 0.0));
+  // var warpedXY = vec2f(part.posX, part.posY) + pCen * (1.0 - pZV) * 0.3;
+  // let wCen = warpedXY - vec2f(0.5, 0.5);
+  // let wDist = length(wCen);
+  // if (wDist > 0.43) { warpedXY = vec2f(0.5, 0.5) + wCen / wDist * 0.43; }
+  // let rawClip = warpedXY * 2.0 - 1.0;
+  // ─────────────────────────────────────────────────────────────────────
+
   let rawClip = vec2f(part.posX, part.posY) * 2.0 - 1.0;
   let clipPos = vec2f(
     rawClip.x / max(aspect, 1.0),
@@ -819,7 +839,7 @@ const displayShaderFrag = /* wgsl */`
 
 struct DisplayUniforms {
   screen: vec4f,      // xy=screenSize, z=time, w=sheenStrength
-  baseColor: vec4f,   // xyz=baseColor RGB
+  baseColor: vec4f,   // xyz=baseColor RGB, w=chromaticStrength
   accentColor: vec4f, // xyz=accentColor RGB, w=colorBlend
   sheenColor: vec4f,  // xyz=sheenColor RGB
 };
@@ -846,6 +866,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let screenSize = du.screen.xy;
   let time = du.screen.z;
   let sheenStrength = du.screen.w;
+  // let chromaticStrength = du.baseColor.w; // glass marble
   let rawUV = vec2f(pos.x, screenSize.y - pos.y) / screenSize;
 
   // Aspect-correct UV so simulation renders as centered 1:1 square
@@ -861,6 +882,27 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let screenRadius = 0.42;
   let mask = 1.0 - smoothstep(screenRadius - 0.005, screenRadius + 0.005, screenDist);
 
+  // ── Glass marble (commented out) ──────────────────────────────────────
+  // let normPos = centered / screenRadius;
+  // let r = min(length(normPos), 0.999);
+  // let z = sqrt(max(1.0 - r * r, 0.0));
+  // let distortAmount = 0.3;
+  // let warpedUV = uv - centered * (1.0 - z) * distortAmount;
+  // let refractDir = normPos * (1.0 - z);
+  // let chromaticStrength = du.baseColor.w;
+  // let iorR = 0.01 * chromaticStrength;
+  // let iorG = 0.025 * chromaticStrength;
+  // let iorB = 0.04 * chromaticStrength;
+  // let uvR = warpedUV + refractDir * iorR;
+  // let uvG = warpedUV + refractDir * iorG;
+  // let uvB = warpedUV + refractDir * iorB;
+  // let raw = vec3f(
+  //   textureSampleLevel(dyeTex, samp, uvR, 0.0).r,
+  //   textureSampleLevel(dyeTex, samp, uvG, 0.0).g,
+  //   textureSampleLevel(dyeTex, samp, uvB, 0.0).b
+  // );
+  // ─────────────────────────────────────────────────────────────────────
+
   // Sample fluid dye
   let raw = textureSampleLevel(dyeTex, samp, uv, 0.0).rgb;
   let intensity = dot(raw, vec3f(0.3, 0.6, 0.1));
@@ -875,6 +917,12 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let densityT = smoothstep(lo, hi, intensity);
   let fluidCol = oklabToLinear(mix(okAccent, okBase, densityT));
   var color = fluidCol * intensity * 0.25;
+
+  // ── Glass marble depth darkening (commented out) ──────────────────────
+  // let pathLength = 2.0 * z;
+  // let absorptionColor = vec3f(0.04, 0.06, 0.02);
+  // color *= exp(-absorptionColor * pathLength * 2.0);
+  // ─────────────────────────────────────────────────────────────────────
 
   // Surface gradient for multi-lobe metallic sheen
   let texel = vec2f(1.0 / 512.0);
@@ -909,6 +957,19 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   return vec4f(color, 1.0);
 }
 `;
+
+// ─── Glass Shell Fragment Shader (commented out) ────────────────────────────
+// const glassShellFrag = /* wgsl */`
+// struct GlassUniforms {
+//   screen: vec4f,
+//   params: vec4f,
+// };
+// @group(0) @binding(0) var<uniform> gu: GlassUniforms;
+// @fragment fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+//   ... Fresnel rim, specular highlight, caustic ring, env reflection ...
+//   See git history for full implementation.
+// }
+// `;
 
 // ─── GPU Particle Init Shader ────────────────────────────────────────────────
 function makeParticleInitShader(count) {
@@ -1229,6 +1290,15 @@ async function main() {
     primitive: { topology: 'triangle-list' },
   });
 
+  // ─── Glass Shell render pipeline (commented out) ───────────────────────
+  // const glassUB = device.createBuffer({
+  //   size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  // });
+  // const glassUBData = new Float32Array(8);
+  // const glassShellBGL = device.createBindGroupLayout({ ... });
+  // const glassShellPipeline = device.createRenderPipeline({ ... });
+  // See git history for full glass shell pipeline setup.
+
   // ─── Bind group helpers ─────────────────────────────────────────────────
   function bg(layout, resources) {
     return device.createBindGroup({
@@ -1295,6 +1365,7 @@ async function main() {
       { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
       { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
       { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 7, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
     ],
   });
 
@@ -1305,19 +1376,6 @@ async function main() {
       module: device.createShaderModule({ code: makeParticleUpdateShader(state.particleCount), label: 'particleUpdate' }),
       entryPoint: 'main',
     },
-  });
-
-  let particleUpdateBG = device.createBindGroup({
-    layout: particleUpdateBGL,
-    entries: [
-      { binding: 0, resource: { buffer: paramBuf } },
-      { binding: 1, resource: tview(velA) },
-      { binding: 2, resource: linearSampler },
-      { binding: 3, resource: { buffer: particleBuf } },
-      { binding: 4, resource: tview(dyeA) },
-      { binding: 5, resource: { buffer: particleUB } },
-      { binding: 6, resource: { buffer: colorBuf } },
-    ],
   });
 
   // Particle render pipeline
@@ -1360,19 +1418,16 @@ async function main() {
     ],
   });
 
-  // ─── Pre-allocated simulation bind groups (persistent textures) ────────
-  const curlBGFixed = bg(curlPipe.layout, [ubuf(paramBuf), tview(velA), tview(curlTex)]);
-  const vortBGFixed = bg(vortPipe.layout, [ubuf(paramBuf), tview(velA), tview(curlTex), tview(velB)]);
-  const divBGFixed = bg(divPipe.layout, [ubuf(paramBuf), tview(velA), tview(divTex)]);
-  const clearPressBGFixed = bg(clearPressPipe.layout, [ubuf(paramBuf), tview(pressA), tview(pressB)]);
-  const jacobiBG_AtoB = bg(jacobiPipe.layout, [ubuf(paramBuf), tview(pressA), tview(divTex), tview(pressB)]);
-  const jacobiBG_BtoA = bg(jacobiPipe.layout, [ubuf(paramBuf), tview(pressB), tview(divTex), tview(pressA)]);
-  const gradSubBGFixed = bg(gradSubPipe.layout, [ubuf(paramBuf), tview(velA), tview(pressA), tview(velB)]);
-  const advVelBGFixed = bg(advectVelPipe.layout, [ubuf(paramBuf), tview(velA), linearSampler, tview(velB)]);
-  const advDyeBGFixed = bg(advectDyePipe.layout, [ubuf(paramBuf), tview(velA), tview(dyeA), linearSampler, tview(dyeB)]);
-  const curlNoiseBGFixed = bg(curlNoisePipe.layout, [ubuf(noiseBuf), tview(velA), tview(velB)]);
-  const displayBGFixed = bg(displayBGL, [tview(dyeA), linearSampler, ubuf(displayUB)]);
-  // Batch splat GPU resources
+  // ─── Ping-pong flip state (0 = A is current, 1 = B is current) ─────────
+  let velFlip = 0;   // 0: velA is current, 1: velB is current
+  let dyeFlip = 0;   // 0: dyeA is current, 1: dyeB is current
+  let pressFlip = 0; // 0: pressA is current, 1: pressB is current
+
+  const velTexs = [velA, velB];
+  const dyeTexs = [dyeA, dyeB];
+  const pressTexs = [pressA, pressB];
+
+  // ─── Batch splat GPU resources ──────────────────────────────────────────
   const splatBuf = device.createBuffer({
     label: 'splatData',
     size: MAX_SPLATS * 32, // 8 f32 per splat
@@ -1386,10 +1441,83 @@ async function main() {
   const splatArrayData = new Float32Array(MAX_SPLATS * 8);
   const splatCountUData = new Uint32Array(4);
 
-  const batchSplatVelBG = bg(batchSplatBGL,
-    [ubuf(paramBuf), tview(velA), tview(velB), ubuf(splatBuf), ubuf(splatCountBuf)]);
-  const batchSplatDyeBG = bg(batchSplatBGL,
-    [ubuf(paramBuf), tview(dyeA), tview(dyeB), ubuf(splatBuf), ubuf(splatCountBuf)]);
+  // ─── Pre-allocated simulation bind groups (ping-pong pairs) ────────
+  // Each pass has 2 variants: [0] reads A writes B, [1] reads B writes A
+  // batchSplatVel: reads vel[cur], writes vel[1-cur]
+  const batchSplatVelBGs = [
+    bg(batchSplatBGL, [ubuf(paramBuf), tview(velA), tview(velB), ubuf(splatBuf), ubuf(splatCountBuf)]),
+    bg(batchSplatBGL, [ubuf(paramBuf), tview(velB), tview(velA), ubuf(splatBuf), ubuf(splatCountBuf)]),
+  ];
+  // batchSplatDye: reads dye[cur], writes dye[1-cur]
+  const batchSplatDyeBGs = [
+    bg(batchSplatBGL, [ubuf(paramBuf), tview(dyeA), tview(dyeB), ubuf(splatBuf), ubuf(splatCountBuf)]),
+    bg(batchSplatBGL, [ubuf(paramBuf), tview(dyeB), tview(dyeA), ubuf(splatBuf), ubuf(splatCountBuf)]),
+  ];
+  // curl: reads vel[cur], writes curlTex (always same dest)
+  const curlBGs = [
+    bg(curlPipe.layout, [ubuf(paramBuf), tview(velA), tview(curlTex)]),
+    bg(curlPipe.layout, [ubuf(paramBuf), tview(velB), tview(curlTex)]),
+  ];
+  // vorticity: reads vel[cur] + curlTex, writes vel[1-cur]
+  const vortBGs = [
+    bg(vortPipe.layout, [ubuf(paramBuf), tview(velA), tview(curlTex), tview(velB)]),
+    bg(vortPipe.layout, [ubuf(paramBuf), tview(velB), tview(curlTex), tview(velA)]),
+  ];
+  // divergence: reads vel[cur], writes divTex (always same dest)
+  const divBGs = [
+    bg(divPipe.layout, [ubuf(paramBuf), tview(velA), tview(divTex)]),
+    bg(divPipe.layout, [ubuf(paramBuf), tview(velB), tview(divTex)]),
+  ];
+  // clearPressure: reads press[cur], writes press[1-cur]
+  const clearPressBGs = [
+    bg(clearPressPipe.layout, [ubuf(paramBuf), tview(pressA), tview(pressB)]),
+    bg(clearPressPipe.layout, [ubuf(paramBuf), tview(pressB), tview(pressA)]),
+  ];
+  // jacobi: reads press[cur] + divTex, writes press[1-cur]
+  const jacobiBGs = [
+    bg(jacobiPipe.layout, [ubuf(paramBuf), tview(pressA), tview(divTex), tview(pressB)]),
+    bg(jacobiPipe.layout, [ubuf(paramBuf), tview(pressB), tview(divTex), tview(pressA)]),
+  ];
+  // gradSub: reads vel[cur] + press[cur], writes vel[1-cur] — 4 variants (vel × press)
+  const gradSubBGs = [
+    [bg(gradSubPipe.layout, [ubuf(paramBuf), tview(velA), tview(pressA), tview(velB)]),
+     bg(gradSubPipe.layout, [ubuf(paramBuf), tview(velA), tview(pressB), tview(velB)])],
+    [bg(gradSubPipe.layout, [ubuf(paramBuf), tview(velB), tview(pressA), tview(velA)]),
+     bg(gradSubPipe.layout, [ubuf(paramBuf), tview(velB), tview(pressB), tview(velA)])],
+  ];
+  // advectVel: reads vel[cur] (both src + sampler), writes vel[1-cur]
+  const advVelBGs = [
+    bg(advectVelPipe.layout, [ubuf(paramBuf), tview(velA), linearSampler, tview(velB)]),
+    bg(advectVelPipe.layout, [ubuf(paramBuf), tview(velB), linearSampler, tview(velA)]),
+  ];
+  // advectDye: reads vel[cur] + dye[cur], writes dye[1-cur] — 4 variants (vel × dye)
+  const advDyeBGs = [
+    [bg(advectDyePipe.layout, [ubuf(paramBuf), tview(velA), tview(dyeA), linearSampler, tview(dyeB)]),
+     bg(advectDyePipe.layout, [ubuf(paramBuf), tview(velA), tview(dyeB), linearSampler, tview(dyeA)])],
+    [bg(advectDyePipe.layout, [ubuf(paramBuf), tview(velB), tview(dyeA), linearSampler, tview(dyeB)]),
+     bg(advectDyePipe.layout, [ubuf(paramBuf), tview(velB), tview(dyeB), linearSampler, tview(dyeA)])],
+  ];
+  // curlNoise: reads vel[cur], writes vel[1-cur]
+  const curlNoiseBGs = [
+    bg(curlNoisePipe.layout, [ubuf(noiseBuf), tview(velA), tview(velB)]),
+    bg(curlNoisePipe.layout, [ubuf(noiseBuf), tview(velB), tview(velA)]),
+  ];
+  // display: reads dye[cur]
+  const displayBGs = [
+    bg(displayBGL, [tview(dyeA), linearSampler, ubuf(displayUB)]),
+    bg(displayBGL, [tview(dyeB), linearSampler, ubuf(displayUB)]),
+  ];
+  // particleUpdate: reads vel[cur] + dye[cur] + curlTex — 4 variants [velFlip][dyeFlip]
+  function makeParticleUpdateBGs(pBuf, cBuf) {
+    return [
+      [bg(particleUpdateBGL, [ubuf(paramBuf), tview(velA), linearSampler, {buffer: pBuf}, tview(dyeA), ubuf(particleUB), {buffer: cBuf}, tview(curlTex)]),
+       bg(particleUpdateBGL, [ubuf(paramBuf), tview(velA), linearSampler, {buffer: pBuf}, tview(dyeB), ubuf(particleUB), {buffer: cBuf}, tview(curlTex)])],
+      [bg(particleUpdateBGL, [ubuf(paramBuf), tview(velB), linearSampler, {buffer: pBuf}, tview(dyeA), ubuf(particleUB), {buffer: cBuf}, tview(curlTex)]),
+       bg(particleUpdateBGL, [ubuf(paramBuf), tview(velB), linearSampler, {buffer: pBuf}, tview(dyeB), ubuf(particleUB), {buffer: cBuf}, tview(curlTex)])],
+    ];
+  }
+  let particleUpdateBGs = makeParticleUpdateBGs(particleBuf, colorBuf);
+  // const glassShellBG = bg(glassShellBGL, [ubuf(glassUB)]); // glass marble
 
   let splatCount = 0;
   function addSplat(x, y, dx, dy, r, g, b, radius) {
@@ -1433,18 +1561,7 @@ async function main() {
       },
     });
 
-    particleUpdateBG = device.createBindGroup({
-      layout: particleUpdateBGL,
-      entries: [
-        { binding: 0, resource: { buffer: paramBuf } },
-        { binding: 1, resource: tview(velA) },
-        { binding: 2, resource: linearSampler },
-        { binding: 3, resource: { buffer: newBuf } },
-        { binding: 4, resource: tview(dyeA) },
-        { binding: 5, resource: { buffer: particleUB } },
-        { binding: 6, resource: { buffer: newColorBuf } },
-      ],
-    });
+    particleUpdateBGs = makeParticleUpdateBGs(newBuf, newColorBuf);
 
     particleRenderBG = device.createBindGroup({
       layout: particleRenderBGL,
@@ -1621,6 +1738,7 @@ async function main() {
     displayUBData[4] = okBaseCol[0];
     displayUBData[5] = okBaseCol[1];
     displayUBData[6] = okBaseCol[2];
+    // displayUBData[7] = state.chromaticStrength; // glass marble
     displayUBData[8] = okAccentCol[0];
     displayUBData[9] = okAccentCol[1];
     displayUBData[10] = okAccentCol[2];
@@ -1727,107 +1845,95 @@ async function main() {
     if (splatCount > 0) {
       const p1 = enc.beginComputePass();
       p1.setPipeline(batchSplatVelPipe);
-      p1.setBindGroup(0, batchSplatVelBG);
+      p1.setBindGroup(0, batchSplatVelBGs[velFlip]);
       p1.dispatchWorkgroups(dispatch, dispatch);
       p1.end();
-      enc.copyTextureToTexture(
-        { texture: velB }, { texture: velA }, [SIM_RES, SIM_RES]);
+      velFlip ^= 1;
 
       const p2 = enc.beginComputePass();
       p2.setPipeline(batchSplatDyePipe);
-      p2.setBindGroup(0, batchSplatDyeBG);
+      p2.setBindGroup(0, batchSplatDyeBGs[dyeFlip]);
       p2.dispatchWorkgroups(dispatch, dispatch);
       p2.end();
-      enc.copyTextureToTexture(
-        { texture: dyeB }, { texture: dyeA }, [SIM_RES, SIM_RES]);
+      dyeFlip ^= 1;
     }
 
-    // ── Pass 2: Curl ──
+    // ── Pass 2: Curl (reads vel[cur], writes curlTex — no flip) ──
     {
       const p = enc.beginComputePass();
       p.setPipeline(curlPipe.pipeline);
-      p.setBindGroup(0, curlBGFixed);
+      p.setBindGroup(0, curlBGs[velFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
     }
 
-    // ── Pass 3: Vorticity Confinement ──
+    // ── Pass 3: Vorticity Confinement (reads vel[cur], writes vel[1-cur]) ──
     {
       const p = enc.beginComputePass();
       p.setPipeline(vortPipe.pipeline);
-      p.setBindGroup(0, vortBGFixed);
+      p.setBindGroup(0, vortBGs[velFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
-      enc.copyTextureToTexture(
-        { texture: velB }, { texture: velA }, [SIM_RES, SIM_RES]);
+      velFlip ^= 1;
     }
 
-    // ── Pass 4: Divergence ──
+    // ── Pass 4: Divergence (reads vel[cur], writes divTex — no flip) ──
     {
       const p = enc.beginComputePass();
       p.setPipeline(divPipe.pipeline);
-      p.setBindGroup(0, divBGFixed);
+      p.setBindGroup(0, divBGs[velFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
     }
 
-    // ── Pass 5: Clear Pressure ──
+    // ── Pass 5: Clear Pressure (reads press[cur], writes press[1-cur]) ──
     {
       const p = enc.beginComputePass();
       p.setPipeline(clearPressPipe.pipeline);
-      p.setBindGroup(0, clearPressBGFixed);
+      p.setBindGroup(0, clearPressBGs[pressFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
-      enc.copyTextureToTexture(
-        { texture: pressB }, { texture: pressA }, [SIM_RES, SIM_RES]);
+      pressFlip ^= 1;
     }
 
     // ── Pass 6: Jacobi Pressure Solve ──
     for (let i = 0; i < state.pressureIters; i++) {
-      const jBG = (i % 2 === 0) ? jacobiBG_AtoB : jacobiBG_BtoA;
       const p = enc.beginComputePass();
       p.setPipeline(jacobiPipe.pipeline);
-      p.setBindGroup(0, jBG);
+      p.setBindGroup(0, jacobiBGs[pressFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
-    }
-    // After even iterations, result is in pressA; after odd, in pressB
-    if (state.pressureIters % 2 !== 0) {
-      enc.copyTextureToTexture(
-        { texture: pressB }, { texture: pressA }, [SIM_RES, SIM_RES]);
+      pressFlip ^= 1;
     }
 
-    // ── Pass 7: Gradient Subtraction ──
+    // ── Pass 7: Gradient Subtraction (reads vel[cur] + press[cur], writes vel[1-cur]) ──
     {
       const p = enc.beginComputePass();
       p.setPipeline(gradSubPipe.pipeline);
-      p.setBindGroup(0, gradSubBGFixed);
+      p.setBindGroup(0, gradSubBGs[velFlip][pressFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
-      enc.copyTextureToTexture(
-        { texture: velB }, { texture: velA }, [SIM_RES, SIM_RES]);
+      velFlip ^= 1;
     }
 
-    // ── Pass 8: Advect Velocity ──
+    // ── Pass 8: Advect Velocity (reads vel[cur], writes vel[1-cur]) ──
     {
       const p = enc.beginComputePass();
       p.setPipeline(advectVelPipe.pipeline);
-      p.setBindGroup(0, advVelBGFixed);
+      p.setBindGroup(0, advVelBGs[velFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
-      enc.copyTextureToTexture(
-        { texture: velB }, { texture: velA }, [SIM_RES, SIM_RES]);
+      velFlip ^= 1;
     }
 
-    // ── Pass 9: Advect Dye ──
+    // ── Pass 9: Advect Dye (reads vel[cur] + dye[cur], writes dye[1-cur]) ──
     {
       const p = enc.beginComputePass();
       p.setPipeline(advectDyePipe.pipeline);
-      p.setBindGroup(0, advDyeBGFixed);
+      p.setBindGroup(0, advDyeBGs[velFlip][dyeFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
-      enc.copyTextureToTexture(
-        { texture: dyeB }, { texture: dyeA }, [SIM_RES, SIM_RES]);
+      dyeFlip ^= 1;
     }
 
     // ── Curl Noise (field-wide velocity perturbation) ──
@@ -1842,18 +1948,17 @@ async function main() {
       device.queue.writeBuffer(noiseBuf, 0, noiseData);
       const p = enc.beginComputePass();
       p.setPipeline(curlNoisePipe.pipeline);
-      p.setBindGroup(0, curlNoiseBGFixed);
+      p.setBindGroup(0, curlNoiseBGs[velFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
-      enc.copyTextureToTexture(
-        { texture: velB }, { texture: velA }, [SIM_RES, SIM_RES]);
+      velFlip ^= 1;
     }
 
     // ── Pass 10: Particle Update (compute) ──
     {
       const p = enc.beginComputePass();
       p.setPipeline(particleUpdatePipeline);
-      p.setBindGroup(0, particleUpdateBG);
+      p.setBindGroup(0, particleUpdateBGs[velFlip][dyeFlip]);
       p.dispatchWorkgroups(particleDispatches);
       p.end();
     }
@@ -1870,7 +1975,7 @@ async function main() {
         }],
       });
       rp.setPipeline(displayPipeline);
-      rp.setBindGroup(0, displayBGFixed);
+      rp.setBindGroup(0, displayBGs[dyeFlip]);
       rp.draw(3);
       rp.end();
     }
@@ -1889,6 +1994,18 @@ async function main() {
       rp.draw(4, state.particleCount);
       rp.end();
     }
+
+    // ── Pass 13: Glass Shell (commented out) ──
+    // glassUBData[0] = canvas.width;
+    // glassUBData[1] = canvas.height;
+    // glassUBData[2] = time;
+    // glassUBData[4] = state.rimIntensity;
+    // glassUBData[5] = state.causticIntensity;
+    // device.queue.writeBuffer(glassUB, 0, glassUBData);
+    // { const rp = enc.beginRenderPass({ ... });
+    //   rp.setPipeline(glassShellPipeline);
+    //   rp.setBindGroup(0, glassShellBG);
+    //   rp.draw(3); rp.end(); }
 
     device.queue.submit([enc.finish()]);
   }
@@ -1972,6 +2089,9 @@ async function main() {
 
   wireSlider('sheenStrength', 'sheenStrength');
   wireColor('sheenColor', 'sheenColor');
+  // wireSlider('rimIntensity', 'rimIntensity'); // glass marble
+  // wireSlider('chromaticStrength', 'chromaticStrength'); // glass marble
+  // wireSlider('causticIntensity', 'causticIntensity'); // glass marble
   wireSlider('clickSize', 'clickSize');
   wireSlider('clickStrength', 'clickStrength');
   wireSlider('injectorIntensity', 'injectorIntensity');
