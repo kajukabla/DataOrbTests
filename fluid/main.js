@@ -162,108 +162,154 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 `;
 
-const curlShader = /* wgsl */`
+// Fused curl + vorticity with shared memory (eliminates 1 dispatch + pass barrier)
+const fusedCurlVortShader = /* wgsl */`
 ${commonHeader}
-@group(0) @binding(1) var vel: texture_2d<f32>;
-@group(0) @binding(2) var dst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(1) var velSrc: texture_2d<f32>;
+@group(0) @binding(2) var curlDst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var velDst: texture_storage_2d<rgba16float, write>;
+
+var<workgroup> vxTile: array<array<f32, 12>, 12>;
+var<workgroup> vyTile: array<array<f32, 12>, 12>;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
-fn main(@builtin(global_invocation_id) id: vec3u) {
+fn main(
+  @builtin(global_invocation_id) id: vec3u,
+  @builtin(local_invocation_id) lid: vec3u,
+  @builtin(workgroup_id) wid: vec3u
+) {
   let res = u32(p.simRes);
-  if (id.x >= res || id.y >= res) { return; }
-  let L = textureLoad(vel, vec2u(u32(max(i32(id.x)-1, 0)), id.y), 0).xy;
-  let R = textureLoad(vel, vec2u(min(id.x+1, res-1), id.y), 0).xy;
-  let B = textureLoad(vel, vec2u(id.x, u32(max(i32(id.y)-1, 0))), 0).xy;
-  let T = textureLoad(vel, vec2u(id.x, min(id.y+1, res-1)), 0).xy;
-  let curl = 0.5 * ((R.y - L.y) - (T.x - B.x));
-  let shearX = 0.5 * (R.x - L.x);
-  let shearY = 0.5 * (T.y - B.y);
-  textureStore(dst, id.xy, vec4f(curl, shearX, shearY, 1.0));
-}
-`;
+  let lIdx = lid.y * ${WORKGROUP}u + lid.x;
+  let baseX = wid.x * ${WORKGROUP}u;
+  let baseY = wid.y * ${WORKGROUP}u;
 
-const vorticityShader = /* wgsl */`
-${commonHeader}
-@group(0) @binding(1) var velTex: texture_2d<f32>;
-@group(0) @binding(2) var curlTex: texture_2d<f32>;
-@group(0) @binding(3) var dst: texture_storage_2d<rgba16float, write>;
+  // Load 12x12 velocity tile (2-wide halo around 8x8 workgroup)
+  for (var t = lIdx; t < 144u; t += ${WORKGROUP * WORKGROUP}u) {
+    let tx = t % 12u;
+    let ty = t / 12u;
+    let gx = i32(baseX) + i32(tx) - 2;
+    let gy = i32(baseY) + i32(ty) - 2;
+    let cx = u32(clamp(gx, 0, i32(res) - 1));
+    let cy = u32(clamp(gy, 0, i32(res) - 1));
+    let v = textureLoad(velSrc, vec2u(cx, cy), 0).xy;
+    vxTile[ty][tx] = v.x;
+    vyTile[ty][tx] = v.y;
+  }
+  workgroupBarrier();
 
-@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
-fn main(@builtin(global_invocation_id) id: vec3u) {
-  let res = u32(p.simRes);
   if (id.x >= res || id.y >= res) { return; }
+
+  let lx = lid.x;
+  let ly = lid.y;
+
+  // Compute curl + shear at center from vel tile (center at tile pos lx+2, ly+2)
+  let curl = 0.5 * ((vyTile[ly+2][lx+3] - vyTile[ly+2][lx+1]) - (vxTile[ly+3][lx+2] - vxTile[ly+1][lx+2]));
+  let shearX = 0.5 * (vxTile[ly+2][lx+3] - vxTile[ly+2][lx+1]);
+  let shearY = 0.5 * (vyTile[ly+3][lx+2] - vyTile[ly+1][lx+2]);
+
+  // Write curl texture (needed by particle update shader)
+  textureStore(curlDst, id.xy, vec4f(curl, shearX, shearY, 1.0));
+
+  // Vorticity confinement
   let uv = (vec2f(id.xy) + 0.5) / p.simRes;
   let dist = length(uv - SPHERE_CENTER);
   if (dist > SPHERE_RADIUS) {
-    textureStore(dst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+    textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     return;
   }
-  let cL = abs(textureLoad(curlTex, vec2u(u32(max(i32(id.x)-1, 0)), id.y), 0).x);
-  let cR = abs(textureLoad(curlTex, vec2u(min(id.x+1, res-1), id.y), 0).x);
-  let cB = abs(textureLoad(curlTex, vec2u(id.x, u32(max(i32(id.y)-1, 0))), 0).x);
-  let cT = abs(textureLoad(curlTex, vec2u(id.x, min(id.y+1, res-1)), 0).x);
-  let c  = textureLoad(curlTex, id.xy, 0).x;
+
+  // Compute curl at 4 neighbors from shared vel tile for vorticity N vector
+  let curlL = 0.5 * ((vyTile[ly+2][lx+2] - vyTile[ly+2][lx]) - (vxTile[ly+3][lx+1] - vxTile[ly+1][lx+1]));
+  let curlR = 0.5 * ((vyTile[ly+2][lx+4] - vyTile[ly+2][lx+2]) - (vxTile[ly+3][lx+3] - vxTile[ly+1][lx+3]));
+  let curlB = 0.5 * ((vyTile[ly+1][lx+3] - vyTile[ly+1][lx+1]) - (vxTile[ly+2][lx+2] - vxTile[ly][lx+2]));
+  let curlT = 0.5 * ((vyTile[ly+3][lx+3] - vyTile[ly+3][lx+1]) - (vxTile[ly+4][lx+2] - vxTile[ly+2][lx+2]));
+
+  let cL = abs(curlL);
+  let cR = abs(curlR);
+  let cB = abs(curlB);
+  let cT = abs(curlT);
+
   var N = vec2f(cR - cL, cT - cB);
   let lenN = length(N);
+  let vel = vec2f(vxTile[ly+2][lx+2], vyTile[ly+2][lx+2]);
   if (lenN < 1e-5) {
-    textureStore(dst, id.xy, textureLoad(velTex, id.xy, 0));
+    textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
     return;
   }
   N = N / lenN;
-  let force = vec2f(N.y, -N.x) * c * p.curlStrength;
-  var vel = textureLoad(velTex, id.xy, 0).xy;
-  vel += force * p.dt;
-  textureStore(dst, id.xy, vec4f(vel, 0.0, 1.0));
+  let force = vec2f(N.y, -N.x) * curl * p.curlStrength;
+  let newVel = vel + force * p.dt;
+  textureStore(velDst, id.xy, vec4f(newVel, 0.0, 1.0));
 }
 `;
 
-const divergenceShader = /* wgsl */`
+// Fused divergence + clear pressure (eliminates 1 dispatch + pass barrier)
+const fusedDivClearPressShader = /* wgsl */`
 ${commonHeader}
 @group(0) @binding(1) var vel: texture_2d<f32>;
-@group(0) @binding(2) var dst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var pressSrc: texture_2d<f32>;
+@group(0) @binding(3) var divDst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(4) var pressDst: texture_storage_2d<rgba16float, write>;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
   let res = u32(p.simRes);
   if (id.x >= res || id.y >= res) { return; }
+  // Divergence
   let L = textureLoad(vel, vec2u(u32(max(i32(id.x)-1, 0)), id.y), 0).x;
   let R = textureLoad(vel, vec2u(min(id.x+1, res-1), id.y), 0).x;
   let B = textureLoad(vel, vec2u(id.x, u32(max(i32(id.y)-1, 0))), 0).y;
   let T = textureLoad(vel, vec2u(id.x, min(id.y+1, res-1)), 0).y;
   let div = 0.5 * ((R - L) + (T - B));
-  textureStore(dst, id.xy, vec4f(div, 0.0, 0.0, 1.0));
+  textureStore(divDst, id.xy, vec4f(div, 0.0, 0.0, 1.0));
+  // Clear pressure (decay)
+  let pr = textureLoad(pressSrc, id.xy, 0).x * p.pressureDecay;
+  textureStore(pressDst, id.xy, vec4f(pr, 0.0, 0.0, 1.0));
 }
 `;
 
-const clearPressureShader = /* wgsl */`
-${commonHeader}
-@group(0) @binding(1) var src: texture_2d<f32>;
-@group(0) @binding(2) var dst: texture_storage_2d<rgba16float, write>;
-
-@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
-fn main(@builtin(global_invocation_id) id: vec3u) {
-  let res = u32(p.simRes);
-  if (id.x >= res || id.y >= res) { return; }
-  let pr = textureLoad(src, id.xy, 0).x * p.pressureDecay;
-  textureStore(dst, id.xy, vec4f(pr, 0.0, 0.0, 1.0));
-}
-`;
-
+// Shared memory Jacobi (shared mem reduces texture loads ~49%)
 const jacobiShader = /* wgsl */`
 ${commonHeader}
 @group(0) @binding(1) var pressure: texture_2d<f32>;
 @group(0) @binding(2) var divTex: texture_2d<f32>;
 @group(0) @binding(3) var dst: texture_storage_2d<rgba16float, write>;
 
+var<workgroup> pTile: array<array<f32, 10>, 10>;
+
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
-fn main(@builtin(global_invocation_id) id: vec3u) {
+fn main(
+  @builtin(global_invocation_id) id: vec3u,
+  @builtin(local_invocation_id) lid: vec3u,
+  @builtin(workgroup_id) wid: vec3u
+) {
   let res = u32(p.simRes);
+  let lIdx = lid.y * ${WORKGROUP}u + lid.x;
+  let baseX = wid.x * ${WORKGROUP}u;
+  let baseY = wid.y * ${WORKGROUP}u;
+
+  // Load 10x10 pressure tile (1-wide halo around 8x8 workgroup)
+  for (var t = lIdx; t < 100u; t += ${WORKGROUP * WORKGROUP}u) {
+    let tx = t % 10u;
+    let ty = t / 10u;
+    let gx = i32(baseX) + i32(tx) - 1;
+    let gy = i32(baseY) + i32(ty) - 1;
+    let cx = u32(clamp(gx, 0, i32(res) - 1));
+    let cy = u32(clamp(gy, 0, i32(res) - 1));
+    pTile[ty][tx] = textureLoad(pressure, vec2u(cx, cy), 0).x;
+  }
+  workgroupBarrier();
+
   if (id.x >= res || id.y >= res) { return; }
-  let pL = textureLoad(pressure, vec2u(u32(max(i32(id.x)-1, 0)), id.y), 0).x;
-  let pR = textureLoad(pressure, vec2u(min(id.x+1, res-1), id.y), 0).x;
-  let pB = textureLoad(pressure, vec2u(id.x, u32(max(i32(id.y)-1, 0))), 0).x;
-  let pT = textureLoad(pressure, vec2u(id.x, min(id.y+1, res-1)), 0).x;
-  let d  = textureLoad(divTex, id.xy, 0).x;
+
+  let lx = lid.x;
+  let ly = lid.y;
+  let pL = pTile[ly + 1][lx];
+  let pR = pTile[ly + 1][lx + 2];
+  let pB = pTile[ly][lx + 1];
+  let pT = pTile[ly + 2][lx + 1];
+  let d = textureLoad(divTex, id.xy, 0).x;
+
   let pNew = (pL + pR + pB + pT - d) * 0.25;
   textureStore(dst, id.xy, vec4f(pNew, 0.0, 0.0, 1.0));
 }
@@ -471,6 +517,39 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
   vel += curl * np.amount * 8.0;
   textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
+}
+`;
+
+// ─── Particle Compact Shader (GPU indirect draw — builds visible index list) ──
+function makeParticleCompactShader(count) {
+  return /* wgsl */`
+@group(0) @binding(0) var<storage, read> colors: array<vec4f>;
+@group(0) @binding(1) var<storage, read_write> visibleIndices: array<u32>;
+@group(0) @binding(2) var<storage, read_write> counter: atomic<u32>;
+
+@compute @workgroup_size(${PARTICLE_WG})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let idx = id.x;
+  if (idx >= ${count}u) { return; }
+  let col = colors[idx];
+  if (col.a > 0.0) {
+    let slot = atomicAdd(&counter, 1u);
+    visibleIndices[slot] = idx;
+  }
+}
+`;
+}
+
+const particleFinalizeShader = /* wgsl */`
+@group(0) @binding(0) var<storage, read_write> counter: atomic<u32>;
+@group(0) @binding(1) var<storage, read_write> drawArgs: array<u32>;
+
+@compute @workgroup_size(1)
+fn main() {
+  drawArgs[0] = 4u;
+  drawArgs[1] = atomicLoad(&counter);
+  drawArgs[2] = 0u;
+  drawArgs[3] = 0u;
 }
 `;
 
@@ -745,6 +824,7 @@ struct PParams {
 };
 @group(0) @binding(1) var<uniform> pp: PParams;
 @group(0) @binding(2) var<storage, read> colors: array<vec4f>;
+@group(0) @binding(3) var<storage, read> visibleIndices: array<u32>;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -758,7 +838,8 @@ fn main(
   @builtin(vertex_index) vi: u32,
   @builtin(instance_index) ii: u32
 ) -> VSOut {
-  let col = colors[ii];
+  let realIdx = visibleIndices[ii];
+  let col = colors[realIdx];
 
   var out: VSOut;
 
@@ -771,7 +852,7 @@ fn main(
     return out;
   }
 
-  let part = particles[ii];
+  let part = particles[realIdx];
 
   // Triangle-strip quad: 4 vertices
   var quadPos = array<vec2f, 4>(
@@ -1130,8 +1211,8 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // Tone mapping
   color = ${hdr ? 'tonemap(color * 1.6)' : 'aces(color * 1.6)'};
 
-${hdr ? '  // HDR: browser expects linear values, handles transfer function' : `  // Gamma
-  color = pow(clamp(color, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2));`}
+${hdr ? '  // HDR: browser expects linear values, handles transfer function' : `  // Fast gamma approximation (max error ~0.003 vs pow(x, 0.4545))
+  { let sq = sqrt(clamp(color, vec3f(0.0), vec3f(1.0))); color = sq * (0.585 + sq * 0.415); }`}
 
   // Circular mask
   color *= mask;
@@ -1279,6 +1360,8 @@ async function main() {
   const maxParticles = Math.min(16777216, Math.floor(device.limits.maxStorageBufferBindingSize / PARTICLE_STRIDE));
   state.particleCount = Math.min(state.particleCount, maxParticles);
   loadStatus.textContent = 'Compiling shaders...';
+  device.pushErrorScope('validation');
+  device.pushErrorScope('internal');
   console.log(`Init: WebGPU device acquired (${(performance.now() - t0).toFixed(0)}ms)`);
   console.log(`GPU limits: maxStorageBuffer=${(device.limits.maxStorageBufferBindingSize / 1024 / 1024).toFixed(0)}MB, maxParticles=${maxParticles}`);
 
@@ -1407,10 +1490,21 @@ async function main() {
   });
   const displayUBData = new Float32Array(20);
   const bloomParamData = new Float32Array(8);
+  const bloomCompositeData = new Float32Array(1);
 
   // ─── Pipeline helpers ───────────────────────────────────────────────────
+  function checkShader(module, label) {
+    if (module.getCompilationInfo) {
+      module.getCompilationInfo().then(info => {
+        for (const msg of info.messages) {
+          console.error(`[WGSL ${msg.type}] ${label}: ${msg.message} (line ${msg.lineNum}:${msg.linePos})`);
+        }
+      });
+    }
+  }
   function buildPipeline(code, label, bindingDescs) {
     const module = device.createShaderModule({ code, label });
+    checkShader(module, label);
     const entries = bindingDescs.map((desc, i) => {
       const e = { binding: i, visibility: GPUShaderStage.COMPUTE };
       if (desc === 'uniform') e.buffer = { type: 'uniform' };
@@ -1458,21 +1552,42 @@ async function main() {
     },
   });
 
-  // Curl: uniform, texture(vel), storage(curl)
-  const curlPipe = buildPipeline(curlShader, 'curl',
-    ['uniform', 'texture', 'storage']);
+  // Fused curl + vorticity: uniform, texture(vel), storage(curlDst), storage(velDst)
+  const fusedCurlVortBGL = device.createBindGroupLayout({
+    label: 'fusedCurlVort_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+    ],
+  });
+  const fusedCurlVortModule = device.createShaderModule({ code: fusedCurlVortShader, label: 'fusedCurlVort' });
+  checkShader(fusedCurlVortModule, 'fusedCurlVort');
+  const fusedCurlVortPipe = device.createComputePipeline({
+    label: 'fusedCurlVort',
+    layout: device.createPipelineLayout({ bindGroupLayouts: [fusedCurlVortBGL] }),
+    compute: { module: fusedCurlVortModule, entryPoint: 'main' },
+  });
 
-  // Vorticity: uniform, texture(vel), texture(curl), storage(dst)
-  const vortPipe = buildPipeline(vorticityShader, 'vorticity',
-    ['uniform', 'texture', 'texture', 'storage']);
-
-  // Divergence: uniform, texture(vel), storage(div)
-  const divPipe = buildPipeline(divergenceShader, 'divergence',
-    ['uniform', 'texture', 'storage']);
-
-  // Clear pressure: uniform, texture(src), storage(dst)
-  const clearPressPipe = buildPipeline(clearPressureShader, 'clearPressure',
-    ['uniform', 'texture', 'storage']);
+  // Fused divergence + clear pressure: uniform, texture(vel), texture(press), storage(divDst), storage(pressDst)
+  const fusedDivClearPressBGL = device.createBindGroupLayout({
+    label: 'fusedDivClearPress_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+    ],
+  });
+  const fusedDivClearPressModule = device.createShaderModule({ code: fusedDivClearPressShader, label: 'fusedDivClearPress' });
+  checkShader(fusedDivClearPressModule, 'fusedDivClearPress');
+  const fusedDivClearPressPipe = device.createComputePipeline({
+    label: 'fusedDivClearPress',
+    layout: device.createPipelineLayout({ bindGroupLayouts: [fusedDivClearPressBGL] }),
+    compute: { module: fusedDivClearPressModule, entryPoint: 'main' },
+  });
 
   // Jacobi: uniform, texture(pressure), texture(div), storage(dst)
   const jacobiPipe = buildPipeline(jacobiShader, 'jacobi',
@@ -1744,6 +1859,24 @@ async function main() {
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
 
+  // GPU indirect draw buffers
+  let visibleIndexBuf = device.createBuffer({
+    label: 'visibleIndices',
+    size: state.particleCount * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const drawIndirectBuf = device.createBuffer({
+    label: 'drawIndirect',
+    size: 16,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+  });
+  const atomicCounterBuf = device.createBuffer({
+    label: 'atomicCounter',
+    size: 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const zeroU32 = new Uint32Array([0]);
+
   // GPU-based particle initialization (avoids 512MB CPU allocation for 16M particles)
   function gpuInitParticles(buf, count) {
     const initCode = makeParticleInitShader(count);
@@ -1769,6 +1902,8 @@ async function main() {
   }
 
   gpuInitParticles(particleBuf, state.particleCount);
+  device.popErrorScope().then(err => { if (err) console.error('WebGPU internal error:', err.message); });
+  device.popErrorScope().then(err => { if (err) console.error('WebGPU validation error:', err.message); });
   console.log(`Init: shaders compiled, buffers allocated (${(performance.now() - t0).toFixed(0)}ms)`);
 
   // Particle update compute pipeline
@@ -1795,6 +1930,56 @@ async function main() {
     },
   });
 
+  // Particle compact pipeline (GPU indirect draw)
+  const particleCompactBGL = device.createBindGroupLayout({
+    label: 'particleCompact_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+    ],
+  });
+  const particleCompactLayout = device.createPipelineLayout({ bindGroupLayouts: [particleCompactBGL] });
+
+  const compactModule = device.createShaderModule({ code: makeParticleCompactShader(state.particleCount), label: 'particleCompact' });
+  checkShader(compactModule, 'particleCompact');
+  let particleCompactPipeline = device.createComputePipeline({
+    label: 'particleCompact',
+    layout: particleCompactLayout,
+    compute: { module: compactModule, entryPoint: 'main' },
+  });
+
+  const particleFinalizeBGL = device.createBindGroupLayout({
+    label: 'particleFinalize_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+    ],
+  });
+  const finalizeModule = device.createShaderModule({ code: particleFinalizeShader, label: 'particleFinalize' });
+  checkShader(finalizeModule, 'particleFinalize');
+  const particleFinalizePipeline = device.createComputePipeline({
+    label: 'particleFinalize',
+    layout: device.createPipelineLayout({ bindGroupLayouts: [particleFinalizeBGL] }),
+    compute: { module: finalizeModule, entryPoint: 'main' },
+  });
+
+  let particleCompactBG = device.createBindGroup({
+    layout: particleCompactBGL,
+    entries: [
+      { binding: 0, resource: { buffer: colorBuf } },
+      { binding: 1, resource: { buffer: visibleIndexBuf } },
+      { binding: 2, resource: { buffer: atomicCounterBuf } },
+    ],
+  });
+  const particleFinalizeBG = device.createBindGroup({
+    layout: particleFinalizeBGL,
+    entries: [
+      { binding: 0, resource: { buffer: atomicCounterBuf } },
+      { binding: 1, resource: { buffer: drawIndirectBuf } },
+    ],
+  });
+
   // Particle render pipeline
   const particleRenderBGL = device.createBindGroupLayout({
     label: 'particleRender_bgl',
@@ -1802,6 +1987,7 @@ async function main() {
       { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+      { binding: 3, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
     ],
   });
 
@@ -1832,6 +2018,7 @@ async function main() {
       { binding: 0, resource: { buffer: particleBuf } },
       { binding: 1, resource: { buffer: particleUB } },
       { binding: 2, resource: { buffer: colorBuf } },
+      { binding: 3, resource: { buffer: visibleIndexBuf } },
     ],
   });
 
@@ -1870,25 +2057,17 @@ async function main() {
     bg(batchSplatBGL, [ubuf(paramBuf), tview(dyeA), tview(dyeB), ubuf(splatBuf), ubuf(splatCountBuf)]),
     bg(batchSplatBGL, [ubuf(paramBuf), tview(dyeB), tview(dyeA), ubuf(splatBuf), ubuf(splatCountBuf)]),
   ];
-  // curl: reads vel[cur], writes curlTex (always same dest)
-  const curlBGs = [
-    bg(curlPipe.layout, [ubuf(paramBuf), tview(velA), tview(curlTex)]),
-    bg(curlPipe.layout, [ubuf(paramBuf), tview(velB), tview(curlTex)]),
+  // fusedCurlVort: reads vel[cur], writes curlTex + vel[1-cur]
+  const fusedCurlVortBGs = [
+    bg(fusedCurlVortBGL, [ubuf(paramBuf), tview(velA), tview(curlTex), tview(velB)]),
+    bg(fusedCurlVortBGL, [ubuf(paramBuf), tview(velB), tview(curlTex), tview(velA)]),
   ];
-  // vorticity: reads vel[cur] + curlTex, writes vel[1-cur]
-  const vortBGs = [
-    bg(vortPipe.layout, [ubuf(paramBuf), tview(velA), tview(curlTex), tview(velB)]),
-    bg(vortPipe.layout, [ubuf(paramBuf), tview(velB), tview(curlTex), tview(velA)]),
-  ];
-  // divergence: reads vel[cur], writes divTex (always same dest)
-  const divBGs = [
-    bg(divPipe.layout, [ubuf(paramBuf), tview(velA), tview(divTex)]),
-    bg(divPipe.layout, [ubuf(paramBuf), tview(velB), tview(divTex)]),
-  ];
-  // clearPressure: reads press[cur], writes press[1-cur]
-  const clearPressBGs = [
-    bg(clearPressPipe.layout, [ubuf(paramBuf), tview(pressA), tview(pressB)]),
-    bg(clearPressPipe.layout, [ubuf(paramBuf), tview(pressB), tview(pressA)]),
+  // fusedDivClearPress: reads vel[cur] + press[cur], writes divTex + press[1-cur]
+  const fusedDivClearPressBGs = [
+    [bg(fusedDivClearPressBGL, [ubuf(paramBuf), tview(velA), tview(pressA), tview(divTex), tview(pressB)]),
+     bg(fusedDivClearPressBGL, [ubuf(paramBuf), tview(velA), tview(pressB), tview(divTex), tview(pressA)])],
+    [bg(fusedDivClearPressBGL, [ubuf(paramBuf), tview(velB), tview(pressA), tview(divTex), tview(pressB)]),
+     bg(fusedDivClearPressBGL, [ubuf(paramBuf), tview(velB), tview(pressB), tview(divTex), tview(pressA)])],
   ];
   // jacobi: reads press[cur] + divTex, writes press[1-cur]
   const jacobiBGs = [
@@ -1980,17 +2159,44 @@ async function main() {
 
     particleUpdateBGs = makeParticleUpdateBGs(newBuf, newColorBuf);
 
+    // Rebuild indirect draw resources
+    const newVisibleIndexBuf = device.createBuffer({
+      label: 'visibleIndices',
+      size: count * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    particleCompactPipeline = device.createComputePipeline({
+      label: 'particleCompact',
+      layout: particleCompactLayout,
+      compute: {
+        module: device.createShaderModule({ code: makeParticleCompactShader(count), label: 'particleCompact' }),
+        entryPoint: 'main',
+      },
+    });
+
+    particleCompactBG = device.createBindGroup({
+      layout: particleCompactBGL,
+      entries: [
+        { binding: 0, resource: { buffer: newColorBuf } },
+        { binding: 1, resource: { buffer: newVisibleIndexBuf } },
+        { binding: 2, resource: { buffer: atomicCounterBuf } },
+      ],
+    });
+
     particleRenderBG = device.createBindGroup({
       layout: particleRenderBGL,
       entries: [
         { binding: 0, resource: { buffer: newBuf } },
         { binding: 1, resource: { buffer: particleUB } },
         { binding: 2, resource: { buffer: newColorBuf } },
+        { binding: 3, resource: { buffer: newVisibleIndexBuf } },
       ],
     });
 
     particleBuf = newBuf;
     colorBuf = newColorBuf;
+    visibleIndexBuf = newVisibleIndexBuf;
     state.particleCount = count;
     particleDispatches = Math.ceil(count / PARTICLE_WG);
 
@@ -2593,39 +2799,21 @@ async function main() {
       dyeFlip ^= 1;
     }
 
-    // ── Pass 2: Curl (reads vel[cur], writes curlTex — no flip) ──
+    // ── Pass 2+3: Fused Curl + Vorticity (reads vel[cur], writes curlTex + vel[1-cur]) ──
     {
       const p = enc.beginComputePass();
-      p.setPipeline(curlPipe.pipeline);
-      p.setBindGroup(0, curlBGs[velFlip]);
-      p.dispatchWorkgroups(dispatch, dispatch);
-      p.end();
-    }
-
-    // ── Pass 3: Vorticity Confinement (reads vel[cur], writes vel[1-cur]) ──
-    {
-      const p = enc.beginComputePass();
-      p.setPipeline(vortPipe.pipeline);
-      p.setBindGroup(0, vortBGs[velFlip]);
+      p.setPipeline(fusedCurlVortPipe);
+      p.setBindGroup(0, fusedCurlVortBGs[velFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
       velFlip ^= 1;
     }
 
-    // ── Pass 4: Divergence (reads vel[cur], writes divTex — no flip) ──
+    // ── Pass 4+5: Fused Divergence + Clear Pressure (reads vel[cur] + press[cur], writes divTex + press[1-cur]) ──
     {
       const p = enc.beginComputePass();
-      p.setPipeline(divPipe.pipeline);
-      p.setBindGroup(0, divBGs[velFlip]);
-      p.dispatchWorkgroups(dispatch, dispatch);
-      p.end();
-    }
-
-    // ── Pass 5: Clear Pressure (reads press[cur], writes press[1-cur]) ──
-    {
-      const p = enc.beginComputePass();
-      p.setPipeline(clearPressPipe.pipeline);
-      p.setBindGroup(0, clearPressBGs[pressFlip]);
+      p.setPipeline(fusedDivClearPressPipe);
+      p.setBindGroup(0, fusedDivClearPressBGs[velFlip][pressFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
       pressFlip ^= 1;
@@ -2698,6 +2886,23 @@ async function main() {
       p.end();
     }
 
+    // ── Pass 10b: Particle Compact (build visible index list for indirect draw) ──
+    device.queue.writeBuffer(atomicCounterBuf, 0, zeroU32);
+    {
+      const p = enc.beginComputePass();
+      p.setPipeline(particleCompactPipeline);
+      p.setBindGroup(0, particleCompactBG);
+      p.dispatchWorkgroups(particleDispatches);
+      p.end();
+    }
+    {
+      const p = enc.beginComputePass();
+      p.setPipeline(particleFinalizePipeline);
+      p.setBindGroup(0, particleFinalizeBG);
+      p.dispatchWorkgroups(1);
+      p.end();
+    }
+
     // ── Bloom setup ──
     const bloomActive = state.bloomIntensity > 0;
     if (bloomActive) {
@@ -2735,7 +2940,7 @@ async function main() {
       });
       rp.setPipeline(particleRenderPipeline);
       rp.setBindGroup(0, particleRenderBG);
-      rp.draw(4, state.particleCount);
+      rp.drawIndirect(drawIndirectBuf, 0);
       rp.end();
     }
 
@@ -2806,7 +3011,8 @@ async function main() {
       }
 
       // Composite: sceneTex + bloomUp[0] → canvasView
-      device.queue.writeBuffer(bloomCompositeUB, 0, new Float32Array([state.bloomIntensity]));
+      bloomCompositeData[0] = state.bloomIntensity;
+      device.queue.writeBuffer(bloomCompositeUB, 0, bloomCompositeData);
       {
         const rp = enc.beginRenderPass({
           colorAttachments: [{
