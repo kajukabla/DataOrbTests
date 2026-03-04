@@ -7,9 +7,9 @@ const PARTICLE_WG = 256;
 
 const state = {
   particleCount: 4194304,   // 4M default
-  particleSize: 2,
+  particleSize: 0.9,
   sizeRandomness: 0.3,
-  glintBrightness: 0.6,
+  glintBrightness: 0.1,
   prismaticAmount: 5.0,
   baseColor: [1.0, 0.55, 0.1],
   accentColor: [0.15, 0.3, 0.8],
@@ -2029,7 +2029,7 @@ async function main() {
     // Update screen/particle/display uniform buffers
     particleUBData[0] = canvas.width;
     particleUBData[1] = canvas.height;
-    particleUBData[2] = state.particleSize;
+    particleUBData[2] = state.particleSize * (window.devicePixelRatio || 1);
     particleUBData[3] = state.glintBrightness;
     particleUBData[4] = state.prismaticAmount;
     particleUBData[5] = okGlitBase[0];
@@ -2432,8 +2432,6 @@ async function main() {
     }
   }
 
-  wireSlider('particleSize', 'particleSize');
-  wireSlider('glintBrightness', 'glintBrightness');
   wireSlider('sizeRandomness', 'sizeRandomness');
   wireSlider('prismaticAmount', 'prismaticAmount');
 
@@ -2498,8 +2496,6 @@ async function main() {
     if (picker) picker.value = rgbToHex(state[stateKey]);
   }
   function syncAllUI() {
-    syncSlider('particleSize', 'particleSize');
-    syncSlider('glintBrightness', 'glintBrightness');
     syncSlider('sizeRandomness', 'sizeRandomness');
     syncSlider('prismaticAmount', 'prismaticAmount');
     syncSlider('colorBlend', 'colorBlend', v => v.toFixed(2));
@@ -2558,8 +2554,6 @@ async function main() {
     // Sim
     state.simSpeed = snapTo(randRange(0.3, 2.0), 0.01);
     // Particle appearance
-    state.particleSize = snapTo(randRange(0.3, 1.1), 0.1);
-    state.glintBrightness = snapTo(randRange(0.1, 1.1), 0.1);
     state.sizeRandomness = snapTo(randRange(0, 1), 0.01);
     state.sheenStrength = snapTo(randRange(0, 1), 0.01);
     // Interaction
@@ -2596,8 +2590,6 @@ async function main() {
   // ─── Auto-Morph ──────────────────────────────────────────────────────
   const morphSliders = {
     simSpeed: { min: 0, max: 3, step: 0.01 },
-    particleSize: { min: 0.3, max: 4.0, step: 0.1 },
-    glintBrightness: { min: 0.1, max: 5.0, step: 0.1 },
     sizeRandomness: { min: 0, max: 1, step: 0.01 },
     prismaticAmount: { min: 0, max: 20, step: 0.5 },
     colorBlend: { min: 0, max: 1, step: 0.01 },

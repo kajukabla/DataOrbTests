@@ -12,8 +12,6 @@ import {
 
 export const SLIDER_SPACE = {
   simSpeed:          { min: 0,    max: 3,     step: 0.01 },
-  particleSize:      { min: 0.3,  max: 4.0,   step: 0.1  },
-  glintBrightness:   { min: 0.1,  max: 5.0,   step: 0.1  },
   sizeRandomness:    { min: 0,    max: 1,     step: 0.01 },
   prismaticAmount:   { min: 0,    max: 20,    step: 0.5  },
   colorBlend:        { min: 0,    max: 1,     step: 0.01 },
@@ -65,7 +63,7 @@ export const SLIDER_SPACE = {
 };
 
 export const SLIDER_KEYS = Object.keys(SLIDER_SPACE);
-export const D = SLIDER_KEYS.length; // 50
+export const D = SLIDER_KEYS.length; // 48
 
 export const COLOR_KEYS = [
   'baseColor', 'accentColor', 'tipColor', 'glitterColor',
