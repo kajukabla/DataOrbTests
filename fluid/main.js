@@ -468,7 +468,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 `;
 
 // ─── Particle Update Compute Shader (function — count baked in) ─────────────
-function makeParticleUpdateShader(count) {
+function makeParticleUpdateShader(count, hdr) {
   return /* wgsl */`
 ${commonHeader}
 @group(0) @binding(1) var velTex: texture_2d<f32>;
@@ -513,19 +513,20 @@ fn oklabToLinear(lab: vec3f) -> vec3f {
   let m = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
   let s = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
   return max(vec3f(
-    4.0767416621 * l*l*l - 3.3077115913 * m*m*m + 0.2309699292 * s*s*s,
-   -1.2684380046 * l*l*l + 2.6097574011 * m*m*m - 0.3413193965 * s*s*s,
-   -0.0041960863 * l*l*l - 0.7034186147 * m*m*m + 1.7076147010 * s*s*s
+    ${hdr ? '3.1272' : '4.0767416621'} * l*l*l + ${hdr ? '-2.2566' : '-3.3077115913'} * m*m*m + ${hdr ? '0.1294' : '0.2309699292'} * s*s*s,
+    ${hdr ? '-1.0912' : '-1.2684380046'} * l*l*l + ${hdr ? '2.4138' : '2.6097574011'} * m*m*m + ${hdr ? '-0.3225' : '-0.3413193965'} * s*s*s,
+    ${hdr ? '-0.0260' : '-0.0041960863'} * l*l*l + ${hdr ? '-0.5082' : '-0.7034186147'} * m*m*m + ${hdr ? '1.5341' : '1.7076147010'} * s*s*s
   ), vec3f(0.0));
 }
 
 fn grainTint(h: f32) -> vec3f {
-  if (h < 0.6) { return mix(vec3f(1.0, 0.75, 0.3), vec3f(1.0, 0.85, 0.45), h / 0.6); }
-  if (h < 0.75) { return vec3f(1.0, 0.6, 0.25); }
-  if (h < 0.85) { return vec3f(1.0, 0.88, 0.55); }
-  if (h < 0.92) { return vec3f(0.85, 0.92, 1.0); }
-  if (h < 0.96) { return vec3f(1.0, 0.75, 0.88); }
-  return vec3f(0.75, 1.0, 0.82);
+  let boost = ${hdr ? '1.6' : '1.0'};
+  if (h < 0.6) { return mix(vec3f(1.0, 0.75, 0.3), vec3f(1.0, 0.85, 0.45), h / 0.6) * boost; }
+  if (h < 0.75) { return vec3f(1.0, 0.6, 0.25) * boost; }
+  if (h < 0.85) { return vec3f(1.0, 0.88, 0.55) * boost; }
+  if (h < 0.92) { return vec3f(0.85, 0.92, 1.0) * boost; }
+  if (h < 0.96) { return vec3f(1.0, 0.75, 0.88) * boost; }
+  return vec3f(0.75, 1.0, 0.82) * boost;
 }
 
 @compute @workgroup_size(${PARTICLE_WG})
@@ -695,7 +696,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let glitCol = oklabToLinear(mix(mix(okAccent, okBase, gt2), okTip, gt3));
   tint *= glitCol;
 
-  let brightness = glint * pp.screen.w + ambient;
+  let glintBoost = ${hdr ? '4.0' : '1.0'};
+  let brightness = glint * pp.screen.w * glintBoost + ambient;
   colors[idx] = vec4f(tint * brightness * fluidGate, brightness * fluidGate);
 }
 `;
@@ -848,32 +850,41 @@ fn main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
 }
 `;
 
-const displayShaderFrag = /* wgsl */`
+function makeDisplayShaderFrag(hdr) {
+  // Oklab→linear matrix: P3 for HDR, sRGB for SDR
+  const M = hdr
+    ? { r: '3.1272, -2.2566, 0.1294', g: '-1.0912, 2.4138, -0.3225', b: '-0.0260, -0.5082, 1.5341' }
+    : { r: '4.0767416621, -3.3077115913, 0.2309699292', g: '-1.2684380046, 2.6097574011, -0.3413193965', b: '-0.0041960863, -0.7034186147, 1.7076147010' };
+
+  return /* wgsl */`
 @group(0) @binding(0) var dyeTex: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 
 struct DisplayUniforms {
   screen: vec4f,      // xy=screenSize, z=time, w=sheenStrength
-  baseColor: vec4f,   // xyz=baseColor RGB, w=chromaticStrength
+  baseColor: vec4f,   // xyz=baseColor RGB, w=hdrHeadroom
   accentColor: vec4f, // xyz=accentColor RGB, w=colorBlend
   sheenColor: vec4f,  // xyz=sheenColor RGB
   tipColor: vec4f,    // xyz=tipColor RGB (dense end)
 };
 @group(0) @binding(2) var<uniform> du: DisplayUniforms;
 
-fn aces(x: vec3f) -> vec3f {
+${hdr ? `fn tonemap(x: vec3f) -> vec3f {
+  let peak = 4.0;
+  return x * (1.0 + x / (peak * peak)) / (1.0 + x / peak);
+}` : `fn aces(x: vec3f) -> vec3f {
   let a = 2.51; let b = 0.03; let c = 2.43; let d = 0.59; let e = 0.14;
   return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3f(0.0), vec3f(1.0));
-}
+}`}
 
 fn oklabToLinear(lab: vec3f) -> vec3f {
   let l = lab.x + 0.3963377774 * lab.y + 0.2158037573 * lab.z;
   let m = lab.x - 0.1055613458 * lab.y - 0.0638541728 * lab.z;
   let s = lab.x - 0.0894841775 * lab.y - 1.2914855480 * lab.z;
   return max(vec3f(
-    4.0767416621 * l*l*l - 3.3077115913 * m*m*m + 0.2309699292 * s*s*s,
-   -1.2684380046 * l*l*l + 2.6097574011 * m*m*m - 0.3413193965 * s*s*s,
-   -0.0041960863 * l*l*l - 0.7034186147 * m*m*m + 1.7076147010 * s*s*s
+    ${M.r.split(',').map((c,i) => `${c.trim()} * ${['l','m','s'][i]}*${['l','m','s'][i]}*${['l','m','s'][i]}`).join(' + ')},
+    ${M.g.split(',').map((c,i) => `${c.trim()} * ${['l','m','s'][i]}*${['l','m','s'][i]}*${['l','m','s'][i]}`).join(' + ')},
+    ${M.b.split(',').map((c,i) => `${c.trim()} * ${['l','m','s'][i]}*${['l','m','s'][i]}*${['l','m','s'][i]}`).join(' + ')}
   ), vec3f(0.0));
 }
 
@@ -882,7 +893,6 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let screenSize = du.screen.xy;
   let time = du.screen.z;
   let sheenStrength = du.screen.w;
-  // let chromaticStrength = du.baseColor.w; // glass marble
   let rawUV = vec2f(pos.x, screenSize.y - pos.y) / screenSize;
 
   // Aspect-correct UV so simulation renders as centered 1:1 square
@@ -935,7 +945,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let t2 = min(densityT * 2.0, 1.0);
   let t3 = max(densityT * 2.0 - 1.0, 0.0);
   let fluidCol = oklabToLinear(mix(mix(okAccent, okBase, t2), okTip, t3));
-  var color = fluidCol * intensity * 0.25;
+  var color = fluidCol * intensity * ${hdr ? '0.5' : '0.25'};
 
   // ── Glass marble depth darkening (commented out) ──────────────────────
   // let pathLength = 2.0 * z;
@@ -961,14 +971,15 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // Fresnel-like rim sheen (edges of sphere glow)
   let rimFactor = smoothstep(0.2, 0.42, screenDist);
 
+  let headroom = du.baseColor.w;
   let sheen = (sharpSheen * 0.6 + broadSpec * 0.3 + rimFactor * 0.15) * sheenStrength;
-  color += color * sheen * du.sheenColor.rgb;
+  color += color * sheen * du.sheenColor.rgb * headroom;
 
   // Tone mapping
-  color = aces(color * 1.6);
+  color = ${hdr ? 'tonemap(color * 1.6)' : 'aces(color * 1.6)'};
 
-  // Gamma
-  color = pow(clamp(color, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2));
+${hdr ? '  // HDR: browser expects linear values, handles transfer function' : `  // Gamma
+  color = pow(clamp(color, vec3f(0.0), vec3f(1.0)), vec3f(1.0 / 2.2));`}
 
   // Circular mask
   color *= mask;
@@ -976,6 +987,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   return vec4f(color, 1.0);
 }
 `;
+}
 
 // ─── Glass Shell Fragment Shader (commented out) ────────────────────────────
 // const glassShellFrag = /* wgsl */`
@@ -1119,8 +1131,42 @@ async function main() {
   console.log(`GPU limits: maxStorageBuffer=${(device.limits.maxStorageBufferBindingSize / 1024 / 1024).toFixed(0)}MB, maxParticles=${maxParticles}`);
 
   const ctx = canvas.getContext('webgpu');
-  const canvasFmt = navigator.gpu.getPreferredCanvasFormat();
-  ctx.configure({ device, format: canvasFmt, alphaMode: 'opaque' });
+
+  // Feature-detect HDR canvas support
+  const hdrSupported = (() => {
+    try {
+      const tc = document.createElement('canvas');
+      const tx = tc.getContext('webgpu');
+      if (!tx) return false;
+      tx.configure({
+        device, format: 'rgba16float',
+        colorSpace: 'display-p3',
+        toneMapping: { mode: 'extended' },
+        alphaMode: 'opaque',
+      });
+      tx.unconfigure();
+      return true;
+    } catch { return false; }
+  })();
+
+  const canvasFmt = hdrSupported ? 'rgba16float' : navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({
+    device, format: canvasFmt, alphaMode: 'opaque',
+    ...(hdrSupported && {
+      colorSpace: 'display-p3',
+      toneMapping: { mode: 'extended' },
+    }),
+  });
+  console.log(`HDR=${hdrSupported}, format=${canvasFmt}${hdrSupported ? ', colorSpace=display-p3' : ''}`);
+
+  // Expand BO color exploration range for HDR (exclude sheenColor)
+  if (hdrSupported) {
+    for (const key of Object.keys(SLIDER_SPACE)) {
+      if (key.match(/Color_[012]$|Accent_[012]$|Tip_[012]$/) && !key.startsWith('sheen')) {
+        SLIDER_SPACE[key].max = 1.5;
+      }
+    }
+  }
 
   function resize() {
     const dpr = window.devicePixelRatio || 1;
@@ -1316,7 +1362,7 @@ async function main() {
       entryPoint: 'main',
     },
     fragment: {
-      module: device.createShaderModule({ code: displayShaderFrag }),
+      module: device.createShaderModule({ code: makeDisplayShaderFrag(hdrSupported) }),
       entryPoint: 'main',
       targets: [{ format: canvasFmt }],
     },
@@ -1407,7 +1453,7 @@ async function main() {
     label: 'particleUpdate',
     layout: device.createPipelineLayout({ bindGroupLayouts: [particleUpdateBGL] }),
     compute: {
-      module: device.createShaderModule({ code: makeParticleUpdateShader(state.particleCount), label: 'particleUpdate' }),
+      module: device.createShaderModule({ code: makeParticleUpdateShader(state.particleCount, hdrSupported), label: 'particleUpdate' }),
       entryPoint: 'main',
     },
   });
@@ -1590,7 +1636,7 @@ async function main() {
       label: 'particleUpdate',
       layout: device.createPipelineLayout({ bindGroupLayouts: [particleUpdateBGL] }),
       compute: {
-        module: device.createShaderModule({ code: makeParticleUpdateShader(count), label: 'particleUpdate' }),
+        module: device.createShaderModule({ code: makeParticleUpdateShader(count, hdrSupported), label: 'particleUpdate' }),
         entryPoint: 'main',
       },
     });
@@ -2052,7 +2098,7 @@ async function main() {
     displayUBData[4] = okBaseCol[0];
     displayUBData[5] = okBaseCol[1];
     displayUBData[6] = okBaseCol[2];
-    // displayUBData[7] = state.chromaticStrength; // glass marble
+    displayUBData[7] = 1.0; // sheen headroom (no HDR boost — sheen stays SDR-range)
     displayUBData[8] = okAccentCol[0];
     displayUBData[9] = okAccentCol[1];
     displayUBData[10] = okAccentCol[2];
@@ -2534,7 +2580,8 @@ async function main() {
 
   // ─── Randomize helpers ────────────────────────────────────────────────
   function randRange(lo, hi) { return lo + Math.random() * (hi - lo); }
-  function randColor() { return [Math.random(), Math.random(), Math.random()]; }
+  const hdrColorMax = hdrSupported ? 1.5 : 1.0;
+  function randColor() { return [Math.random() * hdrColorMax, Math.random() * hdrColorMax, Math.random() * hdrColorMax]; }
   function snapTo(val, step) { return Math.round(val / step) * step; }
 
   document.getElementById('randomizeColors').addEventListener('click', () => {
@@ -2544,7 +2591,7 @@ async function main() {
     state.glitterAccent = randColor();
     state.tipColor = randColor();
     state.glitterTip = randColor();
-    state.sheenColor = randColor();
+    state.sheenColor = [Math.random(), Math.random(), Math.random()];
     state.colorBlend = randRange(0, 1);
     state.prismaticAmount = randRange(0, 20);
     syncAllUI();
@@ -2622,7 +2669,8 @@ async function main() {
   const morphTargets = {};
   function pickMorphTarget(key) {
     if (morphColors.includes(key)) {
-      morphTargets[key] = [Math.random(), Math.random(), Math.random()];
+      const cMax = (key === 'sheenColor') ? 1.0 : hdrColorMax;
+      morphTargets[key] = [Math.random() * cMax, Math.random() * cMax, Math.random() * cMax];
     } else {
       const s = morphSliders[key];
       morphTargets[key] = s.min + Math.random() * (s.max - s.min);
@@ -2692,7 +2740,8 @@ async function main() {
       const dist = Math.abs(state[key][0] - target[0]) + Math.abs(state[key][1] - target[1]) + Math.abs(state[key][2] - target[2]);
       if (dist < threshold * 3) {
         if (bo.boMorphMode && bo.model) {
-          morphTargets[key] = [Math.random(), Math.random(), Math.random()];
+          const cMax = (key === 'sheenColor') ? 1.0 : hdrColorMax;
+          morphTargets[key] = [Math.random() * cMax, Math.random() * cMax, Math.random() * cMax];
         } else {
           pickMorphTarget(key);
         }
