@@ -10,7 +10,7 @@ const state = {
   particleSize: 0.9,
   sizeRandomness: 0.3,
   glintBrightness: 0.1,
-  prismaticAmount: 5.0,
+  prismaticAmount: 20.0,
   baseColor: [1.0, 0.55, 0.1],
   accentColor: [0.15, 0.3, 0.8],
   glitterColor: [1.0, 1.0, 1.0],
@@ -45,6 +45,9 @@ const state = {
   drawBotForce: 0.5,
   drawBotChaos: 0.3,
   drawBotDrift: 0.5,
+  bloomIntensity: 0,
+  bloomThreshold: 0.4,
+  bloomRadius: 0.5,
   splatRadius: 0.0015,
   simSpeed: 1.0,
   autoMorph: false,
@@ -403,7 +406,11 @@ struct NoiseParams {
 @group(0) @binding(2) var velDst: texture_storage_2d<rgba16float, write>;
 
 fn hash(p: vec2f) -> f32 {
-  return fract(sin(dot(p, vec2f(127.1, 311.7))) * 43758.5453);
+  var n = u32(dot(p, vec2f(127.1, 311.7)) * 43758.5453);
+  n = n ^ (n >> 16u);
+  n = n * 0x45d9f3bu;
+  n = n ^ (n >> 16u);
+  return f32(n & 0xFFFFu) / 65535.0;
 }
 
 fn vnoise(p: vec2f) -> f32 {
@@ -521,12 +528,21 @@ fn oklabToLinear(lab: vec3f) -> vec3f {
 
 fn grainTint(h: f32) -> vec3f {
   let boost = ${hdr ? '1.6' : '1.0'};
-  if (h < 0.6) { return mix(vec3f(1.0, 0.75, 0.3), vec3f(1.0, 0.85, 0.45), h / 0.6) * boost; }
-  if (h < 0.75) { return vec3f(1.0, 0.6, 0.25) * boost; }
-  if (h < 0.85) { return vec3f(1.0, 0.88, 0.55) * boost; }
-  if (h < 0.92) { return vec3f(0.85, 0.92, 1.0) * boost; }
-  if (h < 0.96) { return vec3f(1.0, 0.75, 0.88) * boost; }
-  return vec3f(0.75, 1.0, 0.82) * boost;
+  let c0 = vec3f(1.0, 0.75, 0.3);
+  let c1 = vec3f(1.0, 0.85, 0.45);
+  let c2 = vec3f(1.0, 0.6, 0.25);
+  let c3 = vec3f(1.0, 0.88, 0.55);
+  let c4 = vec3f(0.85, 0.92, 1.0);
+  let c5 = vec3f(1.0, 0.75, 0.88);
+  let c6 = vec3f(0.75, 1.0, 0.82);
+  let t0 = h / 0.6;
+  var color = mix(c0, c1, clamp(t0, 0.0, 1.0));
+  color = mix(color, c2, step(0.6, h));
+  color = mix(color, c3, step(0.75, h));
+  color = mix(color, c4, step(0.85, h));
+  color = mix(color, c5, step(0.92, h));
+  color = mix(color, c6, step(0.96, h));
+  return color * boost;
 }
 
 @compute @workgroup_size(${PARTICLE_WG})
@@ -570,8 +586,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
   // Rotate normal around Z-axis (spin)
   let spinAngle = part.angularVel * dt;
-  let cosA = cos(spinAngle);
-  let sinA = sin(spinAngle);
+  let sa2 = spinAngle * spinAngle;
+  let cosA = 1.0 - sa2 * 0.5;
+  let sinA = spinAngle;
   let nx = part.normalX * cosA - part.normalY * sinA;
   let ny = part.normalX * sinA + part.normalY * cosA;
 
@@ -672,10 +689,12 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
   let pa = pp.extra.x;
   let hueAngle = ch4 * 6.283;
+  let cosH = cos(hueAngle);
+  let sinH = sin(hueAngle);
   let prismatic = vec3f(
-    0.5 + 0.5 * cos(hueAngle),
-    0.5 + 0.5 * cos(hueAngle + 2.094),
-    0.5 + 0.5 * cos(hueAngle + 4.189)
+    0.5 + 0.5 * cosH,
+    0.5 + 0.5 * (cosH * (-0.5) - sinH * 0.866025),
+    0.5 + 0.5 * (cosH * (-0.5) + sinH * 0.866025)
   );
   let prisThreshold = max(1.0 - pa * 0.05, 0.0);
   let prisMix = clamp(pa * 0.06, 0.0, 1.0);
@@ -850,6 +869,136 @@ fn main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
 }
 `;
 
+// ─── Bloom Shaders ──────────────────────────────────────────────────────────
+
+const bloomDownsampleShader = /* wgsl */`
+struct BloomParams {
+  texelSize: vec2f,
+  threshold: f32,
+  knee: f32,
+  intensity: f32,
+  mipWeight: f32,
+  flags: f32,       // bit 0 = apply threshold
+  pad: f32,
+};
+
+@group(0) @binding(0) var srcTex: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var dstTex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var<uniform> params: BloomParams;
+
+fn softThreshold(color: vec3f, threshold: f32, knee: f32) -> vec3f {
+  let brightness = max(color.r, max(color.g, color.b));
+  var soft = brightness - threshold + knee;
+  soft = clamp(soft, 0.0, 2.0 * knee);
+  soft = soft * soft / (4.0 * knee + 0.00001);
+  let contribution = max(soft, brightness - threshold) / max(brightness, 0.00001);
+  return color * max(contribution, 0.0);
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let dstSize = textureDimensions(dstTex);
+  if (id.x >= dstSize.x || id.y >= dstSize.y) { return; }
+
+  let texelSize = params.texelSize;
+  let uv = (vec2f(id.xy) + 0.5) / vec2f(dstSize);
+
+  // 13-tap box filter (Jimenez 2014)
+  var color = textureSampleLevel(srcTex, samp, uv, 0.0).rgb * 0.125;
+
+  color += textureSampleLevel(srcTex, samp, uv + vec2f(-texelSize.x, -texelSize.y), 0.0).rgb * 0.03125;
+  color += textureSampleLevel(srcTex, samp, uv + vec2f( texelSize.x, -texelSize.y), 0.0).rgb * 0.03125;
+  color += textureSampleLevel(srcTex, samp, uv + vec2f(-texelSize.x,  texelSize.y), 0.0).rgb * 0.03125;
+  color += textureSampleLevel(srcTex, samp, uv + vec2f( texelSize.x,  texelSize.y), 0.0).rgb * 0.03125;
+
+  color += textureSampleLevel(srcTex, samp, uv + vec2f(-texelSize.x, 0.0), 0.0).rgb * 0.0625;
+  color += textureSampleLevel(srcTex, samp, uv + vec2f( texelSize.x, 0.0), 0.0).rgb * 0.0625;
+  color += textureSampleLevel(srcTex, samp, uv + vec2f(0.0, -texelSize.y), 0.0).rgb * 0.0625;
+  color += textureSampleLevel(srcTex, samp, uv + vec2f(0.0,  texelSize.y), 0.0).rgb * 0.0625;
+
+  color += textureSampleLevel(srcTex, samp, uv + vec2f(-2.0 * texelSize.x, -2.0 * texelSize.y), 0.0).rgb * 0.03125;
+  color += textureSampleLevel(srcTex, samp, uv + vec2f( 2.0 * texelSize.x, -2.0 * texelSize.y), 0.0).rgb * 0.03125;
+  color += textureSampleLevel(srcTex, samp, uv + vec2f(-2.0 * texelSize.x,  2.0 * texelSize.y), 0.0).rgb * 0.03125;
+  color += textureSampleLevel(srcTex, samp, uv + vec2f( 2.0 * texelSize.x,  2.0 * texelSize.y), 0.0).rgb * 0.03125;
+
+  // Apply soft threshold on first downsample pass only
+  if (params.flags > 0.5) {
+    color = softThreshold(color, params.threshold, params.knee);
+  }
+
+  textureStore(dstTex, id.xy, vec4f(color, 1.0));
+}
+`;
+
+const bloomUpsampleShader = /* wgsl */`
+struct BloomParams {
+  texelSize: vec2f,
+  threshold: f32,
+  knee: f32,
+  intensity: f32,
+  mipWeight: f32,
+  flags: f32,
+  pad: f32,
+};
+
+@group(0) @binding(0) var lowerTex: texture_2d<f32>;
+@group(0) @binding(1) var currentTex: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+@group(0) @binding(3) var dstTex: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(4) var<uniform> params: BloomParams;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let dstSize = textureDimensions(dstTex);
+  if (id.x >= dstSize.x || id.y >= dstSize.y) { return; }
+
+  let texelSize = params.texelSize;  // texel size of the LOWER (smaller) mip
+  let uv = (vec2f(id.xy) + 0.5) / vec2f(dstSize);
+
+  // 9-tap tent filter on the lower (smaller) mip
+  var upsampled = textureSampleLevel(lowerTex, samp, uv, 0.0).rgb * 4.0;
+  upsampled += textureSampleLevel(lowerTex, samp, uv + vec2f(-texelSize.x, 0.0), 0.0).rgb * 2.0;
+  upsampled += textureSampleLevel(lowerTex, samp, uv + vec2f( texelSize.x, 0.0), 0.0).rgb * 2.0;
+  upsampled += textureSampleLevel(lowerTex, samp, uv + vec2f(0.0, -texelSize.y), 0.0).rgb * 2.0;
+  upsampled += textureSampleLevel(lowerTex, samp, uv + vec2f(0.0,  texelSize.y), 0.0).rgb * 2.0;
+  upsampled += textureSampleLevel(lowerTex, samp, uv + vec2f(-texelSize.x, -texelSize.y), 0.0).rgb;
+  upsampled += textureSampleLevel(lowerTex, samp, uv + vec2f( texelSize.x, -texelSize.y), 0.0).rgb;
+  upsampled += textureSampleLevel(lowerTex, samp, uv + vec2f(-texelSize.x,  texelSize.y), 0.0).rgb;
+  upsampled += textureSampleLevel(lowerTex, samp, uv + vec2f( texelSize.x,  texelSize.y), 0.0).rgb;
+  upsampled /= 16.0;
+
+  // Blend with current mip's downsample data (skip connection)
+  let current = textureSampleLevel(currentTex, samp, uv, 0.0).rgb;
+  let result = current + upsampled * params.mipWeight;
+
+  textureStore(dstTex, id.xy, vec4f(result, 1.0));
+}
+`;
+
+const bloomCompositeShader = /* wgsl */`
+@group(0) @binding(0) var sceneTex: texture_2d<f32>;
+@group(0) @binding(1) var bloomTex: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+@group(0) @binding(3) var<uniform> intensity: f32;
+
+@vertex
+fn vert(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+  let x = f32(i32(vi) / 2) * 4.0 - 1.0;
+  let y = f32(i32(vi) % 2) * 4.0 - 1.0;
+  return vec4f(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn frag(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let texSize = vec2f(textureDimensions(sceneTex));
+  let uv = pos.xy / texSize;
+  let scene = textureSampleLevel(sceneTex, samp, uv, 0.0).rgb;
+  let bloom = textureSampleLevel(bloomTex, samp, uv, 0.0).rgb;
+  return vec4f(scene + bloom * intensity, 1.0);
+}
+`;
+
 function makeDisplayShaderFrag(hdr) {
   // Oklab→linear matrix: P3 for HDR, sRGB for SDR
   const M = hdr
@@ -965,9 +1114,12 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let spec = max(dot(normalize(grad + vec2f(0.001)), sheenDir), 0.0);
 
   // Sharp specular highlight
-  let sharpSheen = pow(spec, 8.0) * smoothstep(0.003, 0.04, gradLen);
+  let spec2 = spec * spec;
+  let spec4 = spec2 * spec2;
+  let spec8 = spec4 * spec4;
+  let sharpSheen = spec8 * smoothstep(0.003, 0.04, gradLen);
   // Broad soft metallic glow
-  let broadSpec = pow(spec, 2.0) * smoothstep(0.002, 0.08, gradLen);
+  let broadSpec = spec2 * smoothstep(0.002, 0.08, gradLen);
   // Fresnel-like rim sheen (edges of sphere glow)
   let rimFactor = smoothstep(0.2, 0.42, screenDist);
 
@@ -1254,6 +1406,7 @@ async function main() {
     size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   const displayUBData = new Float32Array(20);
+  const bloomParamData = new Float32Array(8);
 
   // ─── Pipeline helpers ───────────────────────────────────────────────────
   function buildPipeline(code, label, bindingDescs) {
@@ -1377,6 +1530,190 @@ async function main() {
   // const glassShellBGL = device.createBindGroupLayout({ ... });
   // const glassShellPipeline = device.createRenderPipeline({ ... });
   // See git history for full glass shell pipeline setup.
+
+  // ─── Bloom Pipelines ──────────────────────────────────────────────────────
+  const BLOOM_MIPS = 5;
+
+  const bloomDownBGL = device.createBindGroupLayout({
+    label: 'bloomDown_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, sampler: {} },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba16float' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ],
+  });
+
+  const bloomDownPipe = device.createComputePipeline({
+    label: 'bloomDownsample',
+    layout: device.createPipelineLayout({ bindGroupLayouts: [bloomDownBGL] }),
+    compute: {
+      module: device.createShaderModule({ code: bloomDownsampleShader, label: 'bloomDown' }),
+      entryPoint: 'main',
+    },
+  });
+
+  const bloomUpBGL = device.createBindGroupLayout({
+    label: 'bloomUp_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, sampler: {} },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'rgba16float' } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ],
+  });
+
+  const bloomUpPipe = device.createComputePipeline({
+    label: 'bloomUpsample',
+    layout: device.createPipelineLayout({ bindGroupLayouts: [bloomUpBGL] }),
+    compute: {
+      module: device.createShaderModule({ code: bloomUpsampleShader, label: 'bloomUp' }),
+      entryPoint: 'main',
+    },
+  });
+
+  const bloomCompositeBGL = device.createBindGroupLayout({
+    label: 'bloomComposite_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+    ],
+  });
+
+  const bloomCompositeModule = device.createShaderModule({ code: bloomCompositeShader, label: 'bloomComposite' });
+  const bloomCompositePipe = device.createRenderPipeline({
+    label: 'bloomComposite',
+    layout: device.createPipelineLayout({ bindGroupLayouts: [bloomCompositeBGL] }),
+    vertex: { module: bloomCompositeModule, entryPoint: 'vert' },
+    fragment: {
+      module: bloomCompositeModule,
+      entryPoint: 'frag',
+      targets: [{ format: canvasFmt }],
+    },
+    primitive: { topology: 'triangle-list' },
+  });
+
+  // Bloom uniform buffers (one per mip level pass)
+  const bloomParamBufs = [];
+  for (let i = 0; i < BLOOM_MIPS + (BLOOM_MIPS - 1); i++) {
+    bloomParamBufs.push(device.createBuffer({
+      label: `bloomParams_${i}`,
+      size: 32, // 8 floats × 4 bytes
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    }));
+  }
+  const bloomCompositeUB = device.createBuffer({
+    label: 'bloomCompositeUB',
+    size: 4,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+
+  // Bloom resource lifecycle
+  let bloomResources = null;
+  let lastBloomW = 0, lastBloomH = 0;
+
+  function ensureBloomResources(w, h) {
+    if (bloomResources && lastBloomW === w && lastBloomH === h) return;
+    destroyBloomResources();
+    lastBloomW = w;
+    lastBloomH = h;
+
+    const sceneTex = device.createTexture({
+      label: 'bloomScene',
+      size: [w, h],
+      format: canvasFmt,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+
+    const bloomDown = [];
+    const bloomUp = [];
+    let mw = Math.max(1, w >> 1), mh = Math.max(1, h >> 1);
+    for (let i = 0; i < BLOOM_MIPS; i++) {
+      bloomDown.push(device.createTexture({
+        label: `bloomDown_${i}`,
+        size: [mw, mh],
+        format: 'rgba16float',
+        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+      }));
+      if (i < BLOOM_MIPS - 1) {
+        bloomUp.push(device.createTexture({
+          label: `bloomUp_${i}`,
+          size: [mw, mh],
+          format: 'rgba16float',
+          usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+        }));
+      }
+      mw = Math.max(1, mw >> 1);
+      mh = Math.max(1, mh >> 1);
+    }
+
+    const sceneView = sceneTex.createView();
+
+    // Downsample bind groups: sceneTex→bloomDown[0], bloomDown[i]→bloomDown[i+1]
+    const downBGs = [];
+    for (let i = 0; i < BLOOM_MIPS; i++) {
+      const srcView = i === 0 ? sceneView : bloomDown[i - 1].createView();
+      downBGs.push(device.createBindGroup({
+        layout: bloomDownBGL,
+        entries: [
+          { binding: 0, resource: srcView },
+          { binding: 1, resource: linearSampler },
+          { binding: 2, resource: bloomDown[i].createView() },
+          { binding: 3, resource: { buffer: bloomParamBufs[i] } },
+        ],
+      }));
+    }
+
+    // Upsample bind groups: lower + current → bloomUp[i]
+    const upBGs = [];
+    for (let i = 0; i < BLOOM_MIPS - 1; i++) {
+      const mipIdx = BLOOM_MIPS - 2 - i; // 3, 2, 1, 0
+      const lowerView = i === 0
+        ? bloomDown[BLOOM_MIPS - 1].createView()
+        : bloomUp[BLOOM_MIPS - 2 - i + 1].createView();
+      // Wait — the up array is indexed 0..3 for mip sizes matching bloomDown 0..3
+      // Upsample pass i: lower(smaller) + bloomDown[mipIdx] → bloomUp[mipIdx]
+      const lowerSrc = i === 0
+        ? bloomDown[BLOOM_MIPS - 1].createView()
+        : bloomUp[mipIdx + 1].createView();
+      upBGs.push(device.createBindGroup({
+        layout: bloomUpBGL,
+        entries: [
+          { binding: 0, resource: lowerSrc },
+          { binding: 1, resource: bloomDown[mipIdx].createView() },
+          { binding: 2, resource: linearSampler },
+          { binding: 3, resource: bloomUp[mipIdx].createView() },
+          { binding: 4, resource: { buffer: bloomParamBufs[BLOOM_MIPS + i] } },
+        ],
+      }));
+    }
+
+    // Composite bind group
+    const compositeBG = device.createBindGroup({
+      layout: bloomCompositeBGL,
+      entries: [
+        { binding: 0, resource: sceneView },
+        { binding: 1, resource: bloomUp[0].createView() },
+        { binding: 2, resource: linearSampler },
+        { binding: 3, resource: { buffer: bloomCompositeUB } },
+      ],
+    });
+
+    bloomResources = { sceneTex, sceneView, bloomDown, bloomUp, downBGs, upBGs, compositeBG };
+  }
+
+  function destroyBloomResources() {
+    if (!bloomResources) return;
+    bloomResources.sceneTex.destroy();
+    for (const t of bloomResources.bloomDown) t.destroy();
+    for (const t of bloomResources.bloomUp) t.destroy();
+    bloomResources = null;
+    lastBloomW = 0;
+    lastBloomH = 0;
+  }
 
   // ─── Bind group helpers ─────────────────────────────────────────────────
   function bg(layout, resources) {
@@ -2230,7 +2567,7 @@ async function main() {
 
     // ── Upload batch splat data + write simulation params ──
     splatCountUData[0] = splatCount;
-    device.queue.writeBuffer(splatCountBuf, 0, splatCountUData);
+    if (splatCount > 0) device.queue.writeBuffer(splatCountBuf, 0, splatCountUData);
     if (splatCount > 0) {
       device.queue.writeBuffer(splatBuf, 0, splatArrayData);
     }
@@ -2361,12 +2698,21 @@ async function main() {
       p.end();
     }
 
-    // ── Pass 11: Display Render (fluid base) ──
+    // ── Bloom setup ──
+    const bloomActive = state.bloomIntensity > 0;
+    if (bloomActive) {
+      ensureBloomResources(canvas.width, canvas.height);
+    } else if (bloomResources) {
+      destroyBloomResources();
+    }
     const canvasView = ctx.getCurrentTexture().createView();
+    const renderTarget = bloomActive ? bloomResources.sceneView : canvasView;
+
+    // ── Pass 11: Display Render (fluid base) ──
     {
       const rp = enc.beginRenderPass({
         colorAttachments: [{
-          view: canvasView,
+          view: renderTarget,
           loadOp: 'clear',
           storeOp: 'store',
           clearValue: { r: 0, g: 0, b: 0, a: 1 },
@@ -2382,7 +2728,7 @@ async function main() {
     {
       const rp = enc.beginRenderPass({
         colorAttachments: [{
-          view: canvasView,
+          view: renderTarget,
           loadOp: 'load',
           storeOp: 'store',
         }],
@@ -2393,7 +2739,91 @@ async function main() {
       rp.end();
     }
 
-    // ── Pass 13: Glass Shell (commented out) ──
+    // ── Pass 13: Bloom Post-Processing ──
+    if (bloomActive) {
+      const br = bloomResources;
+      // Compute per-mip weights from size slider
+      function smoothstepJS(edge0, edge1, x) {
+        if (edge0 >= edge1) return x >= edge1 ? 1.0 : 0.0;
+        const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+        return t * t * (3 - 2 * t);
+      }
+
+      // Downsample chain (5 passes)
+      let srcW = canvas.width, srcH = canvas.height;
+      for (let i = 0; i < BLOOM_MIPS; i++) {
+        const dstW = Math.max(1, srcW >> 1);
+        const dstH = Math.max(1, srcH >> 1);
+        bloomParamData[0] = 1.0 / srcW;  // texelSize.x (of source)
+        bloomParamData[1] = 1.0 / srcH;  // texelSize.y
+        bloomParamData[2] = state.bloomThreshold;
+        bloomParamData[3] = state.bloomThreshold * 0.5; // knee
+        bloomParamData[4] = 0; // unused in downsample
+        bloomParamData[5] = 0; // unused
+        bloomParamData[6] = i === 0 ? 1.0 : 0.0; // flags: threshold on first pass only
+        bloomParamData[7] = 0;
+        device.queue.writeBuffer(bloomParamBufs[i], 0, bloomParamData);
+
+        const p = enc.beginComputePass();
+        p.setPipeline(bloomDownPipe);
+        p.setBindGroup(0, br.downBGs[i]);
+        p.dispatchWorkgroups(Math.ceil(dstW / 8), Math.ceil(dstH / 8));
+        p.end();
+
+        srcW = dstW;
+        srcH = dstH;
+      }
+
+      // Upsample chain (4 passes)
+      for (let i = 0; i < BLOOM_MIPS - 1; i++) {
+        const mipIdx = BLOOM_MIPS - 2 - i; // 3, 2, 1, 0
+        const dstW = br.bloomUp[mipIdx].width;
+        const dstH = br.bloomUp[mipIdx].height;
+        // texelSize of the lower (source) mip
+        const lowerW = i === 0 ? br.bloomDown[BLOOM_MIPS - 1].width : br.bloomUp[mipIdx + 1].width;
+        const lowerH = i === 0 ? br.bloomDown[BLOOM_MIPS - 1].height : br.bloomUp[mipIdx + 1].height;
+        const radiusNorm = Math.min(state.bloomRadius / 10.0, 1.0);
+        // Coarser passes (low i) need higher radius to activate
+        // depth: 0 for finest pass, 1 for coarsest pass
+        const depth = (BLOOM_MIPS - 2 - i) / (BLOOM_MIPS - 2);
+        const mipWeight = Math.pow(radiusNorm, 1.0 + depth * 2.0);
+
+        bloomParamData[0] = 1.0 / lowerW;
+        bloomParamData[1] = 1.0 / lowerH;
+        bloomParamData[2] = 0;
+        bloomParamData[3] = 0;
+        bloomParamData[4] = 0;
+        bloomParamData[5] = mipWeight;
+        bloomParamData[6] = 0;
+        bloomParamData[7] = 0;
+        device.queue.writeBuffer(bloomParamBufs[BLOOM_MIPS + i], 0, bloomParamData);
+
+        const p = enc.beginComputePass();
+        p.setPipeline(bloomUpPipe);
+        p.setBindGroup(0, br.upBGs[i]);
+        p.dispatchWorkgroups(Math.ceil(dstW / 8), Math.ceil(dstH / 8));
+        p.end();
+      }
+
+      // Composite: sceneTex + bloomUp[0] → canvasView
+      device.queue.writeBuffer(bloomCompositeUB, 0, new Float32Array([state.bloomIntensity]));
+      {
+        const rp = enc.beginRenderPass({
+          colorAttachments: [{
+            view: canvasView,
+            loadOp: 'clear',
+            storeOp: 'store',
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          }],
+        });
+        rp.setPipeline(bloomCompositePipe);
+        rp.setBindGroup(0, br.compositeBG);
+        rp.draw(3);
+        rp.end();
+      }
+    }
+
+    // ── Pass 14: Glass Shell (commented out) ──
     // glassUBData[0] = canvas.width;
     // glassUBData[1] = canvas.height;
     // glassUBData[2] = time;
@@ -2478,7 +2908,9 @@ async function main() {
     }
   }
 
+  wireSlider('particleSize', 'particleSize');
   wireSlider('sizeRandomness', 'sizeRandomness');
+  wireSlider('glintBrightness', 'glintBrightness');
   wireSlider('prismaticAmount', 'prismaticAmount');
 
   // Wire color pickers
@@ -2529,6 +2961,9 @@ async function main() {
   wireSlider('pressureIters', 'pressureIters', v => Math.round(v));
   wireSlider('pressureDecay', 'pressureDecay', v => v.toFixed(2));
   wireSlider('simSpeed', 'simSpeed');
+  wireSlider('bloomIntensity', 'bloomIntensity', v => v.toFixed(2));
+  wireSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
+  wireSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
 
   // ─── Sync UI from state (for randomize) ─────────────────────────────
   function syncSlider(id, stateKey, fmt) {
@@ -2542,7 +2977,9 @@ async function main() {
     if (picker) picker.value = rgbToHex(state[stateKey]);
   }
   function syncAllUI() {
+    syncSlider('particleSize', 'particleSize');
     syncSlider('sizeRandomness', 'sizeRandomness');
+    syncSlider('glintBrightness', 'glintBrightness');
     syncSlider('prismaticAmount', 'prismaticAmount');
     syncSlider('colorBlend', 'colorBlend', v => v.toFixed(2));
     syncSlider('sheenStrength', 'sheenStrength');
@@ -2576,6 +3013,9 @@ async function main() {
     syncColor('glitterTip', 'glitterTip');
     syncColor('sheenColor', 'sheenColor');
     syncSlider('simSpeed', 'simSpeed');
+    syncSlider('bloomIntensity', 'bloomIntensity', v => v.toFixed(2));
+    syncSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
+    syncSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
   }
 
   // ─── Randomize helpers ────────────────────────────────────────────────
@@ -2638,7 +3078,6 @@ async function main() {
   const morphSliders = {
     simSpeed: { min: 0, max: 3, step: 0.01 },
     sizeRandomness: { min: 0, max: 1, step: 0.01 },
-    prismaticAmount: { min: 0, max: 20, step: 0.5 },
     colorBlend: { min: 0, max: 1, step: 0.01 },
     sheenStrength: { min: 0, max: 1, step: 0.01 },
     clickSize: { min: 0, max: 1, step: 0.01 },
