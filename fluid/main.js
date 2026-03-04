@@ -820,13 +820,15 @@ fn main(in: FSIn) -> @location(0) vec4f {
     (rawUV.y - 0.5) * max(1.0 / aspect, 1.0) + 0.5
   );
   let centered = uv - vec2f(0.5, 0.5);
-  if (length(centered) > 0.42) { discard; }
+  let sphereDist = length(centered);
+  if (sphereDist > 0.42) { discard; }
+  let sphereFade = 1.0 - smoothstep(0.40, 0.42, sphereDist);
 
   // Circular cutout + soft edge
   let d = length(in.localUV - vec2f(0.5));
   if (d > 0.5) { discard; }
   let edge = 1.0 - smoothstep(0.3, 0.5, d);
-  return vec4f(in.color * edge, in.alpha * edge);
+  return vec4f(in.color * edge * sphereFade, in.alpha * edge * sphereFade);
 }
 `;
 
@@ -888,7 +890,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let centered = uv - vec2f(0.5, 0.5);
   let screenDist = length(centered);
   let screenRadius = 0.42;
-  let mask = 1.0 - smoothstep(screenRadius - 0.005, screenRadius + 0.005, screenDist);
+  let mask = 1.0 - smoothstep(screenRadius - 0.002, screenRadius, screenDist);
 
   // ── Glass marble (commented out) ──────────────────────────────────────
   // let normPos = centered / screenRadius;
@@ -2037,6 +2039,28 @@ async function main() {
   settingsToggle.addEventListener('click', () => {
     settingsPanel.classList.toggle('open');
   });
+
+  // Auto-hide settings icon after 3s of no mouse movement
+  let hideTimer = null;
+  function showSettingsIcon() {
+    settingsToggle.classList.remove('hidden');
+    clearTimeout(hideTimer);
+    if (!settingsPanel.classList.contains('open')) {
+      hideTimer = setTimeout(() => settingsToggle.classList.add('hidden'), 3000);
+    }
+  }
+  document.addEventListener('mousemove', showSettingsIcon);
+  // Keep icon visible while panel is open
+  settingsToggle.addEventListener('click', () => {
+    if (settingsPanel.classList.contains('open')) {
+      clearTimeout(hideTimer);
+      settingsToggle.classList.remove('hidden');
+    } else {
+      showSettingsIcon();
+    }
+  });
+  // Start the initial hide timer
+  hideTimer = setTimeout(() => settingsToggle.classList.add('hidden'), 3000);
 
   // Particle count dropdown
   const particleCountSelect = document.getElementById('particleCountSelect');
