@@ -39,6 +39,12 @@ const state = {
   pressureDecay: 0.8,
   velDissipation: 0.998,
   dyeDissipation: 0.993,
+  drawBotCount: 0,
+  drawBotSpeed: 0.5,
+  drawBotSize: 0.5,
+  drawBotForce: 0.5,
+  drawBotChaos: 0.3,
+  drawBotDrift: 0.5,
   splatRadius: 0.0015,
   simSpeed: 1.0,
   autoMorph: false,
@@ -1063,16 +1069,23 @@ function linearToOklabCPU(rgb) {
   ];
 }
 
+// ─── Bayesian Optimization ───────────────────────────────────────────────────
+import { BOController, normalizedToState, stateToNormalized, SLIDER_KEYS, SLIDER_SPACE, COLOR_KEYS, D } from './bo.js';
+
 // ─── WebGPU Init ─────────────────────────────────────────────────────────────
 
 async function main() {
+  const t0 = performance.now();
+  const loadStatus = document.getElementById('loadStatus');
+  console.log('Init: creating BO controller...');
+  const bo = await BOController.create();
+  console.log(`Init: BO controller ready (${(performance.now() - t0).toFixed(0)}ms)`);
   const canvas = document.getElementById('canvas');
   const errorDiv = document.getElementById('error');
 
   if (!navigator.gpu) {
     errorDiv.style.display = 'block';
     errorDiv.textContent = 'WebGPU not supported in this browser.';
-    console.error('WebGPU not supported');
     return;
   }
 
@@ -1101,6 +1114,8 @@ async function main() {
   // Derive max particle count from granted limits
   const maxParticles = Math.min(16777216, Math.floor(device.limits.maxStorageBufferBindingSize / PARTICLE_STRIDE));
   state.particleCount = Math.min(state.particleCount, maxParticles);
+  loadStatus.textContent = 'Compiling shaders...';
+  console.log(`Init: WebGPU device acquired (${(performance.now() - t0).toFixed(0)}ms)`);
   console.log(`GPU limits: maxStorageBuffer=${(device.limits.maxStorageBufferBindingSize / 1024 / 1024).toFixed(0)}MB, maxParticles=${maxParticles}`);
 
   const ctx = canvas.getContext('webgpu');
@@ -1371,6 +1386,7 @@ async function main() {
   }
 
   gpuInitParticles(particleBuf, state.particleCount);
+  console.log(`Init: shaders compiled, buffers allocated (${(performance.now() - t0).toFixed(0)}ms)`);
 
   // Particle update compute pipeline
   const particleUpdateBGL = device.createBindGroupLayout({
@@ -1612,13 +1628,54 @@ async function main() {
     return [simX, simY];
   }
 
+  // ─── Recording Controller ─────────────────────────────────────────────
+  const recording = { active: false, points: [], startTime: 0, recordings: [], cHeld: false };
+  state.useRecordings = false;
+
+  // Load existing recordings on startup
+  fetch('/api/recordings').then(r => r.ok ? r.json() : []).then(recs => {
+    recording.recordings = Array.isArray(recs) ? recs : [];
+    console.log(`Recordings: loaded ${recording.recordings.length} gestures`);
+  }).catch(() => {});
+
+  function finishRecording() {
+    if (!recording.active) return;
+    recording.active = false;
+    const overlay = document.getElementById('recordingOverlay');
+    if (overlay) overlay.style.display = 'none';
+    if (recording.points.length >= 5) {
+      const rec = { name: `gesture-${Date.now()}`, points: [...recording.points] };
+      recording.recordings.push(rec);
+      fetch('/api/recordings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(rec),
+      }).catch(() => {});
+      console.log(`Recording saved: ${rec.name} (${rec.points.length} points, ${recording.recordings.length} total)`);
+    } else {
+      console.log(`Recording discarded (${recording.points.length} points, need >= 5)`);
+    }
+    recording.points = [];
+  }
+
   canvas.addEventListener('pointerdown', e => {
     pointer.down = true;
     const [sx, sy] = screenToSimUV(e.clientX, e.clientY);
     pointer.x = sx;
     pointer.y = sy;
+    // Start recording if C is held
+    if (recording.cHeld && !recording.active) {
+      recording.active = true;
+      recording.startTime = performance.now();
+      recording.points = [{ t: 0, x: sx, y: sy }];
+      const overlay = document.getElementById('recordingOverlay');
+      if (overlay) overlay.style.display = 'block';
+    }
   });
-  canvas.addEventListener('pointerup', () => { pointer.down = false; });
+  canvas.addEventListener('pointerup', () => {
+    pointer.down = false;
+    if (recording.active) finishRecording();
+  });
   canvas.addEventListener('pointermove', e => {
     const [nx, ny] = screenToSimUV(e.clientX, e.clientY);
     pointer.dx = nx - pointer.x;
@@ -1626,6 +1683,11 @@ async function main() {
     pointer.x = nx;
     pointer.y = ny;
     pointer.moved = true;
+    // Capture recording points
+    if (recording.active) {
+      const t = (performance.now() - recording.startTime) / 1000;
+      recording.points.push({ t, x: nx, y: ny });
+    }
   });
 
   // ─── Scientific Colormaps (Inferno, Magma, Plasma, Viridis) ─────────
@@ -1721,6 +1783,232 @@ async function main() {
   let time = 0;
   let lastSplatTime = -1.0;
 
+  // ─── Draw Bots ──────────────────────────────────────────────────────────
+  function simplexNoise(t) {
+    const i = Math.floor(t);
+    const f = t - i;
+    const smooth = f * f * (3 - 2 * f);
+    const a = Math.sin(i * 127.1 + i * 311.7) * 43758.5453;
+    const b = Math.sin((i+1) * 127.1 + (i+1) * 311.7) * 43758.5453;
+    return (a - Math.floor(a)) * (1 - smooth) + (b - Math.floor(b)) * smooth;
+  }
+
+  const drawBots = [];
+  let lastBotCount = 0;
+
+  // Sacred geometry ratios for per-bot periodic steering
+  const GOLDEN = (1 + Math.sqrt(5)) / 2;
+  const SACRED_FREQS = [
+    1.0,                    // circle
+    GOLDEN,                 // golden spiral
+    2.0,                    // figure-8 / lemniscate
+    3.0,                    // trefoil
+    GOLDEN * GOLDEN,        // nested golden
+    Math.PI,                // irrational — never repeats
+    Math.sqrt(2),           // diagonal harmony
+    5 / 3,                  // pentatonic ratio
+  ];
+
+  function initDrawBots(count) {
+    drawBots.length = 0;
+    for (let i = 0; i < count; i++) {
+      drawBots.push({
+        x: 0.3 + Math.random() * 0.4,
+        y: 0.3 + Math.random() * 0.4,
+        vx: 0, vy: 0,
+        angle: Math.random() * Math.PI * 2,
+        turnRate: 0,
+        colorPhase: i * 0.25,
+        noiseT: Math.random() * 100,
+        // Per-bot sacred geometry params
+        baseFreq: SACRED_FREQS[i % SACRED_FREQS.length] * (0.3 + Math.random() * 0.4),
+        secondFreq: SACRED_FREQS[(i + 3) % SACRED_FREQS.length] * (0.4 + Math.random() * 0.3),
+        speedPhase: Math.random() * Math.PI * 2,
+        orbitRadius: 0.08 + Math.random() * 0.22,  // Per-bot orbit scale
+        symmetry: 3 + (i % 4),                      // 3-6 fold symmetry
+        // Recording playback fields
+        _rec: null, _recIdx: 0, _recT: 0,
+        _recRotation: 0, _recScale: 1, _recOffX: 0, _recOffY: 0,
+        _recSpeed: 1, _recMirrorX: false, _recMirrorY: false, _recPause: 0,
+        _recCentroidX: 0, _recCentroidY: 0,
+      });
+    }
+  }
+
+  // ─── Recording Playback ───────────────────────────────────────────────
+  function pickRecordingForBot(bot) {
+    const recs = recording.recordings;
+    if (!recs.length) { bot._rec = null; return; }
+    const rec = recs[Math.floor(Math.random() * recs.length)];
+    bot._rec = rec;
+    bot._recIdx = 0;
+    bot._recT = 0;
+    bot._recRotation = Math.random() * Math.PI * 2;
+    bot._recScale = 0.6 + Math.random() * 0.8;
+    bot._recSpeed = 0.7 + Math.random() * 0.6;
+    bot._recMirrorX = Math.random() < 0.5;
+    bot._recMirrorY = Math.random() < 0.5;
+    bot._recPause = 0;
+    // Compute gesture centroid
+    let cx = 0, cy = 0;
+    for (const p of rec.points) { cx += p.x; cy += p.y; }
+    cx /= rec.points.length;
+    cy /= rec.points.length;
+    bot._recCentroidX = cx;
+    bot._recCentroidY = cy;
+    // Offset so gesture starts at bot's current position
+    bot._recOffX = bot.x - cx;
+    bot._recOffY = bot.y - cy;
+  }
+
+  function transformRecPoint(bot, px, py) {
+    // Relative to gesture centroid
+    let rx = px - bot._recCentroidX;
+    let ry = py - bot._recCentroidY;
+    // Mirror
+    if (bot._recMirrorX) rx = -rx;
+    if (bot._recMirrorY) ry = -ry;
+    // Scale
+    rx *= bot._recScale;
+    ry *= bot._recScale;
+    // Rotate
+    const cos = Math.cos(bot._recRotation);
+    const sin = Math.sin(bot._recRotation);
+    const rotX = rx * cos - ry * sin;
+    const rotY = rx * sin + ry * cos;
+    // Offset to bot position
+    return [rotX + bot._recCentroidX + bot._recOffX, rotY + bot._recCentroidY + bot._recOffY];
+  }
+
+  function updateDrawBotFromRecording(bot, dt) {
+    if (!bot._rec) { pickRecordingForBot(bot); if (!bot._rec) return; }
+    const rec = bot._rec;
+    const pts = rec.points;
+
+    // Pause between gestures
+    if (bot._recPause > 0) {
+      bot._recPause -= dt;
+      bot.vx = 0; bot.vy = 0;
+      return;
+    }
+
+    bot._recT += dt * bot._recSpeed;
+    // Find the two points to interpolate between
+    while (bot._recIdx < pts.length - 1 && pts[bot._recIdx + 1].t <= bot._recT) {
+      bot._recIdx++;
+    }
+
+    if (bot._recIdx >= pts.length - 1) {
+      // Gesture finished — pause then pick new
+      bot._recPause = 0.3 + Math.random() * 0.7;
+      pickRecordingForBot(bot);
+      return;
+    }
+
+    const p0 = pts[bot._recIdx];
+    const p1 = pts[bot._recIdx + 1];
+    const segDt = p1.t - p0.t;
+    const frac = segDt > 0 ? (bot._recT - p0.t) / segDt : 0;
+
+    const rawX = p0.x + (p1.x - p0.x) * frac;
+    const rawY = p0.y + (p1.y - p0.y) * frac;
+    const [tx, ty] = transformRecPoint(bot, rawX, rawY);
+
+    // Clamp to sphere boundary
+    const SPHERE_R = 0.35;
+    const dx = tx - 0.5, dy = ty - 0.5;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    let finalX = tx, finalY = ty;
+    if (dist > SPHERE_R) {
+      finalX = 0.5 + dx / dist * SPHERE_R * 0.95;
+      finalY = 0.5 + dy / dist * SPHERE_R * 0.95;
+    }
+
+    bot.vx = (finalX - bot.x) / Math.max(dt, 0.001);
+    bot.vy = (finalY - bot.y) / Math.max(dt, 0.001);
+    bot.x = finalX;
+    bot.y = finalY;
+  }
+
+  function updateDrawBots(dt, time) {
+    const count = Math.round(state.drawBotCount);
+    if (count !== lastBotCount) {
+      initDrawBots(count);
+      lastBotCount = count;
+    }
+    if (count === 0) return;
+
+    // Recording playback mode
+    if (state.useRecordings && recording.recordings.length > 0) {
+      for (const bot of drawBots) {
+        updateDrawBotFromRecording(bot, dt);
+      }
+      return;
+    }
+
+    const speed = 0.1 + state.drawBotSpeed * 0.9;
+    const chaos = state.drawBotChaos;
+    const drift = state.drawBotDrift;
+    const SPHERE_R = 0.35;
+
+    for (const bot of drawBots) {
+      bot.noiseT += dt;
+
+      // Blend periodic (sacred geometry) and noise (chaos) steering
+      // Low chaos → repeating sacred patterns (spirals, rosettes, trefoils)
+      // High chaos → erratic zigzag, sharp turns
+      const t = bot.noiseT * speed;
+
+      // Sacred geometry: multi-frequency sinusoidal creates spirograph-like patterns
+      const periodicSteer = Math.sin(t * bot.baseFreq) * 1.5
+                          + Math.sin(t * bot.secondFreq) * 0.8
+                          + Math.sin(t * bot.baseFreq * bot.symmetry) * 0.3;
+
+      // Noise steering for chaos
+      const noiseSteer = (simplexNoise(bot.noiseT * (0.5 + chaos * 2)) * 2 - 1) * (1 + chaos * 4);
+
+      // Blend: chaos=0 → pure sacred geometry, chaos=1 → pure noise
+      const targetTurn = periodicSteer * (1 - chaos) + noiseSteer * chaos;
+      bot.turnRate += (targetTurn - bot.turnRate) * (0.02 + chaos * 0.08);
+      bot.angle += bot.turnRate * dt * speed;
+
+      // Speed varies organically over time
+      const speedVar = 1.0 + Math.sin(bot.noiseT * 0.7 + bot.speedPhase) * 0.3 * (1 - chaos * 0.5);
+      const spd = speed * 0.3 * speedVar;
+      bot.vx = Math.cos(bot.angle) * spd;
+      bot.vy = Math.sin(bot.angle) * spd;
+
+      // Drift toward/away from center
+      const toCenterX = 0.5 - bot.x;
+      const toCenterY = 0.5 - bot.y;
+      const distFromCenter = Math.sqrt(toCenterX * toCenterX + toCenterY * toCenterY);
+
+      const centerPull = drift < 0.5
+        ? 0.02 + distFromCenter * 0.1
+        : 0.005 + distFromCenter * 0.03;
+      bot.vx += toCenterX * centerPull;
+      bot.vy += toCenterY * centerPull;
+
+      // Hard boundary: reflect off sphere edge
+      const newX = bot.x + bot.vx * dt;
+      const newY = bot.y + bot.vy * dt;
+      const newDist = Math.sqrt((newX - 0.5) ** 2 + (newY - 0.5) ** 2);
+      if (newDist > SPHERE_R) {
+        bot.angle = Math.atan2(0.5 - bot.y, 0.5 - bot.x) + (Math.random() - 0.5) * 1.0;
+        bot.vx *= -0.3;
+        bot.vy *= -0.3;
+      }
+
+      bot.x += bot.vx * dt;
+      bot.y += bot.vy * dt;
+      const d = Math.sqrt((bot.x - 0.5) ** 2 + (bot.y - 0.5) ** 2);
+      if (d > SPHERE_R) {
+        bot.x = 0.5 + (bot.x - 0.5) / d * SPHERE_R * 0.95;
+        bot.y = 0.5 + (bot.y - 0.5) / d * SPHERE_R * 0.95;
+      }
+    }
+  }
+
   // ─── Frame loop ─────────────────────────────────────────────────────────
   function frame() {
     requestAnimationFrame(frame);
@@ -1728,6 +2016,7 @@ async function main() {
     time += dt;
 
     updateAutoMorph();
+    updateDrawBots(dt, time);
 
     // Pre-convert colors to Oklab on CPU (avoids per-particle GPU conversion)
     const okGlitBase = linearToOklabCPU(state.glitterColor);
@@ -1837,6 +2126,41 @@ async function main() {
             state.splatRadius * (2.0 + Math.random() * 3));
         }
       }
+    }
+
+    // Draw bot splats — throttled to ~20Hz (like mouse input rate) instead of every frame
+    const botForce = state.drawBotForce * 6.0;  // same scale as clickStrength * 6.0
+    const botSize = 1.0 + state.drawBotSize * 8.0;  // match mouse clickSize * 8.0
+    for (const bot of drawBots) {
+      // Accumulate displacement between splats (like pointer.dx/dy accumulates between events)
+      const frameDx = bot.vx * dt;
+      const frameDy = bot.vy * dt;
+      bot._splatDx = (bot._splatDx || 0) + frameDx;
+      bot._splatDy = (bot._splatDy || 0) + frameDy;
+      bot._splatTimer = (bot._splatTimer || 0) + dt;
+
+      // Only splat ~20 times/sec (every 50ms), matching typical mouse event rate
+      if (bot._splatTimer < 0.05) continue;
+
+      const dx = bot._splatDx;
+      const dy = bot._splatDy;
+      const bspeed = Math.sqrt(dx * dx + dy * dy);
+      bot._splatDx = 0;
+      bot._splatDy = 0;
+      bot._splatTimer = 0;
+
+      if (bspeed < 0.0001) continue;  // skip if barely moved
+
+      const col = palette(time * 0.15 + bot.colorPhase, 4);
+      addSplat(
+        bot.x, bot.y,
+        dx * state.splatForce * botForce,
+        dy * state.splatForce * botForce,
+        col[0] * botForce,              // match mouse: col * str, no extra dyeRamp
+        col[1] * botForce,
+        col[2] * botForce,
+        state.splatRadius * botSize * (1.0 + bspeed * 200)  // bspeed is small in normalized coords, scale up
+      );
     }
 
     // Mouse splat — clamp to sphere (tighter than visual edge to keep splat radius inside)
@@ -2196,6 +2520,12 @@ async function main() {
     syncSlider('dyeDissipation', 'dyeDissipation', v => v.toFixed(3));
     syncSlider('pressureIters', 'pressureIters', v => Math.round(v));
     syncSlider('pressureDecay', 'pressureDecay', v => v.toFixed(2));
+    syncSlider('drawBotCount', 'drawBotCount', v => Math.round(v));
+    syncSlider('drawBotSpeed', 'drawBotSpeed');
+    syncSlider('drawBotSize', 'drawBotSize');
+    syncSlider('drawBotForce', 'drawBotForce');
+    syncSlider('drawBotChaos', 'drawBotChaos');
+    syncSlider('drawBotDrift', 'drawBotDrift');
     syncColor('baseColor', 'baseColor');
     syncColor('accentColor', 'accentColor');
     syncColor('glitterColor', 'glitterColor');
@@ -2225,6 +2555,8 @@ async function main() {
   });
 
   document.getElementById('randomizeParams').addEventListener('click', () => {
+    // Sim
+    state.simSpeed = snapTo(randRange(0.3, 2.0), 0.01);
     // Particle appearance
     state.particleSize = snapTo(randRange(0.3, 1.1), 0.1);
     state.glintBrightness = snapTo(randRange(0.1, 1.1), 0.1);
@@ -2250,12 +2582,22 @@ async function main() {
     state.dyeDissipation = snapTo(randRange(0.98, 1.0), 0.001);
     state.pressureIters = Math.round(randRange(10, 60));
     state.pressureDecay = snapTo(randRange(0, 1), 0.01);
+    // Draw bots
+    state.drawBotCount = Math.round(Math.random() * 4);
+    state.drawBotSpeed = Math.random();
+    state.drawBotSize = Math.random();
+    state.drawBotForce = Math.random();
+    state.drawBotChaos = Math.random();
+    state.drawBotDrift = Math.random();
     // NOTE: particleCount is intentionally NOT randomized
     syncAllUI();
   });
 
   // ─── Auto-Morph ──────────────────────────────────────────────────────
   const morphSliders = {
+    simSpeed: { min: 0, max: 3, step: 0.01 },
+    particleSize: { min: 0.3, max: 4.0, step: 0.1 },
+    glintBrightness: { min: 0.1, max: 5.0, step: 0.1 },
     sizeRandomness: { min: 0, max: 1, step: 0.01 },
     prismaticAmount: { min: 0, max: 20, step: 0.5 },
     colorBlend: { min: 0, max: 1, step: 0.01 },
@@ -2267,6 +2609,7 @@ async function main() {
     injectorCount: { min: 0, max: 8, step: 1 },
     injectorSpeed: { min: 0, max: 1, step: 0.01 },
     burstCount: { min: 0, max: 8, step: 1 },
+    noiseAmount: { min: 0, max: 1, step: 0.01 },
     noiseFrequency: { min: 0, max: 1, step: 0.01 },
     noiseSpeed: { min: 0, max: 1, step: 0.01 },
     curlStrength: { min: 0, max: 50, step: 1 },
@@ -2275,6 +2618,12 @@ async function main() {
     dyeDissipation: { min: 0.98, max: 1.0, step: 0.001 },
     pressureIters: { min: 10, max: 60, step: 1 },
     pressureDecay: { min: 0, max: 1, step: 0.01 },
+    drawBotCount: { min: 0, max: 4, step: 1 },
+    drawBotSpeed: { min: 0, max: 1, step: 0.01 },
+    drawBotSize:  { min: 0, max: 1, step: 0.01 },
+    drawBotForce: { min: 0, max: 1, step: 0.01 },
+    drawBotChaos: { min: 0, max: 1, step: 0.01 },
+    drawBotDrift: { min: 0, max: 1, step: 0.01 },
   };
   const morphColors = ['baseColor', 'accentColor', 'tipColor', 'glitterColor', 'glitterAccent', 'glitterTip', 'sheenColor'];
 
@@ -2292,10 +2641,43 @@ async function main() {
   for (const key of morphColors) pickMorphTarget(key);
 
   let lastMorphSync = 0;
+  let boMorphCooldown = 0;
   function updateAutoMorph() {
     if (!state.autoMorph) return;
     const rate = 0.002;
     const threshold = 0.005;
+
+    // BO-guided morph: replace random targets with GP suggestions
+    if (bo.boMorphMode && bo.model) {
+      boMorphCooldown--;
+      // Check if all slider targets are reached
+      let allReached = true;
+      for (const [key, s] of Object.entries(morphSliders)) {
+        const range = s.max - s.min;
+        if (Math.abs(state[key] - morphTargets[key]) / range >= threshold) {
+          allReached = false;
+          break;
+        }
+      }
+      if (allReached || boMorphCooldown <= 0) {
+        boMorphCooldown = 300;
+        const x = bo.getMorphTarget();
+        // Decode normalized vector into morph targets (sliders + colors)
+        for (let i = 0; i < SLIDER_KEYS.length; i++) {
+          const key = SLIDER_KEYS[i];
+          const cm = key.match(/^(.+)_([012])$/);
+          if (cm && morphColors.includes(cm[1])) {
+            // Color channel — update parent color's morph target
+            if (!Array.isArray(morphTargets[cm[1]])) morphTargets[cm[1]] = [...state[cm[1]]];
+            const s = SLIDER_SPACE[key];
+            morphTargets[cm[1]][parseInt(cm[2])] = s.min + x[i] * (s.max - s.min);
+          } else if (morphSliders[key]) {
+            const s = SLIDER_SPACE[key];
+            morphTargets[key] = s.min + x[i] * (s.max - s.min);
+          }
+        }
+      }
+    }
 
     // Lerp sliders
     for (const [key, s] of Object.entries(morphSliders)) {
@@ -2303,7 +2685,9 @@ async function main() {
       const range = s.max - s.min;
       state[key] += (target - state[key]) * rate;
       if (Math.abs(state[key] - target) / range < threshold) {
-        pickMorphTarget(key);
+        if (!(bo.boMorphMode && bo.model)) {
+          pickMorphTarget(key);
+        }
       }
     }
 
@@ -2315,7 +2699,11 @@ async function main() {
       }
       const dist = Math.abs(state[key][0] - target[0]) + Math.abs(state[key][1] - target[1]) + Math.abs(state[key][2] - target[2]);
       if (dist < threshold * 3) {
-        pickMorphTarget(key);
+        if (bo.boMorphMode && bo.model) {
+          morphTargets[key] = [Math.random(), Math.random(), Math.random()];
+        } else {
+          pickMorphTarget(key);
+        }
       }
     }
 
@@ -2334,8 +2722,184 @@ async function main() {
     autoMorphBtn.classList.toggle('active', state.autoMorph);
   });
 
-  console.log('Fluid simulation starting...');
+  // ─── Bayesian Optimization UI ────────────────────────────────────────
+  const boOverlay = document.getElementById('boOverlay');
+  const boRateBtn = document.getElementById('boRate');
+  const boMorphBtn = document.getElementById('boMorph');
+  const boBestBtn = document.getElementById('boBest');
+  const boClearBtn = document.getElementById('boClear');
+
+  function toggleRateMode() {
+    bo.rateMode = !bo.rateMode;
+    boRateBtn.classList.toggle('active', bo.rateMode);
+    boOverlay.style.display = bo.rateMode ? 'block' : 'none';
+    if (bo.rateMode) {
+      // Keep current config so user can rate what's on screen
+      bo.updateOverlay();
+    }
+  }
+
+  boRateBtn.addEventListener('click', toggleRateMode);
+
+  boMorphBtn.addEventListener('click', () => {
+    bo.boMorphMode = !bo.boMorphMode;
+    boMorphBtn.classList.toggle('active', bo.boMorphMode);
+    if (bo.boMorphMode) {
+      state.autoMorph = true;
+      autoMorphBtn.classList.add('active');
+    }
+  });
+
+  boBestBtn.addEventListener('click', () => {
+    const x = bo.getBestParams();
+    normalizedToState(x, state);
+    syncAllUI();
+  });
+
+  boClearBtn.addEventListener('click', () => {
+    if (confirm('Clear all BO ratings?')) {
+      bo.clearData();
+    }
+  });
+
+  // ─── Run Management UI ──────────────────────────────────────────
+  document.getElementById('saveRun').addEventListener('click', async () => {
+    const name = prompt('Run name (letters, numbers, - _ only):');
+    if (!name) return;
+    const ok = await bo.saveRun(name);
+    if (!ok) alert('Save failed — check name or rate some configs first.');
+  });
+
+  document.getElementById('loadRun').addEventListener('click', async () => {
+    const runs = await bo.listRuns();
+    if (!runs.length) { alert('No saved runs.'); return; }
+    const name = prompt('Available runs:\n' + runs.join('\n') + '\n\nEnter name to load:');
+    if (!name) return;
+    const ok = await bo.loadRun(name);
+    if (ok) syncAllUI(); else alert('Load failed — run not found.');
+  });
+
+  document.getElementById('deleteRun').addEventListener('click', async () => {
+    const runs = await bo.listRuns();
+    if (!runs.length) { alert('No saved runs.'); return; }
+    const name = prompt('Available runs:\n' + runs.join('\n') + '\n\nEnter name to delete:');
+    if (!name) return;
+    if (!confirm(`Delete run "${name}"?`)) return;
+    await bo.deleteRun(name);
+  });
+
+  // ─── Example Management UI ─────────────────────────────────────────
+  document.getElementById('saveExample').addEventListener('click', async () => {
+    const name = prompt('Example name (letters, numbers, - _ only):');
+    if (!name) return;
+    await bo.saveExample(name, state);
+    console.log(`Example "${name}" saved`);
+  });
+
+  document.getElementById('loadExample').addEventListener('click', async () => {
+    const examples = await bo.listExamples();
+    if (!examples.length) { alert('No saved examples.'); return; }
+    const name = prompt('Available examples:\n' + examples.map(e => e.name).join('\n') + '\n\nEnter name to load:');
+    if (!name) return;
+    const ex = examples.find(e => e.name === name);
+    if (!ex) { alert('Example not found.'); return; }
+    bo.loadExample(ex, state, syncAllUI);
+  });
+
+  document.getElementById('deleteExample').addEventListener('click', async () => {
+    const examples = await bo.listExamples();
+    if (!examples.length) { alert('No saved examples.'); return; }
+    const name = prompt('Available examples:\n' + examples.map(e => e.name).join('\n') + '\n\nEnter name to delete:');
+    if (!name) return;
+    if (!confirm(`Delete example "${name}"?`)) return;
+    await bo.deleteExample(name);
+  });
+
+  // ─── Recording UI ────────────────────────────────────────────────────
+  const useRecBtn = document.getElementById('useRecordingsBtn');
+  const clearRecBtn = document.getElementById('clearRecordingsBtn');
+
+  useRecBtn.addEventListener('click', () => {
+    if (!state.useRecordings && recording.recordings.length === 0) {
+      alert('No recordings yet. Hold C and draw to record gestures.');
+      return;
+    }
+    state.useRecordings = !state.useRecordings;
+    useRecBtn.classList.toggle('active', state.useRecordings);
+    if (state.useRecordings) {
+      // Reset playback state on bots
+      for (const bot of drawBots) { bot._rec = null; bot._recPause = 0; }
+    }
+    console.log(`Use Recordings: ${state.useRecordings} (${recording.recordings.length} gestures)`);
+  });
+
+  clearRecBtn.addEventListener('click', async () => {
+    if (recording.recordings.length === 0) { alert('No recordings to clear.'); return; }
+    if (!confirm(`Clear all ${recording.recordings.length} recordings?`)) return;
+    recording.recordings = [];
+    state.useRecordings = false;
+    useRecBtn.classList.remove('active');
+    await fetch('/api/recordings', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ all: true }),
+    });
+    console.log('All recordings cleared');
+  });
+
+  // Keyboard handler
+  document.addEventListener('keydown', (e) => {
+    const tag = document.activeElement?.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT') return;
+
+    // Hold C to record
+    if ((e.key === 'c' || e.key === 'C') && !e.repeat) {
+      recording.cHeld = true;
+      // If pointer is already down, start recording immediately
+      if (pointer.down && !recording.active) {
+        recording.active = true;
+        recording.startTime = performance.now();
+        recording.points = [{ t: 0, x: pointer.x, y: pointer.y }];
+        const overlay = document.getElementById('recordingOverlay');
+        if (overlay) overlay.style.display = 'block';
+      }
+      return;
+    }
+
+    if (e.key === 'r' || e.key === 'R') {
+      toggleRateMode();
+      return;
+    }
+
+    if (bo.rateMode) {
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        bo.rate(state, 1, syncAllUI);
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        bo.rate(state, 0, syncAllUI);
+      }
+    }
+  });
+
+  document.addEventListener('keyup', (e) => {
+    if (e.key === 'c' || e.key === 'C') {
+      recording.cHeld = false;
+      if (recording.active) finishRecording();
+    }
+  });
+
+  loadStatus.textContent = 'Starting simulation...';
+  console.log(`Fluid simulation starting... (${(performance.now() - t0).toFixed(0)}ms)`);
+  document.getElementById('loading').style.display = 'none';
   requestAnimationFrame(frame);
+
+  // Trigger deferred BO retrain now that WebGPU is fully initialized
+  if (bo.ratings.length >= 10 && !bo.model) {
+    setTimeout(() => {
+      try { bo.retrain(); } catch (e) { console.warn('BO: deferred retrain failed:', e); }
+    }, 100);
+  }
 }
 
 main().catch(err => {

@@ -141,6 +141,12 @@
 <body>
   <canvas id="canvas"></canvas>
   <div id="error"></div>
+  <div id="loading" style="position:fixed; inset:0; display:flex; align-items:center;
+    justify-content:center; z-index:50; pointer-events:none;">
+    <div style="text-align:center; font-family:system-ui,-apple-system,sans-serif;">
+      <div id="loadStatus" style="color:#666; font-size:14px;">Initializing...</div>
+    </div>
+  </div>
 
   <button id="settingsToggle" title="Settings">&#9881;</button>
   <div id="settingsPanel">
@@ -149,6 +155,26 @@
         <button id="randomizeColors">Randomize Colors</button>
         <button id="randomizeParams">Randomize Params</button>
         <button id="autoMorph">Auto Morph</button>
+      </div>
+      <div class="randomize-row">
+        <button id="boRate" title="Press R to toggle. Up=good, Down=bad">Rate Mode</button>
+        <button id="boMorph">BO Morph</button>
+        <button id="boBest">Best Config</button>
+        <button id="boClear">Clear Data</button>
+      </div>
+      <div class="randomize-row">
+        <button id="saveRun">Save Run</button>
+        <button id="loadRun">Load Run</button>
+        <button id="deleteRun">Delete Run</button>
+      </div>
+      <div class="randomize-row">
+        <button id="saveExample">Save Example</button>
+        <button id="loadExample">Load Example</button>
+        <button id="deleteExample">Delete Example</button>
+      </div>
+      <div class="randomize-row">
+        <button id="useRecordingsBtn">Use Recordings</button>
+        <button id="clearRecordingsBtn">Clear Recordings</button>
       </div>
       <div class="setting-group">
         <label>Sim Speed <span class="val" id="simSpeedVal">1.0</span></label>
@@ -294,6 +320,30 @@
         <label>Pressure Decay <span class="val" id="pressureDecayVal">0.8</span></label>
         <input type="range" id="pressureDecay" min="0.0" max="1.0" step="0.01" value="0.8">
       </div>
+      <div class="setting-group">
+        <label>Draw Bot Count <span class="val" id="drawBotCountVal">0</span></label>
+        <input type="range" id="drawBotCount" min="0" max="4" step="1" value="0">
+      </div>
+      <div class="setting-group">
+        <label>Draw Bot Speed <span class="val" id="drawBotSpeedVal">0.5</span></label>
+        <input type="range" id="drawBotSpeed" min="0.0" max="1.0" step="0.01" value="0.5">
+      </div>
+      <div class="setting-group">
+        <label>Draw Bot Size <span class="val" id="drawBotSizeVal">0.5</span></label>
+        <input type="range" id="drawBotSize" min="0.0" max="1.0" step="0.01" value="0.5">
+      </div>
+      <div class="setting-group">
+        <label>Draw Bot Force <span class="val" id="drawBotForceVal">0.5</span></label>
+        <input type="range" id="drawBotForce" min="0.0" max="1.0" step="0.01" value="0.5">
+      </div>
+      <div class="setting-group">
+        <label>Draw Bot Chaos <span class="val" id="drawBotChaosVal">0.3</span></label>
+        <input type="range" id="drawBotChaos" min="0.0" max="1.0" step="0.01" value="0.3">
+      </div>
+      <div class="setting-group">
+        <label>Draw Bot Drift <span class="val" id="drawBotDriftVal">0.5</span></label>
+        <input type="range" id="drawBotDrift" min="0.0" max="1.0" step="0.01" value="0.5">
+      </div>
     </div>
   </div>
 
@@ -318,6 +368,23 @@
       window.addEventListener('unhandledrejection', e => send('error', [`Unhandled rejection: ${e.reason}`]));
     })();
   </script>
+  <div id="recordingOverlay" style="display:none; position:fixed; top:20px; left:50%;
+    transform:translateX(-50%); z-index:102; text-align:center; pointer-events:none;
+    font-family:system-ui,-apple-system,sans-serif;">
+    <span style="display:inline-block; width:12px; height:12px; border-radius:50%;
+      background:#f44; animation:recPulse 1s infinite;"></span>
+    <span id="recordingText" style="color:#f44; font-size:14px; font-weight:600; margin-left:8px;">RECORDING</span>
+    <span id="recordingCount" style="color:#aaa; font-size:12px; margin-left:8px;"></span>
+    <style>@keyframes recPulse { 0%,100%{opacity:1} 50%{opacity:0.3} }</style>
+  </div>
+
+  <div id="boOverlay" style="display:none; position:fixed; bottom:20px; left:50%;
+    transform:translateX(-50%); z-index:101; text-align:center; pointer-events:none;">
+    <div id="boFlash" style="font-size:48px; opacity:0; transition:opacity 0.15s;"></div>
+    <div id="boCount" style="color:#aaa; font-size:13px; font-family:system-ui,-apple-system,sans-serif;"></div>
+    <div id="boPhase" style="color:#666; font-size:10px; font-family:system-ui,-apple-system,sans-serif;"></div>
+  </div>
+
   <script type="module" src="main.js"></script>
 </body>
 </html>
