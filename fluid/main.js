@@ -1334,6 +1334,7 @@ async function main() {
     return;
   }
 
+  console.log('Init: requesting GPU adapter...');
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) {
     errorDiv.style.display = 'block';
@@ -1342,7 +1343,7 @@ async function main() {
     return;
   }
 
-  // Request higher device limits for large particle buffers
+  console.log('Init: requesting GPU device...');
   const device = await adapter.requestDevice({
     requiredLimits: {
       maxBufferSize: Math.min(adapter.limits.maxBufferSize, 1024 * 1024 * 1024),
@@ -1350,11 +1351,6 @@ async function main() {
     },
   });
   device.lost.then(info => console.error('WebGPU device lost:', info.message));
-
-  // Destroy GPU device on page unload so Chrome releases resources immediately
-  window.addEventListener('beforeunload', () => { device.destroy(); });
-  window.addEventListener('pagehide', () => { device.destroy(); });
-  window.addEventListener('unload', () => { device.destroy(); });
 
   // Derive max particle count from granted limits
   const maxParticles = Math.min(16777216, Math.floor(device.limits.maxStorageBufferBindingSize / PARTICLE_STRIDE));
