@@ -1093,6 +1093,11 @@ async function main() {
   });
   device.lost.then(info => console.error('WebGPU device lost:', info.message));
 
+  // Destroy GPU device on page unload so Chrome releases resources immediately
+  window.addEventListener('beforeunload', () => { device.destroy(); });
+  window.addEventListener('pagehide', () => { device.destroy(); });
+  window.addEventListener('unload', () => { device.destroy(); });
+
   // Derive max particle count from granted limits
   const maxParticles = Math.min(16777216, Math.floor(device.limits.maxStorageBufferBindingSize / PARTICLE_STRIDE));
   state.particleCount = Math.min(state.particleCount, maxParticles);
