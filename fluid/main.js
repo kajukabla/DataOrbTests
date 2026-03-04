@@ -15,6 +15,8 @@ const state = {
   accentColor: [0.15, 0.3, 0.8],
   glitterColor: [1.0, 1.0, 1.0],
   glitterAccent: [0.3, 0.5, 1.0],
+  tipColor: [1.0, 0.9, 0.5],
+  glitterTip: [1.0, 0.95, 0.8],
   colorBlend: 0.5,
   sheenStrength: 1.5,
   clickSize: 0.5,
@@ -38,6 +40,8 @@ const state = {
   velDissipation: 0.998,
   dyeDissipation: 0.993,
   splatRadius: 0.0015,
+  simSpeed: 1.0,
+  autoMorph: false,
 };
 
 // ─── WGSL Shaders ────────────────────────────────────────────────────────────
@@ -672,14 +676,17 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     tint = mix(tint, prismatic, prisMix);
   }
 
-  // Glitter color: blend base→accent in Oklab (pre-converted on CPU)
+  // Glitter color: 3-stop gradient accent→base→tip in Oklab (pre-converted on CPU)
   let okBase = pp.extra.yzw;
   let okAccent = pp.extra2.xyz;
   let blend = pp.extra2.w;
   let gLo = mix(0.0, 0.35, blend);
   let gHi = mix(1.0, 0.4, blend);
   let densityT = smoothstep(gLo, gHi, intensity);
-  let glitCol = oklabToLinear(mix(okAccent, okBase, densityT));
+  let okTip = pp.extra3.yzw;
+  let gt2 = min(densityT * 2.0, 1.0);
+  let gt3 = max(densityT * 2.0 - 1.0, 0.0);
+  let glitCol = oklabToLinear(mix(mix(okAccent, okBase, gt2), okTip, gt3));
   tint *= glitCol;
 
   let brightness = glint * pp.screen.w + ambient;
@@ -842,6 +849,7 @@ struct DisplayUniforms {
   baseColor: vec4f,   // xyz=baseColor RGB, w=chromaticStrength
   accentColor: vec4f, // xyz=accentColor RGB, w=colorBlend
   sheenColor: vec4f,  // xyz=sheenColor RGB
+  tipColor: vec4f,    // xyz=tipColor RGB (dense end)
 };
 @group(0) @binding(2) var<uniform> du: DisplayUniforms;
 
@@ -915,7 +923,10 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let lo = mix(0.0, 0.35, blend);
   let hi = mix(1.0, 0.4, blend);
   let densityT = smoothstep(lo, hi, intensity);
-  let fluidCol = oklabToLinear(mix(okAccent, okBase, densityT));
+  let okTip = du.tipColor.rgb;
+  let t2 = min(densityT * 2.0, 1.0);
+  let t3 = max(densityT * 2.0 - 1.0, 0.0);
+  let fluidCol = oklabToLinear(mix(mix(okAccent, okBase, t2), okTip, t3));
   var color = fluidCol * intensity * 0.25;
 
   // ── Glass marble depth darkening (commented out) ──────────────────────
@@ -1170,11 +1181,11 @@ async function main() {
   });
   const particleUBData = new Float32Array(16);
 
-  // displayUB: [width, height, time, sheenStrength, baseR, baseG, baseB, pad, accentR, accentG, accentB, colorBlend, sheenR, sheenG, sheenB, pad]
+  // displayUB: [width, height, time, sheenStrength, baseR, baseG, baseB, pad, accentR, accentG, accentB, colorBlend, sheenR, sheenG, sheenB, pad, tipR, tipG, tipB, pad]
   const displayUB = device.createBuffer({
-    size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const displayUBData = new Float32Array(16);
+  const displayUBData = new Float32Array(20);
 
   // ─── Pipeline helpers ───────────────────────────────────────────────────
   function buildPipeline(code, label, bindingDescs) {
@@ -1706,14 +1717,18 @@ async function main() {
   // ─── Frame loop ─────────────────────────────────────────────────────────
   function frame() {
     requestAnimationFrame(frame);
-    const dt = 0.016;
+    const dt = 0.016 * state.simSpeed;
     time += dt;
+
+    updateAutoMorph();
 
     // Pre-convert colors to Oklab on CPU (avoids per-particle GPU conversion)
     const okGlitBase = linearToOklabCPU(state.glitterColor);
     const okGlitAccent = linearToOklabCPU(state.glitterAccent);
+    const okGlitTip = linearToOklabCPU(state.glitterTip);
     const okBaseCol = linearToOklabCPU(state.baseColor);
     const okAccentCol = linearToOklabCPU(state.accentColor);
+    const okTipCol = linearToOklabCPU(state.tipColor);
 
     // Update screen/particle/display uniform buffers
     particleUBData[0] = canvas.width;
@@ -1729,6 +1744,9 @@ async function main() {
     particleUBData[10] = okGlitAccent[2];
     particleUBData[11] = state.colorBlend;
     particleUBData[12] = state.sizeRandomness;
+    particleUBData[13] = okGlitTip[0];
+    particleUBData[14] = okGlitTip[1];
+    particleUBData[15] = okGlitTip[2];
     device.queue.writeBuffer(particleUB, 0, particleUBData);
 
     displayUBData[0] = canvas.width;
@@ -1746,6 +1764,9 @@ async function main() {
     displayUBData[12] = state.sheenColor[0];
     displayUBData[13] = state.sheenColor[1];
     displayUBData[14] = state.sheenColor[2];
+    displayUBData[16] = okTipCol[0];
+    displayUBData[17] = okTipCol[1];
+    displayUBData[18] = okTipCol[2];
     device.queue.writeBuffer(displayUB, 0, displayUBData);
 
     // Collect splats into pre-allocated buffer
@@ -2085,6 +2106,8 @@ async function main() {
   wireColor('accentColor', 'accentColor');
   wireColor('glitterColor', 'glitterColor');
   wireColor('glitterAccent', 'glitterAccent');
+  wireColor('tipColor', 'tipColor');
+  wireColor('glitterTip', 'glitterTip');
   wireSlider('colorBlend', 'colorBlend', v => v.toFixed(2));
 
   wireSlider('sheenStrength', 'sheenStrength');
@@ -2108,6 +2131,7 @@ async function main() {
   wireSlider('dyeDissipation', 'dyeDissipation', v => v.toFixed(3));
   wireSlider('pressureIters', 'pressureIters', v => Math.round(v));
   wireSlider('pressureDecay', 'pressureDecay', v => v.toFixed(2));
+  wireSlider('simSpeed', 'simSpeed');
 
   // ─── Sync UI from state (for randomize) ─────────────────────────────
   function syncSlider(id, stateKey, fmt) {
@@ -2147,7 +2171,10 @@ async function main() {
     syncColor('accentColor', 'accentColor');
     syncColor('glitterColor', 'glitterColor');
     syncColor('glitterAccent', 'glitterAccent');
+    syncColor('tipColor', 'tipColor');
+    syncColor('glitterTip', 'glitterTip');
     syncColor('sheenColor', 'sheenColor');
+    syncSlider('simSpeed', 'simSpeed');
   }
 
   // ─── Randomize helpers ────────────────────────────────────────────────
@@ -2160,6 +2187,8 @@ async function main() {
     state.accentColor = randColor();
     state.glitterColor = randColor();
     state.glitterAccent = randColor();
+    state.tipColor = randColor();
+    state.glitterTip = randColor();
     state.sheenColor = randColor();
     state.colorBlend = randRange(0, 1);
     state.prismaticAmount = randRange(0, 20);
@@ -2168,10 +2197,10 @@ async function main() {
 
   document.getElementById('randomizeParams').addEventListener('click', () => {
     // Particle appearance
-    state.particleSize = snapTo(randRange(0.3, 4.0), 0.1);
-    state.glintBrightness = snapTo(randRange(0.1, 5.0), 0.1);
+    state.particleSize = snapTo(randRange(0.3, 1.1), 0.1);
+    state.glintBrightness = snapTo(randRange(0.1, 1.1), 0.1);
     state.sizeRandomness = snapTo(randRange(0, 1), 0.01);
-    state.sheenStrength = snapTo(randRange(0, 100), 0.5);
+    state.sheenStrength = snapTo(randRange(0, 1), 0.01);
     // Interaction
     state.clickSize = snapTo(randRange(0, 1), 0.01);
     state.clickStrength = snapTo(randRange(0, 1), 0.01);
@@ -2194,6 +2223,88 @@ async function main() {
     state.pressureDecay = snapTo(randRange(0, 1), 0.01);
     // NOTE: particleCount is intentionally NOT randomized
     syncAllUI();
+  });
+
+  // ─── Auto-Morph ──────────────────────────────────────────────────────
+  const morphSliders = {
+    particleSize: { min: 0.3, max: 1.1, step: 0.1 },
+    glintBrightness: { min: 0.1, max: 1.1, step: 0.1 },
+    sizeRandomness: { min: 0, max: 1, step: 0.01 },
+    prismaticAmount: { min: 0, max: 20, step: 0.5 },
+    colorBlend: { min: 0, max: 1, step: 0.01 },
+    sheenStrength: { min: 0, max: 1, step: 0.01 },
+    clickSize: { min: 0, max: 1, step: 0.01 },
+    clickStrength: { min: 0, max: 1, step: 0.01 },
+    injectorIntensity: { min: 0, max: 1, step: 0.01 },
+    injectorSize: { min: 0, max: 1, step: 0.01 },
+    injectorCount: { min: 0, max: 8, step: 1 },
+    injectorSpeed: { min: 0, max: 1, step: 0.01 },
+    burstCount: { min: 0, max: 8, step: 1 },
+    noiseFrequency: { min: 0, max: 1, step: 0.01 },
+    noiseSpeed: { min: 0, max: 1, step: 0.01 },
+    curlStrength: { min: 0, max: 50, step: 1 },
+    splatForce: { min: 1000, max: 20000, step: 100 },
+    velDissipation: { min: 0.99, max: 1.0, step: 0.001 },
+    dyeDissipation: { min: 0.98, max: 1.0, step: 0.001 },
+    pressureIters: { min: 10, max: 60, step: 1 },
+    pressureDecay: { min: 0, max: 1, step: 0.01 },
+  };
+  const morphColors = ['baseColor', 'accentColor', 'tipColor', 'glitterColor', 'glitterAccent', 'glitterTip', 'sheenColor'];
+
+  const morphTargets = {};
+  function pickMorphTarget(key) {
+    if (morphColors.includes(key)) {
+      morphTargets[key] = [Math.random(), Math.random(), Math.random()];
+    } else {
+      const s = morphSliders[key];
+      morphTargets[key] = s.min + Math.random() * (s.max - s.min);
+    }
+  }
+  // Initialize all targets
+  for (const key of Object.keys(morphSliders)) pickMorphTarget(key);
+  for (const key of morphColors) pickMorphTarget(key);
+
+  let lastMorphSync = 0;
+  function updateAutoMorph() {
+    if (!state.autoMorph) return;
+    const rate = 0.002;
+    const threshold = 0.005;
+
+    // Lerp sliders
+    for (const [key, s] of Object.entries(morphSliders)) {
+      const target = morphTargets[key];
+      const range = s.max - s.min;
+      state[key] += (target - state[key]) * rate;
+      if (Math.abs(state[key] - target) / range < threshold) {
+        pickMorphTarget(key);
+      }
+    }
+
+    // Lerp colors
+    for (const key of morphColors) {
+      const target = morphTargets[key];
+      for (let i = 0; i < 3; i++) {
+        state[key][i] += (target[i] - state[key][i]) * rate;
+      }
+      const dist = Math.abs(state[key][0] - target[0]) + Math.abs(state[key][1] - target[1]) + Math.abs(state[key][2] - target[2]);
+      if (dist < threshold * 3) {
+        pickMorphTarget(key);
+      }
+    }
+
+    // Sync UI at ~10Hz
+    const now = performance.now();
+    if (now - lastMorphSync > 100) {
+      syncAllUI();
+      lastMorphSync = now;
+    }
+  }
+
+  // Auto-Morph button
+  const autoMorphBtn = document.getElementById('autoMorph');
+  autoMorphBtn.addEventListener('click', () => {
+    state.autoMorph = !state.autoMorph;
+    autoMorphBtn.classList.toggle('active', state.autoMorph);
   });
 
   console.log('Fluid simulation starting...');

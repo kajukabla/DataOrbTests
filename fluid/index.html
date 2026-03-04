@@ -130,6 +130,11 @@
     }
     .randomize-row button:hover { background: rgba(255,255,255,0.18); }
     .randomize-row button:active { background: rgba(255,255,255,0.25); }
+    .randomize-row button.active {
+      background: rgba(204,153,0,0.3);
+      border-color: #c90;
+      color: #fc0;
+    }
   </style>
 </head>
 <body>
@@ -142,6 +147,11 @@
       <div class="randomize-row">
         <button id="randomizeColors">Randomize Colors</button>
         <button id="randomizeParams">Randomize Params</button>
+        <button id="autoMorph">Auto Morph</button>
+      </div>
+      <div class="setting-group">
+        <label>Sim Speed <span class="val" id="simSpeedVal">1.0</span></label>
+        <input type="range" id="simSpeed" min="0" max="3" step="0.1" value="1.0">
       </div>
       <div class="setting-group">
         <label>Particles</label>
@@ -182,6 +192,14 @@
         <input type="color" id="glitterAccent" value="#4d80ff">
       </div>
       <div class="setting-group">
+        <label>Tip Color</label>
+        <input type="color" id="tipColor" value="#ffe680">
+      </div>
+      <div class="setting-group">
+        <label>Glitter Tip</label>
+        <input type="color" id="glitterTip" value="#fff2cc">
+      </div>
+      <div class="setting-group">
         <label>Color Blend <span class="val" id="colorBlendVal">0.5</span></label>
         <input type="range" id="colorBlend" min="0.0" max="1.0" step="0.01" value="0.5">
       </div>
@@ -191,7 +209,7 @@
       </div>
       <div class="setting-group">
         <label>Sheen Strength <span class="val" id="sheenStrengthVal">1.5</span></label>
-        <input type="range" id="sheenStrength" min="0.0" max="100.0" step="0.5" value="1.5">
+        <input type="range" id="sheenStrength" min="0.0" max="1.0" step="0.01" value="1.5">
       </div>
       <div class="setting-group">
         <label>Sheen Color</label>
