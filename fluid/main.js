@@ -7,9 +7,9 @@ const PARTICLE_WG = 256;
 
 const state = {
   particleCount: 4194304,   // 4M default
-  particleSize: 0.6,
+  particleSize: 2,
   sizeRandomness: 0.3,
-  glintBrightness: 1.2,
+  glintBrightness: 0.6,
   prismaticAmount: 5.0,
   baseColor: [1.0, 0.55, 0.1],
   accentColor: [0.15, 0.3, 0.8],
@@ -2251,8 +2251,6 @@ async function main() {
 
   // ─── Auto-Morph ──────────────────────────────────────────────────────
   const morphSliders = {
-    particleSize: { min: 0.3, max: 1.1, step: 0.1 },
-    glintBrightness: { min: 0.1, max: 1.1, step: 0.1 },
     sizeRandomness: { min: 0, max: 1, step: 0.01 },
     prismaticAmount: { min: 0, max: 20, step: 0.5 },
     colorBlend: { min: 0, max: 1, step: 0.01 },
@@ -2260,7 +2258,7 @@ async function main() {
     clickSize: { min: 0, max: 1, step: 0.01 },
     clickStrength: { min: 0, max: 1, step: 0.01 },
     injectorIntensity: { min: 0, max: 1, step: 0.01 },
-    injectorSize: { min: 0, max: 1, step: 0.01 },
+    injectorSize: { min: 0.5, max: 1, step: 0.01 },
     injectorCount: { min: 0, max: 8, step: 1 },
     injectorSpeed: { min: 0, max: 1, step: 0.01 },
     burstCount: { min: 0, max: 8, step: 1 },
