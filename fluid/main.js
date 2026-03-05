@@ -806,13 +806,11 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let A = c.r;
   let B = c.g;
 
-  // 5-point Laplacian with step size based on scale
-  // scale controls grid spacing: low = fine patterns, high = coarse patterns
-  let step = u32(max(1.0, rp.rdScale * 3.0 + 1.0));
-  let cR = textureLoad(rdSrc, vec2u(min(id.x + step, res - 1u), id.y), 0);
-  let cL = textureLoad(rdSrc, vec2u(u32(max(i32(id.x) - i32(step), 0)), id.y), 0);
-  let cU = textureLoad(rdSrc, vec2u(id.x, min(id.y + step, res - 1u)), 0);
-  let cD = textureLoad(rdSrc, vec2u(id.x, u32(max(i32(id.y) - i32(step), 0))), 0);
+  // 5-point Laplacian (fixed step=1, pattern size via feed/kill rates)
+  let cR = textureLoad(rdSrc, vec2u(min(id.x + 1u, res - 1u), id.y), 0);
+  let cL = textureLoad(rdSrc, vec2u(max(id.x, 1u) - 1u, id.y), 0);
+  let cU = textureLoad(rdSrc, vec2u(id.x, min(id.y + 1u, res - 1u)), 0);
+  let cD = textureLoad(rdSrc, vec2u(id.x, max(id.y, 1u) - 1u), 0);
 
   let lapA = cR.r + cL.r + cU.r + cD.r - 4.0 * A;
   let lapB = cR.g + cL.g + cU.g + cD.g - 4.0 * B;
@@ -1667,7 +1665,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   var raw: vec3f;
   if (depthAmt > 0.01) {
     let pPhase = time * depthSpd * 0.3;
-    let parallaxOff = vec2f(cos(pPhase), sin(pPhase * 0.7)) * depthAmt * 0.03;
+    let parallaxOff = vec2f(cos(pPhase), sin(pPhase * 0.7)) * depthAmt * 0.08;
     let backUV = uv + parallaxOff * 0.5;
     let frontUV = uv - parallaxOff * 0.5;
     let backSample = textureSampleLevel(dyeTex, samp, backUV, 0.0).rgb;
@@ -3552,7 +3550,7 @@ async function main() {
     const blobReact = state.flockBlobReact;
     const speed = state.flockSpeed;
     const maxSpd = (0.002 + speed * 0.008);
-    const FLOCK_R = 0.22; // keep flockers well inside visible area
+    const FLOCK_R = 0.28; // keep flockers inside visible area
 
     for (const f of flockers) {
       // Start with desired velocity = 0
@@ -3562,14 +3560,14 @@ async function main() {
       const toCx = f.x - 0.5, toCy = f.y - 0.5;
       const distC = Math.sqrt(toCx * toCx + toCy * toCy) + 0.001;
       // Tangential orbit velocity
-      const orbSpd = f.orbitSpeed * speed * 0.004;
+      const orbSpd = f.orbitSpeed * speed * 0.01;
       dvx += -toCy / distC * orbSpd * f.orbitDir;
       dvy += toCx / distC * orbSpd * f.orbitDir;
 
       // Pull toward preferred orbit radius (keeps them from center and edges)
-      const preferredR = 0.06 + Math.random() * 0.001; // tiny jitter
+      const preferredR = 0.1 + Math.random() * 0.1; // orbit at 10-20% from center
       const rDiff = distC - preferredR;
-      dvx -= toCx / distC * rDiff * 0.01;
+      dvx -= toCx / distC * rDiff * 0.008;
       dvy -= toCy / distC * rDiff * 0.01;
 
       // Flocking: separation, alignment, cohesion
