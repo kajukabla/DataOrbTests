@@ -56,6 +56,9 @@ export const SLIDER_SPACE = {
   // Dye-coupled noise
   noiseDyeIntensity: { min: 0,    max: 1,     step: 0.01 },
   dyeNoiseAmount:    { min: 0,    max: 0.15,  step: 0.001 },
+  // Material properties
+  metallic:          { min: 0,    max: 1,     step: 0.01 },
+  roughness:         { min: 0,    max: 1,     step: 0.01 },
   // Color channels (7 colors × 3 channels = 21 dims)
   baseColor_0:       { min: 0, max: 1, step: 0.01 },
   baseColor_1:       { min: 0, max: 1, step: 0.01 },
@@ -296,6 +299,19 @@ export class BOController {
       saveRatings(bo.ratings);
     }
     await bo.refreshExamples();
+    // Warm-start: inject examples as positive ratings when starting fresh
+    if (bo.ratings.length === 0 && bo.examples.length > 0) {
+      for (const ex of bo.examples) {
+        bo.ratings.push({
+          params: ex.params,
+          movementRating: 1,
+          colorRating: 1,
+          timestamp: Date.now(),
+        });
+      }
+      saveRatings(bo.ratings);
+      console.log(`BO: Warm-started with ${bo.examples.length} example ratings`);
+    }
     if (bo.ratings.length >= 10) {
       console.log(`BO: Deferring initial retrain (N=${bo.ratings.length}) — will train after first frame`);
     }

@@ -19,6 +19,8 @@ const state = {
   glitterTip: [1.0, 0.95, 0.8],
   colorBlend: 0.5,
   sheenStrength: 1.5,
+  metallic: 0.3,
+  roughness: 0.4,
   clickSize: 0.5,
   clickStrength: 0.5,
   injectorIntensity: 1.0,
@@ -96,7 +98,7 @@ struct Params {
 @group(0) @binding(0) var<uniform> p: Params;
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS: f32 = 0.41;
+const SPHERE_RADIUS: f32 = 0.39;
 `;
 
 const MAX_SPLATS = 64;
@@ -501,7 +503,7 @@ fn vnoise(p: vec2f) -> f32 {
 }
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS = 0.41;
+const SPHERE_RADIUS = 0.39;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -569,7 +571,7 @@ struct DyeNoiseParams {
 @group(0) @binding(3) var dyeDst: texture_storage_2d<rgba16float, write>;
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS = 0.41;
+const SPHERE_RADIUS = 0.39;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -1201,8 +1203,8 @@ struct DisplayUniforms {
   screen: vec4f,      // xy=screenSize, z=time, w=sheenStrength
   baseColor: vec4f,   // xyz=baseColor RGB, w=hdrHeadroom
   accentColor: vec4f, // xyz=accentColor RGB, w=colorBlend
-  sheenColor: vec4f,  // xyz=sheenColor RGB
-  tipColor: vec4f,    // xyz=tipColor RGB (dense end)
+  sheenColor: vec4f,  // xyz=sheenColor RGB, w=metallic
+  tipColor: vec4f,    // xyz=tipColor RGB, w=roughness
 };
 @group(0) @binding(2) var<uniform> du: DisplayUniforms;
 
@@ -1242,7 +1244,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // Sphere mask in simulation UV space (already 1:1)
   let centered = uv - vec2f(0.5, 0.5);
   let screenDist = length(centered);
-  let screenRadius = 0.40;
+  let screenRadius = 0.39;
   let mask = 1.0 - smoothstep(screenRadius - 0.003, screenRadius, screenDist);
 
   // ── Glass marble (commented out) ──────────────────────────────────────
@@ -1301,19 +1303,23 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let sheenDir = normalize(vec2f(0.4, 0.6));
   let spec = max(dot(normalize(grad + vec2f(0.001)), sheenDir), 0.0);
 
-  // Sharp specular highlight
-  let spec2 = spec * spec;
-  let spec4 = spec2 * spec2;
-  let spec8 = spec4 * spec4;
-  let sharpSheen = spec8 * smoothstep(0.003, 0.04, gradLen);
-  // Broad soft metallic glow
-  let broadSpec = spec2 * smoothstep(0.002, 0.08, gradLen);
+  // Material properties
+  let metallic = du.sheenColor.w;
+  let roughness = du.tipColor.w;
+
+  // Roughness controls specular exponent: smooth=tight, rough=broad
+  let sharpExp = mix(16.0, 2.0, roughness);
+  let broadExp = mix(6.0, 1.5, roughness);
+  let sharpSheen = pow(spec, sharpExp) * smoothstep(0.003, 0.04, gradLen);
+  let broadSpec = pow(spec, broadExp) * smoothstep(0.002, 0.08, gradLen);
   // Fresnel-like rim sheen (edges of sphere glow)
-  let rimFactor = smoothstep(0.2, 0.42, screenDist);
+  let rimFactor = smoothstep(0.2, 0.40, screenDist);
 
   let headroom = du.baseColor.w;
+  // Metallic: specular tinted by surface color vs sheen color
+  let specColor = mix(du.sheenColor.rgb, color, metallic);
   let sheen = (sharpSheen * 0.6 + broadSpec * 0.3 + rimFactor * 0.15) * sheenStrength;
-  color += color * sheen * du.sheenColor.rgb * headroom;
+  color += color * sheen * specColor * headroom;
 
   // Tone mapping
   color = ${hdr ? 'tonemap(color * 1.6)' : 'aces(color * 1.6)'};
@@ -2895,20 +2901,20 @@ async function main() {
     const coh = state.flockCohesion;
     const blobReact = state.flockBlobReact;
     const speed = state.flockSpeed;
-    const maxSpd = (0.05 + speed * 0.3) * dt;
+    const maxSpd = (0.1 + speed * 0.6) * dt;
 
     for (const f of flockers) {
       let sx = 0, sy = 0, ax = 0, ay = 0, cx = 0, cy = 0, n = 0;
 
-      // Flocking forces from neighbors
+      // Flocking forces from neighbors (perception radius ~0.24)
       for (const other of flockers) {
         if (other === f) continue;
         const dx = other.x - f.x, dy = other.y - f.y;
         const d2 = dx * dx + dy * dy;
-        if (d2 > 0.02) continue; // perception radius ~0.14
+        if (d2 > 0.06) continue;
         const d = Math.sqrt(d2);
         n++;
-        if (d < 0.03 && d > 0.0001) { sx -= dx / d; sy -= dy / d; }
+        if (d < 0.05 && d > 0.0001) { sx -= dx / d; sy -= dy / d; }
         ax += other.vx; ay += other.vy;
         cx += other.x; cy += other.y;
       }
@@ -2916,22 +2922,24 @@ async function main() {
       if (n > 0) {
         ax /= n; ay /= n;
         cx = cx / n - f.x; cy = cy / n - f.y;
-        f.vx += sx * sep * 0.08 + (ax - f.vx) * ali * 0.04 + cx * coh * 0.015;
-        f.vy += sy * sep * 0.08 + (ay - f.vy) * ali * 0.04 + cy * coh * 0.015;
+        f.vx += sx * sep * 0.2 + (ax - f.vx) * ali * 0.1 + cx * coh * 0.04;
+        f.vy += sy * sep * 0.2 + (ay - f.vy) * ali * 0.1 + cy * coh * 0.04;
       }
 
       // Blob interaction: positive = attract, negative = flee
       for (const blob of blobs) {
         const dx = blob.x - f.x, dy = blob.y - f.y;
         const d = Math.sqrt(dx * dx + dy * dy) + 0.001;
-        const force = blobReact * 0.015 / (d * d + 0.01);
+        const force = blobReact * 0.03 / (d * d + 0.01);
         f.vx += dx / d * force;
         f.vy += dy / d * force;
       }
 
-      // Center pull
-      f.vx += (0.5 - f.x) * 0.003;
-      f.vy += (0.5 - f.y) * 0.003;
+      // Center pull + slight random jitter
+      f.vx += (0.5 - f.x) * 0.01;
+      f.vy += (0.5 - f.y) * 0.01;
+      f.vx += (Math.random() - 0.5) * 0.002;
+      f.vy += (Math.random() - 0.5) * 0.002;
 
       // Speed limit
       const spd = Math.sqrt(f.vx * f.vx + f.vy * f.vy);
@@ -3008,9 +3016,11 @@ async function main() {
     displayUBData[12] = state.sheenColor[0];
     displayUBData[13] = state.sheenColor[1];
     displayUBData[14] = state.sheenColor[2];
+    displayUBData[15] = state.metallic;
     displayUBData[16] = okTipCol[0];
     displayUBData[17] = okTipCol[1];
     displayUBData[18] = okTipCol[2];
+    displayUBData[19] = state.roughness;
     device.queue.writeBuffer(displayUB, 0, displayUBData);
 
     // Collect splats into pre-allocated buffer
@@ -3130,10 +3140,10 @@ async function main() {
         f._prevY = f.y;
         if (Math.sqrt(dx * dx + dy * dy) < 0.00005) continue;
         const col = palette(time * 0.2 + f.colorPhase, 4);
-        const radius = state.splatRadius * (0.8 + state.flockSize * 3.0);
+        const radius = state.splatRadius * (1.0 + state.flockSize * 4.0);
         addSplat(f.x, f.y,
-          dx * state.splatForce * 0.3, dy * state.splatForce * 0.3,
-          col[0] * dyeRamp * 0.9, col[1] * dyeRamp * 0.9, col[2] * dyeRamp * 0.9,
+          dx * state.splatForce * 0.5, dy * state.splatForce * 0.5,
+          col[0] * dyeRamp * 1.2, col[1] * dyeRamp * 1.2, col[2] * dyeRamp * 1.2,
           radius);
         splatted++;
       }
@@ -3558,6 +3568,8 @@ async function main() {
   wireSlider('colorBlend', 'colorBlend', v => v.toFixed(2));
 
   wireSlider('sheenStrength', 'sheenStrength');
+  wireSlider('metallic', 'metallic');
+  wireSlider('roughness', 'roughness');
   wireColor('sheenColor', 'sheenColor');
   // wireSlider('rimIntensity', 'rimIntensity'); // glass marble
   // wireSlider('chromaticStrength', 'chromaticStrength'); // glass marble
@@ -3622,6 +3634,8 @@ async function main() {
     syncSlider('prismaticAmount', 'prismaticAmount');
     syncSlider('colorBlend', 'colorBlend', v => v.toFixed(2));
     syncSlider('sheenStrength', 'sheenStrength');
+    syncSlider('metallic', 'metallic');
+    syncSlider('roughness', 'roughness');
     syncSlider('clickSize', 'clickSize');
     syncSlider('clickStrength', 'clickStrength');
     syncSlider('injectorIntensity', 'injectorIntensity');
@@ -3697,6 +3711,8 @@ async function main() {
     // Particle appearance
     state.sizeRandomness = snapTo(randRange(0, 1), 0.01);
     state.sheenStrength = snapTo(randRange(0, 1), 0.01);
+    state.metallic = Math.random();
+    state.roughness = Math.random();
     // Interaction
     state.clickSize = snapTo(randRange(0, 1), 0.01);
     state.clickStrength = snapTo(randRange(0, 1), 0.01);
@@ -3752,6 +3768,8 @@ async function main() {
     sizeRandomness: { min: 0, max: 1, step: 0.01 },
     colorBlend: { min: 0, max: 1, step: 0.01 },
     sheenStrength: { min: 0, max: 1, step: 0.01 },
+    metallic: { min: 0, max: 1, step: 0.01 },
+    roughness: { min: 0, max: 1, step: 0.01 },
     clickSize: { min: 0, max: 1, step: 0.01 },
     clickStrength: { min: 0, max: 1, step: 0.01 },
     injectorIntensity: { min: 0, max: 1, step: 0.01 },
