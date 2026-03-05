@@ -1,6 +1,7 @@
 // ─── Bayesian Optimization Controller ────────────────────────────────────────
-// RLHF-style system: user rates configs (up=good, down=bad), GP learns
-// preferences, Expected Improvement suggests better configurations.
+// Dual-GP RLHF: separate models for movement and color preferences.
+// Movement: ↑/↓ arrows   Color: →/← arrows
+// Both must be rated before advancing to next generation.
 
 import {
   gpFit, gpPredict, expectedImprovement,
@@ -8,17 +9,16 @@ import {
 } from './gp.js';
 
 // ─── Parameter Space ─────────────────────────────────────────────────────────
-// All rated params: sliders + color channels (7 colors × 3 = 21 channels)
 
 export const SLIDER_SPACE = {
-  simSpeed:          { min: 0,    max: 3,     step: 0.01 },
+  simSpeed:          { min: 0.1,  max: 1,     step: 0.01 },
   sizeRandomness:    { min: 0,    max: 1,     step: 0.01 },
   colorBlend:        { min: 0,    max: 1,     step: 0.01 },
   sheenStrength:     { min: 0,    max: 1,     step: 0.01 },
   clickSize:         { min: 0,    max: 1,     step: 0.01 },
   clickStrength:     { min: 0,    max: 1,     step: 0.01 },
   injectorIntensity: { min: 0,    max: 1,     step: 0.01 },
-  injectorSize:      { min: 0.5,  max: 1,     step: 0.01 },
+  injectorSize:      { min: 0,    max: 1,     step: 0.01 },
   injectorCount:     { min: 0,    max: 8,     step: 1    },
   injectorSpeed:     { min: 0,    max: 1,     step: 0.01 },
   burstCount:        { min: 0,    max: 8,     step: 1    },
@@ -33,6 +33,7 @@ export const SLIDER_SPACE = {
   pressureDecay:     { min: 0,    max: 1,     step: 0.01 },
   drawBotCount:      { min: 0,    max: 8,     step: 1    },
   drawBotSpeed:      { min: 0,    max: 1,     step: 0.01 },
+  drawBotSize:       { min: 0.01, max: 5,     step: 0.01 },
   drawBotTurnRate:   { min: 0,    max: 1,     step: 0.01 },
   drawBotSpeedVar:   { min: 0,    max: 1,     step: 0.01 },
   drawBotRecMix:     { min: 0,    max: 1,     step: 0.01 },
@@ -63,12 +64,29 @@ export const SLIDER_SPACE = {
 };
 
 export const SLIDER_KEYS = Object.keys(SLIDER_SPACE);
-export const D = SLIDER_KEYS.length; // 48
+export const D = SLIDER_KEYS.length;
 
 export const COLOR_KEYS = [
   'baseColor', 'accentColor', 'tipColor', 'glitterColor',
   'glitterAccent', 'glitterTip', 'sheenColor'
 ];
+
+// ─── Parameter Group Indices ────────────────────────────────────────────────
+// Split SLIDER_KEYS into motion vs color for dual-GP training
+
+const COLOR_PATTERN = /Color_|Accent_|Tip_|sheen.*_/i;
+
+export const COLOR_INDICES = [];
+export const MOTION_INDICES = [];
+for (let i = 0; i < D; i++) {
+  if (COLOR_PATTERN.test(SLIDER_KEYS[i])) {
+    COLOR_INDICES.push(i);
+  } else {
+    MOTION_INDICES.push(i);
+  }
+}
+export const D_MOTION = MOTION_INDICES.length;
+export const D_COLOR = COLOR_INDICES.length;
 
 // ─── Color channel helpers ──────────────────────────────────────────────────
 
@@ -106,10 +124,13 @@ export function stateToNormalized(state) {
   return x;
 }
 
-/** Apply [0,1]^D normalized vector → state, snapping to step sizes. */
-export function normalizedToState(x, state) {
+/** Apply [0,1]^D normalized vector → state, snapping to step sizes.
+ *  @param {Set} [lockedKeys] — keys to skip (preserve current state values)
+ */
+export function normalizedToState(x, state, lockedKeys) {
   for (let i = 0; i < D; i++) {
     const key = SLIDER_KEYS[i];
+    if (lockedKeys && lockedKeys.has(key)) continue;
     const s = SLIDER_SPACE[key];
     let val = s.min + x[i] * (s.max - s.min);
     val = Math.round(val / s.step) * s.step;
@@ -118,10 +139,11 @@ export function normalizedToState(x, state) {
     setStateVal(state, key, val);
   }
   // Clamp critical params so the sim is always visually active
-  if (state.simSpeed < 0.5) state.simSpeed = 0.5;
+  if (state.simSpeed < 0.2) state.simSpeed = 0.2;
   if (state.injectorIntensity < 0.3) state.injectorIntensity = 0.3;
   if (state.injectorCount < 1) state.injectorCount = 1;
   if (state.splatForce < 3000) state.splatForce = 3000;
+  state.burstCount = 0;
 }
 
 /** Generate a random normalized vector in [0,1]^D. */
@@ -158,49 +180,104 @@ async function saveRatings(ratings) {
   } catch (e) { console.warn('BO: save failed:', e); }
 }
 
-/**
- * Convert ratings array to GP training data.
- * Returns { X: Float64Array(N*D), y: Float64Array(N), N, D }
- */
-function ratingsToTrainingData(ratings) {
-  const N = ratings.length;
-  const X = new Float64Array(N * D);
-  const y = new Float64Array(N);
+/** Purge old-format or out-of-range ratings. */
+function purgeStaleRatings(ratings) {
+  const before = ratings.length;
+  const valid = ratings.filter(r => {
+    // Must have dual-rating format
+    if (r.movementRating === undefined || r.colorRating === undefined) return false;
+    // Check params are within current SLIDER_SPACE ranges (with 10% tolerance)
+    const p = r.params;
+    if (!p) return false;
+    for (const key of SLIDER_KEYS) {
+      if (p[key] === undefined) continue;
+      const s = SLIDER_SPACE[key];
+      const range = s.max - s.min;
+      const tol = range * 0.1;
+      if (p[key] < s.min - tol || p[key] > s.max + tol) return false;
+    }
+    return true;
+  });
+  const purged = before - valid.length;
+  if (purged > 0) {
+    console.log(`BO: Purged ${purged} stale ratings (${valid.length} remaining)`);
+  }
+  return valid;
+}
 
+// ─── Dual-GP Training Data ──────────────────────────────────────────────────
+
+/** Extract motion-only training data from ratings. */
+function ratingsToMotionData(ratings) {
+  const N = ratings.length;
+  const X = new Float64Array(N * D_MOTION);
+  const y = new Float64Array(N);
   for (let i = 0; i < N; i++) {
     const r = ratings[i];
-    // Reconstruct normalized vector from stored params
-    for (let j = 0; j < D; j++) {
-      const key = SLIDER_KEYS[j];
+    for (let j = 0; j < D_MOTION; j++) {
+      const key = SLIDER_KEYS[MOTION_INDICES[j]];
       const s = SLIDER_SPACE[key];
       if (r.params[key] !== undefined) {
-        X[i * D + j] = (r.params[key] - s.min) / (s.max - s.min);
+        X[i * D_MOTION + j] = (r.params[key] - s.min) / (s.max - s.min);
       } else {
-        X[i * D + j] = 0.5; // fallback
+        X[i * D_MOTION + j] = 0.5;
       }
     }
-    y[i] = r.rating; // 0 or 1
+    y[i] = r.movementRating;
   }
+  return { X, y, N, D: D_MOTION };
+}
 
-  return { X, y, N, D };
+/** Extract color-only training data from ratings. */
+function ratingsToColorData(ratings) {
+  const N = ratings.length;
+  const X = new Float64Array(N * D_COLOR);
+  const y = new Float64Array(N);
+  for (let i = 0; i < N; i++) {
+    const r = ratings[i];
+    for (let j = 0; j < D_COLOR; j++) {
+      const key = SLIDER_KEYS[COLOR_INDICES[j]];
+      const s = SLIDER_SPACE[key];
+      if (r.params[key] !== undefined) {
+        X[i * D_COLOR + j] = (r.params[key] - s.min) / (s.max - s.min);
+      } else {
+        X[i * D_COLOR + j] = 0.5;
+      }
+    }
+    y[i] = r.colorRating;
+  }
+  return { X, y, N, D: D_COLOR };
 }
 
 // ─── BOController Class ──────────────────────────────────────────────────────
 
 export class BOController {
   constructor() {
-    this.ratings = [];  // populated by create()
+    this.ratings = [];
     this.examples = [];
-    this.model = null;
+    this.motionModel = null;
+    this.colorModel = null;
     this.rateMode = false;
     this.boMorphMode = false;
     this._retrainCounter = 0;
     this._morphCooldown = 0;
+    this._suggestionCount = 0;
+    this.lockedKeys = new Set();
+    // Pending ratings for current generation
+    this._pendingMovement = null;  // null = not yet rated
+    this._pendingColor = null;
+    this._state = null;            // ref set by rate calls
+    this._syncAllUI = null;
   }
 
   static async create() {
     const bo = new BOController();
-    bo.ratings = await loadRatings();
+    const raw = await loadRatings();
+    bo.ratings = purgeStaleRatings(raw);
+    // Save purged list if anything was removed
+    if (bo.ratings.length !== raw.length && bo.ratings.length > 0) {
+      saveRatings(bo.ratings);
+    }
     await bo.refreshExamples();
     if (bo.ratings.length >= 10) {
       console.log(`BO: Deferring initial retrain (N=${bo.ratings.length}) — will train after first frame`);
@@ -251,56 +328,84 @@ export class BOController {
     return this.examples;
   }
 
-  /** Rebuild GP model from all ratings (+ examples as synthetic rating:1). */
+  // ─── Dual-GP Retrain ──────────────────────────────────────────────────
+
+  /** Rebuild both GP models from ratings. */
   retrain() {
     const startMs = performance.now();
-    // Prepend examples as synthetic positive ratings, but fade out as real data accumulates
-    const N_real = this.ratings.length;
-    const useExamples = N_real < 30; // stop injecting examples after 30 real ratings
-    const syntheticRatings = useExamples ? this.examples.map(ex => ({ params: ex.params, rating: 1 })) : [];
-    const allRatings = [...syntheticRatings, ...this.ratings];
-    const { X, y, N } = ratingsToTrainingData(allRatings);
-    if (N < 5) { console.log(`BO: Retrain skipped — need 5+ ratings (have ${N}, ${syntheticRatings.length} examples)`); this.model = null; return; }
+    const MAX_TRAIN = 200;
+    const recentRatings = this.ratings.length > MAX_TRAIN
+      ? this.ratings.slice(-MAX_TRAIN)
+      : this.ratings;
+    const N = recentRatings.length;
+
+    if (N < 5) {
+      console.log(`BO: Retrain skipped — need 5+ ratings (have ${N})`);
+      this.motionModel = null;
+      this.colorModel = null;
+      return;
+    }
+
+    // Train motion GP
+    this.motionModel = this._trainGP(recentRatings, 'motion', ratingsToMotionData, D_MOTION);
+
+    // Train color GP
+    this.colorModel = this._trainGP(recentRatings, 'color', ratingsToColorData, D_COLOR);
+
+    console.log(`BO: Dual retrain done (${(performance.now() - startMs).toFixed(0)}ms)`);
+  }
+
+  /** Train a single GP model for a parameter group. */
+  _trainGP(ratings, label, dataFn, dims) {
+    const { X, y, N, D: gD } = dataFn(ratings);
 
     // Check if all ratings are identical
     const allSame = y.every(v => v === y[0]);
-    if (allSame) { console.log(`BO: Retrain skipped — all ratings identical`); this.model = null; return; }
+    if (allSame) {
+      console.log(`BO: ${label} GP skipped — all ratings identical`);
+      return null;
+    }
 
-    const useARD = N >= 30;
+    const useARD = N >= 60;
     try {
-      const hp = optimizeHyperparams(X, y, N, D, useARD);
-      this.model = gpFit(X, y, N, D, hp.lengthScales, hp.sigmaF, hp.sigmaN, hp.mu);
-      if (!this.model) console.warn('BO: gpFit returned null — Cholesky failed');
-      else console.log(`BO: GP model trained — N=${N}, D=${D}, ARD=${useARD}, sigmaF=${hp.sigmaF.toFixed(3)}, sigmaN=${hp.sigmaN.toFixed(3)} (${(performance.now() - startMs).toFixed(0)}ms)`);
+      const hp = optimizeHyperparams(X, y, N, gD, useARD);
+      const model = gpFit(X, y, N, gD, hp.lengthScales, hp.sigmaF, hp.sigmaN, hp.mu);
+      if (!model) {
+        console.warn(`BO: ${label} GP — Cholesky failed`);
+        return null;
+      }
+      console.log(`BO: ${label} GP trained — N=${N}, D=${gD}, ARD=${useARD}, sigmaF=${hp.sigmaF.toFixed(3)}, sigmaN=${hp.sigmaN.toFixed(3)}`);
+      return model;
     } catch (e) {
-      console.warn(`BO: retrain failed (${(performance.now() - startMs).toFixed(0)}ms):`, e);
-      this.model = null;
+      console.warn(`BO: ${label} GP failed:`, e);
+      return null;
     }
   }
 
-  /** Retrain every 5 ratings, or on first reaching 10. */
+  /** Retrain every 10 ratings, or on first reaching 10. */
   maybeRetrain() {
     this._retrainCounter++;
     const N = this.ratings.length;
-    if (N === 10 || (N >= 10 && this._retrainCounter >= 5)) {
+    if (N === 10 || (N >= 10 && this._retrainCounter >= 10)) {
       this._retrainCounter = 0;
       console.log(`BO: Retrain triggered (N=${N})`);
       setTimeout(() => this.retrain(), 0);
     } else {
-      console.log(`BO: Retrain skipped (N=${N}, counter=${this._retrainCounter}/5)`);
+      console.log(`BO: Retrain skipped (N=${N}, counter=${this._retrainCounter}/10)`);
     }
   }
 
+  // ─── Dual-GP Suggestions ──────────────────────────────────────────────
+
   /**
-   * Get next parameter suggestion.
-   * Phase 1 (<10 ratings): uniform random
-   * Phase 2 (10-30): EI with isotropic kernel, xi=0.01
-   * Phase 3 (30+): EI with ARD kernel, xi=0.001
+   * Get next parameter suggestion using dual GPs.
+   * Generates motion and color suggestions independently, merges into full vector.
    */
   getNextParams() {
     const N = this.ratings.length;
 
-    if (N < 10 || !this.model) {
+    // Phase 1: random/example exploration
+    if (N < 10 || (!this.motionModel && !this.colorModel)) {
       if (this.examples.length > 0 && N % 2 === 0) {
         const ex = this.examples[N % this.examples.length];
         const x = stateToNormalized(ex.params);
@@ -316,61 +421,123 @@ export class BOController {
       return randomNormalized();
     }
 
-    // Force exploration every 3rd suggestion to prevent GP collapse
-    this._suggestionCount = (this._suggestionCount || 0) + 1;
-    if (this._suggestionCount % 2 === 0) {
+    // Force exploration every 3rd suggestion
+    this._suggestionCount++;
+    if (this._suggestionCount % 3 === 0) {
       console.log('BO: Next suggestion — Explore (random)');
       return randomNormalized();
     }
 
     const xi = N < 30 ? 0.01 : 0.05;
-    console.log(`BO: Next suggestion — Phase ${N < 30 ? 2 : 3} (EI, xi=${xi})`);
-    const nCandidates = N < 30 ? 1000 : 1500;
+    const nCandidates = N < 30 ? 1000 : 500;
 
-    return this._argmaxEI(nCandidates, xi);
-  }
+    // Generate motion and color suggestions independently, merge
+    const fullX = randomNormalized(); // fallback base
 
-  /** Pure exploitation: return argmax of posterior mean. */
-  getBestParams() {
-    if (!this.model) return randomNormalized();
-
-    const candidates = latinHypercube(2000, D);
-    let bestMean = -Infinity;
-    let bestX = null;
-    const xStar = new Float64Array(D);
-
-    for (let i = 0; i < 2000; i++) {
-      for (let j = 0; j < D; j++) xStar[j] = candidates[i * D + j];
-      const { mean } = gpPredict(this.model, xStar);
-      if (mean > bestMean) {
-        bestMean = mean;
-        bestX = new Float64Array(xStar);
+    // Motion suggestion
+    if (this.motionModel) {
+      const motionX = this._argmaxEIPartial(this.motionModel, MOTION_INDICES, D_MOTION, nCandidates, xi, 'movementRating');
+      for (let j = 0; j < D_MOTION; j++) {
+        fullX[MOTION_INDICES[j]] = motionX[j];
       }
     }
-    return bestX || randomNormalized();
+
+    // Color suggestion
+    if (this.colorModel) {
+      const colorX = this._argmaxEIPartial(this.colorModel, COLOR_INDICES, D_COLOR, nCandidates, xi, 'colorRating');
+      for (let j = 0; j < D_COLOR; j++) {
+        fullX[COLOR_INDICES[j]] = colorX[j];
+      }
+    }
+
+    console.log(`BO: Next suggestion — EI (motion=${!!this.motionModel}, color=${!!this.colorModel}, xi=${xi})`);
+    return fullX;
+  }
+
+  /** Pure exploitation: return argmax of posterior mean (uses motion model for motion, color for color). */
+  getBestParams() {
+    const fullX = randomNormalized();
+
+    if (this.motionModel) {
+      const best = this._bestMeanPartial(this.motionModel, MOTION_INDICES, D_MOTION);
+      for (let j = 0; j < D_MOTION; j++) fullX[MOTION_INDICES[j]] = best[j];
+    }
+
+    if (this.colorModel) {
+      const best = this._bestMeanPartial(this.colorModel, COLOR_INDICES, D_COLOR);
+      for (let j = 0; j < D_COLOR; j++) fullX[COLOR_INDICES[j]] = best[j];
+    }
+
+    return fullX;
+  }
+
+  // ─── Dual Rating ──────────────────────────────────────────────────────
+
+  /**
+   * Rate the movement of the current config.
+   * @param {number} rating - 1 (good) or -1 (bad)
+   * @param {object} state - fluid sim state
+   * @param {function} syncAllUI - UI sync callback
+   */
+  rateMovement(rating, state, syncAllUI) {
+    if (this._pendingMovement !== null) return; // already rated
+    this._pendingMovement = rating;
+    this._state = state;
+    this._syncAllUI = syncAllUI;
+    this.flashMovement(rating);
+    console.log(`BO: Movement rated ${rating === 1 ? '↑' : '↓'}`);
+    this.updateOverlay();
+    this._tryCommit();
   }
 
   /**
-   * Rate current configuration and advance to next.
-   * @param {object} state - the fluid sim state object
-   * @param {number} rating - 0 (bad) or 1 (good)
-   * @param {function} syncAllUI - callback to sync UI after applying new params
+   * Rate the color of the current config.
+   * @param {number} rating - 1 (good) or -1 (bad)
+   * @param {object} state - fluid sim state
+   * @param {function} syncAllUI - UI sync callback
    */
-  rate(state, rating, syncAllUI) {
+  rateColor(rating, state, syncAllUI) {
+    if (this._pendingColor !== null) return; // already rated
+    this._pendingColor = rating;
+    this._state = state;
+    this._syncAllUI = syncAllUI;
+    this.flashColor(rating);
+    console.log(`BO: Color rated ${rating === 1 ? '→' : '←'}`);
+    this.updateOverlay();
+    this._tryCommit();
+  }
+
+  /** If both ratings are in, commit and advance. */
+  _tryCommit() {
+    if (this._pendingMovement === null || this._pendingColor === null) return;
+
     try {
-      // Snapshot current params (including color channels)
+      const state = this._state;
+      const syncAllUI = this._syncAllUI;
+
+      // Snapshot current params
       const params = {};
       for (const key of SLIDER_KEYS) params[key] = getStateVal(state, key);
 
-      this.ratings.push({ params, rating, timestamp: Date.now() });
-      console.log(`BO: Rating ${rating === 1 ? '👍' : '👎'} recorded (${this.ratings.length} total)`);
+      // Store with dual ratings
+      this.ratings.push({
+        params,
+        movementRating: this._pendingMovement,
+        colorRating: this._pendingColor,
+        timestamp: Date.now(),
+      });
+
+      const mStr = this._pendingMovement === 1 ? '↑' : '↓';
+      const cStr = this._pendingColor === 1 ? '→' : '←';
+      console.log(`BO: Rating committed ${mStr}${cStr} (${this.ratings.length} total)`);
       saveRatings(this.ratings);
       this.maybeRetrain();
 
-      // Flash indicator
-      this.flashRating(rating);
+      // Reset pending
+      this._pendingMovement = null;
+      this._pendingColor = null;
 
-      // Apply next config — fall back to random if EI/GP throws
+      // Get next suggestion
       let nextX;
       try {
         nextX = this.getNextParams();
@@ -379,14 +546,18 @@ export class BOController {
         nextX = randomNormalized();
       }
 
-      normalizedToState(nextX, state);
+      normalizedToState(nextX, state, this.lockedKeys);
       if (syncAllUI) syncAllUI();
       this.updateOverlay();
+
+      // Reset flash indicators after brief delay so user sees their ratings
+      setTimeout(() => this._resetFlash(), 600);
     } catch (e) {
-      console.error('BO: rate() crashed:', e);
-      // Recover: apply random config so UI doesn't freeze
-      normalizedToState(randomNormalized(), state);
-      if (syncAllUI) syncAllUI();
+      console.error('BO: commit crashed:', e);
+      this._pendingMovement = null;
+      this._pendingColor = null;
+      normalizedToState(randomNormalized(), this._state, this.lockedKeys);
+      if (this._syncAllUI) this._syncAllUI();
     }
   }
 
@@ -395,11 +566,10 @@ export class BOController {
    * 70% exploit (noisy best), 30% explore (EI).
    */
   getMorphTarget() {
-    if (!this.model) return randomNormalized();
+    if (!this.motionModel && !this.colorModel) return randomNormalized();
 
     let x;
     if (Math.random() < 0.7) {
-      // Exploit: best + small noise
       x = this.getBestParams();
       for (let i = 0; i < D; i++) {
         x[i] += (Math.random() - 0.5) * 0.1;
@@ -407,29 +577,37 @@ export class BOController {
         if (x[i] > 1) x[i] = 1;
       }
     } else {
-      // Explore: EI
-      x = this._argmaxEI(1000, 0.01);
+      const xi = 0.01;
+      const fullX = randomNormalized();
+      if (this.motionModel) {
+        const mx = this._argmaxEIPartial(this.motionModel, MOTION_INDICES, D_MOTION, 1000, xi, 'movementRating');
+        for (let j = 0; j < D_MOTION; j++) fullX[MOTION_INDICES[j]] = mx[j];
+      }
+      if (this.colorModel) {
+        const cx = this._argmaxEIPartial(this.colorModel, COLOR_INDICES, D_COLOR, 1000, xi, 'colorRating');
+        for (let j = 0; j < D_COLOR; j++) fullX[COLOR_INDICES[j]] = cx[j];
+      }
+      x = fullX;
     }
     return x;
   }
 
-  /** Sample LHS candidates, return argmax EI. */
-  _argmaxEI(nCandidates, xi) {
-    if (!this.model) return randomNormalized();
-
-    // Find best observed value
-    const { y, N } = ratingsToTrainingData(this.ratings);
+  /** EI optimization over a subset of parameters. Returns partial normalized vector. */
+  _argmaxEIPartial(model, indices, dims, nCandidates, xi, ratingKey) {
+    // Find best observed value for this rating dimension
     let fBest = -Infinity;
-    for (let i = 0; i < N; i++) if (y[i] > fBest) fBest = y[i];
+    for (const r of this.ratings) {
+      if (r[ratingKey] > fBest) fBest = r[ratingKey];
+    }
 
-    const candidates = latinHypercube(nCandidates, D);
+    const candidates = latinHypercube(nCandidates, dims);
     let bestEI = -Infinity;
     let bestX = null;
-    const xStar = new Float64Array(D);
+    const xStar = new Float64Array(dims);
 
     for (let i = 0; i < nCandidates; i++) {
-      for (let j = 0; j < D; j++) xStar[j] = candidates[i * D + j];
-      const { mean, variance } = gpPredict(this.model, xStar);
+      for (let j = 0; j < dims; j++) xStar[j] = candidates[i * dims + j];
+      const { mean, variance } = gpPredict(model, xStar);
       const ei = expectedImprovement(mean, variance, fBest, xi);
       if (ei > bestEI) {
         bestEI = ei;
@@ -437,19 +615,85 @@ export class BOController {
       }
     }
 
-    return bestX || randomNormalized();
+    return bestX || (() => { const x = new Float64Array(dims); for (let i = 0; i < dims; i++) x[i] = Math.random(); return x; })();
+  }
+
+  /** Argmax posterior mean over a subset of parameters. */
+  _bestMeanPartial(model, indices, dims) {
+    const candidates = latinHypercube(2000, dims);
+    let bestMean = -Infinity;
+    let bestX = null;
+    const xStar = new Float64Array(dims);
+
+    for (let i = 0; i < 2000; i++) {
+      for (let j = 0; j < dims; j++) xStar[j] = candidates[i * dims + j];
+      const { mean } = gpPredict(model, xStar);
+      if (mean > bestMean) {
+        bestMean = mean;
+        bestX = new Float64Array(xStar);
+      }
+    }
+    return bestX || (() => { const x = new Float64Array(dims); for (let i = 0; i < dims; i++) x[i] = Math.random(); return x; })();
   }
 
   // ─── UI ──────────────────────────────────────────────────────────────
 
-  /** Flash the up/down rating indicator. */
-  flashRating(rating) {
-    const el = document.getElementById('boFlash');
+  /** Flash the movement rating indicator. */
+  flashMovement(rating) {
+    const el = document.getElementById('boFlashMovement');
     if (!el) return;
     el.textContent = rating === 1 ? '\u2191' : '\u2193';
     el.style.color = rating === 1 ? '#4f4' : '#f44';
     el.style.opacity = '1';
-    setTimeout(() => { el.style.opacity = '0'; }, 400);
+  }
+
+  /** Flash the color rating indicator. */
+  flashColor(rating) {
+    const el = document.getElementById('boFlashColor');
+    if (!el) return;
+    el.textContent = rating === 1 ? '\u2192' : '\u2190';
+    el.style.color = rating === 1 ? '#4af' : '#fa4';
+    el.style.opacity = '1';
+  }
+
+  /** Reset flash indicators for new generation. */
+  _resetFlash() {
+    const m = document.getElementById('boFlashMovement');
+    const c = document.getElementById('boFlashColor');
+    if (m) { m.textContent = '?'; m.style.color = '#555'; m.style.opacity = '0.3'; }
+    if (c) { c.textContent = '?'; c.style.color = '#555'; c.style.opacity = '0.3'; }
+  }
+
+  /** Toggle locking color params (all 21 color channels). */
+  toggleLockColors() {
+    const colorSliderKeys = SLIDER_KEYS.filter(k => COLOR_PATTERN.test(k));
+    const allLocked = colorSliderKeys.every(k => this.lockedKeys.has(k));
+    if (allLocked) {
+      colorSliderKeys.forEach(k => this.lockedKeys.delete(k));
+      console.log('BO: Colors UNLOCKED');
+    } else {
+      colorSliderKeys.forEach(k => this.lockedKeys.add(k));
+      console.log('BO: Colors LOCKED');
+    }
+    this.updateOverlay();
+    return !allLocked;
+  }
+
+  /** Toggle locking motion/dynamics params. */
+  toggleLockMotion() {
+    const motionKeys = SLIDER_KEYS.filter(k =>
+      k.startsWith('drawBot') || ['simSpeed', 'injectorSpeed', 'noiseAmount',
+        'noiseFrequency', 'noiseSpeed', 'curlStrength'].includes(k));
+    const allLocked = motionKeys.every(k => this.lockedKeys.has(k));
+    if (allLocked) {
+      motionKeys.forEach(k => this.lockedKeys.delete(k));
+      console.log('BO: Motion UNLOCKED');
+    } else {
+      motionKeys.forEach(k => this.lockedKeys.add(k));
+      console.log('BO: Motion LOCKED');
+    }
+    this.updateOverlay();
+    return !allLocked;
   }
 
   /** Update the overlay count and phase text. */
@@ -459,19 +703,29 @@ export class BOController {
     const phaseEl = document.getElementById('boPhase');
     if (countEl) countEl.textContent = `Ratings: ${N}`;
     if (phaseEl) {
-      if (N < 10) phaseEl.textContent = 'exploring';
-      else if (N < 30) phaseEl.textContent = 'EI active';
-      else phaseEl.textContent = 'ARD active';
+      const pending = [];
+      if (this._pendingMovement === null) pending.push('↑↓ movement');
+      if (this._pendingColor === null) pending.push('←→ color');
+      let phase = N < 10 ? 'exploring' : N < 60 ? 'EI active' : 'ARD active';
+      phase += ` | Motion GP (D=${D_MOTION}) | Color GP (D=${D_COLOR})`;
+      if (pending.length > 0 && this.rateMode) {
+        phase += ' | rate: ' + pending.join(', ');
+      }
+      phaseEl.textContent = phase;
     }
   }
 
-  /** Clear all ratings and model. */
+  /** Clear all ratings and models. */
   clearData() {
     this.ratings = [];
-    this.model = null;
+    this.motionModel = null;
+    this.colorModel = null;
     this._retrainCounter = 0;
+    this._pendingMovement = null;
+    this._pendingColor = null;
     fetch('/api/ratings', { method: 'DELETE' }).catch(() => {});
     this.updateOverlay();
+    this._resetFlash();
   }
 
   // ─── Run Management ─────────────────────────────────────────────────
@@ -492,13 +746,18 @@ export class BOController {
       body: JSON.stringify({ name }),
     });
     if (!res.ok) return false;
-    this.ratings = await res.json();
-    this.model = null;
+    const raw = await res.json();
+    this.ratings = purgeStaleRatings(raw);
+    this.motionModel = null;
+    this.colorModel = null;
     this._retrainCounter = 0;
+    this._pendingMovement = null;
+    this._pendingColor = null;
     if (this.ratings.length >= 10) {
       try { this.retrain(); } catch (e) { console.warn('BO: retrain after load failed:', e); }
     }
     this.updateOverlay();
+    this._resetFlash();
     return true;
   }
 

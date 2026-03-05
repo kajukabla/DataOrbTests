@@ -383,14 +383,14 @@ export function optimizeHyperparams(X, y, N, D, useARD = false) {
     if (params[nLS] < -5) penalty += 100 * (-5 - params[nLS]) * (-5 - params[nLS]);
     if (params[nLS] > 3) penalty += 100 * (params[nLS] - 3) * (params[nLS] - 3);
     // sigmaN bounds
-    if (params[nLS + 1] < -6) penalty += 100 * (-6 - params[nLS + 1]) * (-6 - params[nLS + 1]);
+    if (params[nLS + 1] < -1.2) penalty += 100 * (-1.2 - params[nLS + 1]) * (-1.2 - params[nLS + 1]);
     if (params[nLS + 1] > 1) penalty += 100 * (params[nLS + 1] - 1) * (params[nLS + 1] - 1);
 
     const lml = logMarginalLikelihood(X, y, N, D, ls, sf, sn, mu);
     return -lml + penalty;
   }
 
-  const best = nelderMead(objective, x0, 300, 1e-5);
+  const best = nelderMead(objective, x0, 100, 1e-4);
 
   const lengthScales = new Float64Array(nLS);
   for (let i = 0; i < nLS; i++) lengthScales[i] = Math.exp(best[i]);

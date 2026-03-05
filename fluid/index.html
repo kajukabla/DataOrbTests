@@ -336,6 +336,10 @@
         <input type="range" id="drawBotSpeed" min="0.0" max="1.0" step="0.01" value="0.5">
       </div>
       <div class="setting-group">
+        <label>Draw Bot Size <span class="val" id="drawBotSizeVal">3.0</span></label>
+        <input type="range" id="drawBotSize" min="0.01" max="5.0" step="0.01" value="3.0">
+      </div>
+      <div class="setting-group">
         <label>Draw Bot Turn Rate <span class="val" id="drawBotTurnRateVal">0.5</span></label>
         <input type="range" id="drawBotTurnRate" min="0.0" max="1.0" step="0.01" value="0.5">
       </div>
@@ -403,8 +407,17 @@
 
   <div id="boOverlay" style="display:none; position:fixed; bottom:20px; left:50%;
     transform:translateX(-50%); z-index:101; text-align:center; pointer-events:none;">
-    <div id="boFlash" style="font-size:48px; opacity:0; transition:opacity 0.15s;"></div>
-    <div id="boCount" style="color:#aaa; font-size:13px; font-family:system-ui,-apple-system,sans-serif;"></div>
+    <div style="display:flex; gap:32px; justify-content:center; align-items:center;">
+      <div style="text-align:center;">
+        <div id="boFlashMovement" style="font-size:48px; opacity:0.3; transition:opacity 0.15s; color:#555;">?</div>
+        <div style="color:#666; font-size:9px; font-family:system-ui,-apple-system,sans-serif;">↑↓ motion</div>
+      </div>
+      <div style="text-align:center;">
+        <div id="boFlashColor" style="font-size:48px; opacity:0.3; transition:opacity 0.15s; color:#555;">?</div>
+        <div style="color:#666; font-size:9px; font-family:system-ui,-apple-system,sans-serif;">←→ color</div>
+      </div>
+    </div>
+    <div id="boCount" style="color:#aaa; font-size:13px; font-family:system-ui,-apple-system,sans-serif; margin-top:4px;"></div>
     <div id="boPhase" style="color:#666; font-size:10px; font-family:system-ui,-apple-system,sans-serif;"></div>
   </div>
 

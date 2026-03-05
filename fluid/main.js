@@ -28,7 +28,7 @@ const state = {
   injectorSize: 0.5,
   injectorCount: 4,
   injectorSpeed: 0.5,
-  burstCount: 3,
+  burstCount: 0,
   sheenColor: [1.0, 0.9, 0.7],
   rimIntensity: 0.5,
   chromaticStrength: 1.0,
@@ -41,6 +41,7 @@ const state = {
   dyeDissipation: 0.993,
   drawBotCount: 0,
   drawBotSpeed: 0.5,
+  drawBotSize: 3.0,
   drawBotChaos: 0.3,
   drawBotDrift: 0.5,
   drawBotTurnRate: 0.5,
@@ -1409,10 +1410,11 @@ async function main() {
   console.log(`HDR=${hdrSupported}, format=${canvasFmt}${hdrSupported ? ', colorSpace=display-p3' : ''}`);
 
   // Expand BO color exploration range for HDR (exclude sheenColor)
+  // Capped at 1.2 to avoid oversaturated/blown-out colors in ratings data
   if (hdrSupported) {
     for (const key of Object.keys(SLIDER_SPACE)) {
       if (key.match(/Color_[012]$|Accent_[012]$|Tip_[012]$/) && !key.startsWith('sheen')) {
-        SLIDER_SPACE[key].max = 1.5;
+        SLIDER_SPACE[key].max = 1.2;
       }
     }
   }
@@ -2660,7 +2662,9 @@ async function main() {
     }
     if (count === 0) return;
 
-    const speed = 0.1 + state.drawBotSpeed * 2.9;
+    // More bots → slightly slower so they don't overwhelm
+    const botCountScale = 1 / Math.max(1, count);
+    const speed = (0.1 + state.drawBotSpeed * 2.9) * (0.5 + botCountScale * 0.5);
     const chaos = state.drawBotChaos;
     const drift = state.drawBotDrift;
     const turnRate = state.drawBotTurnRate;
@@ -2774,8 +2778,10 @@ async function main() {
           cmIndex: base.cmIndex,
         });
       }
+      // More injectors → slightly slower so they don't overwhelm
+      const injCountScale = 1 / Math.max(1, injCount);
       const injSplatRadius = state.splatRadius * 2.0 * (0.5 + state.injectorSize * 3.0);
-      const spdMul = 0.2 + state.injectorSpeed * 3.6;
+      const spdMul = (0.2 + state.injectorSpeed * 3.6) * (0.5 + injCountScale * 0.5);
       for (const inj of allInjectors) {
         if (time < 1.0) { continue; }
         const spd = inj.speed * spdMul;
@@ -2812,9 +2818,7 @@ async function main() {
       }
     }
 
-    // Draw bot splats — identical to mouse click-drag (always held down)
-    const str = state.clickStrength * 6.0;
-    const sz = 1.0 + state.clickSize * 8.0;
+    // Draw bot splats — gentle like injectors, not like mouse drags
     for (const bot of drawBots) {
       const dx = bot.x - bot._prevX;
       const dy = bot.y - bot._prevY;
@@ -2825,12 +2829,16 @@ async function main() {
       if (speed < 0.0001) continue;
 
       const col = palette(time * 0.15 + bot.colorPhase, 4);
+      // Gentle but visible force — not mouse-slam, not invisible either
+      const botForce = 0.4;
+      const botDyeStr = 1.0;
+      const botRadius = state.splatRadius * (1.0 + state.drawBotSize * 3.0);
       addSplat(
         bot.x, bot.y,
-        dx * state.splatForce * str,
-        dy * state.splatForce * str,
-        col[0] * str, col[1] * str, col[2] * str,
-        state.splatRadius * sz * (1.0 + speed * 20)
+        dx * state.splatForce * botForce,
+        dy * state.splatForce * botForce,
+        col[0] * dyeRamp * botDyeStr, col[1] * dyeRamp * botDyeStr, col[2] * dyeRamp * botDyeStr,
+        botRadius
       );
     }
 
@@ -3252,6 +3260,7 @@ async function main() {
   wireSlider('simSpeed', 'simSpeed');
   wireSlider('drawBotCount', 'drawBotCount', v => Math.round(v));
   wireSlider('drawBotSpeed', 'drawBotSpeed');
+  wireSlider('drawBotSize', 'drawBotSize');
   wireSlider('drawBotTurnRate', 'drawBotTurnRate');
   wireSlider('drawBotSpeedVar', 'drawBotSpeedVar');
   wireSlider('drawBotRecMix', 'drawBotRecMix');
@@ -3297,6 +3306,7 @@ async function main() {
     syncSlider('pressureDecay', 'pressureDecay', v => v.toFixed(2));
     syncSlider('drawBotCount', 'drawBotCount', v => Math.round(v));
     syncSlider('drawBotSpeed', 'drawBotSpeed');
+    syncSlider('drawBotSize', 'drawBotSize');
     syncSlider('drawBotTurnRate', 'drawBotTurnRate');
     syncSlider('drawBotSpeedVar', 'drawBotSpeedVar');
     syncSlider('drawBotRecMix', 'drawBotRecMix');
@@ -3317,7 +3327,7 @@ async function main() {
 
   // ─── Randomize helpers ────────────────────────────────────────────────
   function randRange(lo, hi) { return lo + Math.random() * (hi - lo); }
-  const hdrColorMax = hdrSupported ? 1.5 : 1.0;
+  const hdrColorMax = hdrSupported ? 1.2 : 1.0;
   function randColor() { return [Math.random() * hdrColorMax, Math.random() * hdrColorMax, Math.random() * hdrColorMax]; }
   function snapTo(val, step) { return Math.round(val / step) * step; }
 
@@ -3363,6 +3373,7 @@ async function main() {
     // Draw bots
     state.drawBotCount = Math.round(Math.random() * 8);
     state.drawBotSpeed = Math.random();
+    state.drawBotSize = 0.01 + Math.random() * 4.99;
     state.drawBotTurnRate = Math.random();
     state.drawBotSpeedVar = Math.random();
     state.drawBotRecMix = Math.random();
@@ -3396,6 +3407,7 @@ async function main() {
     pressureDecay: { min: 0, max: 1, step: 0.01 },
     drawBotCount: { min: 0, max: 8, step: 1 },
     drawBotSpeed: { min: 0, max: 1, step: 0.01 },
+    drawBotSize: { min: 0.01, max: 5, step: 0.01 },
     drawBotTurnRate: { min: 0, max: 1, step: 0.01 },
     drawBotSpeedVar: { min: 0, max: 1, step: 0.01 },
     drawBotRecMix: { min: 0, max: 1, step: 0.01 },
@@ -3426,7 +3438,7 @@ async function main() {
     const threshold = 0.005;
 
     // BO-guided morph: replace random targets with GP suggestions
-    if (bo.boMorphMode && bo.model) {
+    if (bo.boMorphMode && (bo.motionModel || bo.colorModel)) {
       boMorphCooldown--;
       // Check if all slider targets are reached
       let allReached = true;
@@ -3463,7 +3475,7 @@ async function main() {
       const range = s.max - s.min;
       state[key] += (target - state[key]) * rate;
       if (Math.abs(state[key] - target) / range < threshold) {
-        if (!(bo.boMorphMode && bo.model)) {
+        if (!(bo.boMorphMode && (bo.motionModel || bo.colorModel))) {
           pickMorphTarget(key);
         }
       }
@@ -3477,7 +3489,7 @@ async function main() {
       }
       const dist = Math.abs(state[key][0] - target[0]) + Math.abs(state[key][1] - target[1]) + Math.abs(state[key][2] - target[2]);
       if (dist < threshold * 3) {
-        if (bo.boMorphMode && bo.model) {
+        if (bo.boMorphMode && (bo.motionModel || bo.colorModel)) {
           const cMax = (key === 'sheenColor') ? 1.0 : hdrColorMax;
           morphTargets[key] = [Math.random() * cMax, Math.random() * cMax, Math.random() * cMax];
         } else {
@@ -3513,7 +3525,10 @@ async function main() {
     boRateBtn.classList.toggle('active', bo.rateMode);
     boOverlay.style.display = bo.rateMode ? 'block' : 'none';
     if (bo.rateMode) {
-      // Keep current config so user can rate what's on screen
+      // Reset pending ratings and flash for fresh generation
+      bo._pendingMovement = null;
+      bo._pendingColor = null;
+      bo._resetFlash();
       bo.updateOverlay();
     }
   }
@@ -3531,7 +3546,7 @@ async function main() {
 
   boBestBtn.addEventListener('click', () => {
     const x = bo.getBestParams();
-    normalizedToState(x, state);
+    normalizedToState(x, state, bo.lockedKeys);
     syncAllUI();
   });
 
@@ -3658,10 +3673,20 @@ async function main() {
     if (bo.rateMode) {
       if (e.key === 'ArrowUp') {
         e.preventDefault();
-        bo.rate(state, 1, syncAllUI);
+        bo.rateMovement(1, state, syncAllUI);
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
-        bo.rate(state, 0, syncAllUI);
+        bo.rateMovement(-1, state, syncAllUI);
+      } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        bo.rateColor(1, state, syncAllUI);
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        bo.rateColor(-1, state, syncAllUI);
+      } else if (e.key === 'l' || e.key === 'L') {
+        bo.toggleLockColors();
+      } else if (e.key === 'm' || e.key === 'M') {
+        bo.toggleLockMotion();
       }
     }
   });
@@ -3679,7 +3704,7 @@ async function main() {
   requestAnimationFrame(frame);
 
   // Trigger deferred BO retrain now that WebGPU is fully initialized
-  if (bo.ratings.length >= 10 && !bo.model) {
+  if (bo.ratings.length >= 10 && !bo.motionModel && !bo.colorModel) {
     setTimeout(() => {
       try { bo.retrain(); } catch (e) { console.warn('BO: deferred retrain failed:', e); }
     }, 100);
