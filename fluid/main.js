@@ -65,13 +65,125 @@ const state = {
   // Dye-coupled noise
   noiseDyeIntensity: 0.0,
   dyeNoiseAmount: 0.0,
+  rdAmount: 0,
+  rdFeedRate: 0.04,
+  rdKillRate: 0.06,
+  rdDyeAmount: 0,
+  rdForceAmount: 0,
+  rdScale: 0.5,
   bloomIntensity: 0,
   bloomThreshold: 0.4,
   bloomRadius: 0.5,
   splatRadius: 0.0015,
   simSpeed: 1.0,
   autoMorph: false,
+  // Temperature/buoyancy
+  tempAmount: 0,
+  tempBuoyancy: 0.5,
+  tempDissipation: 0.99,
+  tempDyeTint: 0,
+  // Chemotaxis
+  flockChemotaxis: 0,
+  // Depth/Parallax
+  depthAmount: 0,
+  depthSpeed: 0.3,
+  // Mood lighting
+  moodAmount: 0,
+  moodSpeed: 0.3,
+  // Palette
+  paletteIndex: -1,
 };
+
+// ─── Color Palettes ──────────────────────────────────────────────────────────
+function hexToLinear(hex) {
+  const r = parseInt(hex.slice(1, 3), 16) / 255;
+  const g = parseInt(hex.slice(3, 5), 16) / 255;
+  const b = parseInt(hex.slice(5, 7), 16) / 255;
+  const toL = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  return [toL(r), toL(g), toL(b)];
+}
+
+const PALETTES = [
+  // 5 Scientific colormaps (8-stop)
+  { name: 'Viridis', colors: ['#440154','#443a83','#31688e','#21908c','#35b779','#6ece58','#b5de2b','#fde725'].map(hexToLinear) },
+  { name: 'Inferno', colors: ['#000004','#1b0c41','#4a0c6b','#781c6d','#a52c60','#cf4446','#ed6925','#fcffa4'].map(hexToLinear) },
+  { name: 'Magma', colors: ['#000004','#180f3d','#440f76','#721f81','#b5367a','#e55c30','#fba40a','#fcffa4'].map(hexToLinear) },
+  { name: 'Plasma', colors: ['#0d0887','#4b03a1','#7d03a8','#a82296','#cb4679','#e86825','#f89540','#f0f921'].map(hexToLinear) },
+  { name: 'Turbo', colors: ['#30123b','#4662d7','#36aaf9','#1ae4b6','#72fe5e','#c8ef34','#faba39','#e6550d'].map(hexToLinear) },
+  // 45 Community palettes (5-stop)
+  { name: 'Sunset Beach', colors: ['#69d2e7','#a7dbd8','#e0e4cc','#f38630','#fa6900'].map(hexToLinear) },
+  { name: 'Coral Reef', colors: ['#fe4365','#fc9d9a','#f9cdad','#c8c8a9','#83af9b'].map(hexToLinear) },
+  { name: 'Autumn Fire', colors: ['#ecd078','#d95b43','#c02942','#542437','#53777a'].map(hexToLinear) },
+  { name: 'Neon Garden', colors: ['#556270','#4ecdc4','#c7f464','#ff6b6b','#c44d58'].map(hexToLinear) },
+  { name: 'Deep Forest', colors: ['#e8ddcb','#cdb380','#036564','#033649','#031634'].map(hexToLinear) },
+  { name: 'Carnival', colors: ['#490a3d','#bd1550','#e97f02','#f8ca00','#8a9b0f'].map(hexToLinear) },
+  { name: 'Mint Fresh', colors: ['#594f4f','#547980','#45ada8','#9de0ad','#e5fcc2'].map(hexToLinear) },
+  { name: 'Desert Spice', colors: ['#00a0b0','#6a4a3c','#cc333f','#eb6841','#edc951'].map(hexToLinear) },
+  { name: 'Berry Blush', colors: ['#e94e77','#d68189','#c6a49a','#c6e5d9','#f4ead5'].map(hexToLinear) },
+  { name: 'Watermelon', colors: ['#3fb8af','#7fc7af','#dad8a7','#ff9e9d','#ff3d7f'].map(hexToLinear) },
+  { name: 'Ocean Deep', colors: ['#343838','#005f6b','#008c9e','#00b4cc','#00dffc'].map(hexToLinear) },
+  { name: 'Dusty Rose', colors: ['#413e4a','#73626e','#b38184','#f0b49e','#f7e4be'].map(hexToLinear) },
+  { name: 'Sunrise', colors: ['#ff4e50','#fc913a','#f9d423','#ede574','#e1f5c4'].map(hexToLinear) },
+  { name: 'Warm Sage', colors: ['#99b898','#fecea8','#ff847c','#e84a5f','#2a363b'].map(hexToLinear) },
+  { name: 'Teal Harvest', colors: ['#655643','#80bca3','#f6f7bd','#e6ac27','#bf4d28'].map(hexToLinear) },
+  { name: 'Electric Lime', colors: ['#00a8c6','#40c0cb','#f9f2e7','#aee239','#8fbe00'].map(hexToLinear) },
+  { name: 'Plum Night', colors: ['#351330','#424254','#64908a','#e8caa4','#cc2a41'].map(hexToLinear) },
+  { name: 'Tangerine', colors: ['#554236','#f77825','#d3ce3d','#f1efa5','#60b99a'].map(hexToLinear) },
+  { name: 'Crimson Gold', colors: ['#8c2318','#5e8c6a','#88a65e','#bfb35a','#f2c45a'].map(hexToLinear) },
+  { name: 'Candy', colors: ['#fad089','#ff9c5b','#f5634a','#ed303c','#3b8183'].map(hexToLinear) },
+  { name: 'Dusk', colors: ['#f8b195','#f67280','#c06c84','#6c5b7b','#355c7d'].map(hexToLinear) },
+  { name: 'Electric', colors: ['#d1e751','#ffffff','#000000','#4dbce9','#26ade4'].map(hexToLinear) },
+  { name: 'Emerald', colors: ['#1b676b','#519548','#88c425','#bef202','#eafde6'].map(hexToLinear) },
+  { name: 'Amber Spice', colors: ['#5e412f','#fcebb6','#78c0a8','#f07818','#f0a830'].map(hexToLinear) },
+  { name: 'Magenta Burst', colors: ['#bcbdac','#cfbe27','#f27435','#f02475','#3b2d38'].map(hexToLinear) },
+  { name: 'Dark Bloom', colors: ['#300030','#480048','#601848','#c04848','#f07241'].map(hexToLinear) },
+  { name: 'Pastel Dream', colors: ['#a8e6ce','#dcedc2','#ffd3b5','#ffaaa6','#ff8c94'].map(hexToLinear) },
+  { name: 'Noir Gold', colors: ['#3e4147','#fffedf','#dfba69','#5a2e2e','#2a2c31'].map(hexToLinear) },
+  { name: 'Neon Punk', colors: ['#fc354c','#29221f','#13747d','#0abfbc','#fcf7c5'].map(hexToLinear) },
+  { name: 'Citrus', colors: ['#cc0c39','#e6781e','#c8cf02','#f8fcc1','#1693a7'].map(hexToLinear) },
+  { name: 'Terracotta', colors: ['#a7c5bd','#e5ddcb','#eb7b59','#cf4647','#524656'].map(hexToLinear) },
+  { name: 'Cherry Blossom', colors: ['#5c323e','#a82743','#e15e32','#c0d23e','#e5f04c'].map(hexToLinear) },
+  { name: 'Earth Tone', colors: ['#fdf1cc','#c6d6b8','#987f69','#e3ad40','#fcd036'].map(hexToLinear) },
+  { name: 'Rainbow Pop', colors: ['#ff003c','#ff8a00','#fabe28','#88c100','#00c176'].map(hexToLinear) },
+  { name: 'Wine Country', colors: ['#d1313d','#e5625c','#f9bf76','#8eb2c5','#615375'].map(hexToLinear) },
+  { name: 'Deep Purple', colors: ['#111625','#341931','#571b3c','#7a1e48','#9d2053'].map(hexToLinear) },
+  { name: 'Volcano', colors: ['#395a4f','#432330','#853c43','#f25c5e','#ffa566'].map(hexToLinear) },
+  { name: 'Jungle', colors: ['#512b52','#635274','#7bb0a8','#a7dbab','#e4f5b1'].map(hexToLinear) },
+  { name: 'Firecracker', colors: ['#b5ac01','#ecba09','#e86e1c','#d41e45','#1b1521'].map(hexToLinear) },
+  { name: 'Cotton Candy', colors: ['#f1396d','#fd6081','#f3ffeb','#acc95f','#8f9924'].map(hexToLinear) },
+  { name: 'Sage Blush', colors: ['#b1e6d1','#77b1a9','#3d7b80','#270a33','#451a3e'].map(hexToLinear) },
+  { name: 'Amber Wave', colors: ['#ffab07','#e9d558','#72ad75','#0e8d94','#434d53'].map(hexToLinear) },
+  { name: 'Tropical', colors: ['#5cacc4','#8cd19d','#cee879','#fcb653','#ff5254'].map(hexToLinear) },
+  { name: 'Lava Flow', colors: ['#ccf390','#e0e05a','#f7c41f','#fc930a','#ff003d'].map(hexToLinear) },
+  { name: 'Moss Stone', colors: ['#f2e8c4','#98d9b6','#3ec9a7','#2b879e','#616668'].map(hexToLinear) },
+  { name: 'Twilight', colors: ['#2d1b33','#f36a71','#ee887a','#e4e391','#9abc8a'].map(hexToLinear) },
+  { name: 'Fire Dance', colors: ['#452e3c','#ff3d5a','#ffb969','#eaf27e','#3b8c88'].map(hexToLinear) },
+  { name: 'Aqua Terra', colors: ['#fb6900','#f63700','#004853','#007e80','#00b9bd'].map(hexToLinear) },
+];
+
+function applyPalette(idx) {
+  if (idx < 0 || idx >= PALETTES.length) return;
+  const pal = PALETTES[idx];
+  const c = pal.colors;
+  if (c.length === 8) {
+    // Scientific 8-stop: sample at 0,2,4,6,7
+    state.baseColor = [...c[0]];
+    state.accentColor = [...c[2]];
+    state.tipColor = [...c[4]];
+    state.glitterColor = [...c[6]];
+    state.sheenColor = [...c[7]];
+  } else {
+    // Community 5-stop: direct mapping
+    state.baseColor = [...c[0]];
+    state.accentColor = [...c[1]];
+    state.tipColor = [...c[2]];
+    state.glitterColor = [...c[3]];
+    state.sheenColor = [...c[4]];
+  }
+  // Derive glitterAccent/glitterTip as lighter variants
+  state.glitterAccent = state.glitterColor.map(v => Math.min(1.0, v * 1.3 + 0.1));
+  state.glitterTip = state.tipColor.map(v => Math.min(1.0, v * 1.2 + 0.15));
+}
 
 // ─── WGSL Shaders ────────────────────────────────────────────────────────────
 
@@ -657,6 +769,255 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 `;
 
+// ─── Reaction-Diffusion (Gray-Scott) Shader ─────────────────────────────────
+const reactionDiffusionShader = /* wgsl */`
+struct RDParams {
+  time: f32,
+  rdAmount: f32,
+  simRes: f32,
+  feedRate: f32,
+  killRate: f32,
+  rdDyeAmount: f32,
+  rdForceAmount: f32,
+  rdScale: f32,
+};
+
+@group(0) @binding(0) var<uniform> rp: RDParams;
+@group(0) @binding(1) var rdSrc: texture_2d<f32>;
+@group(0) @binding(2) var rdDst: texture_storage_2d<rgba16float, write>;
+
+const SPHERE_CENTER = vec2f(0.5, 0.5);
+const SPHERE_RADIUS: f32 = 0.37;
+const Da: f32 = 1.0;
+const Db: f32 = 0.5;
+
+@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let res = u32(rp.simRes);
+  if (id.x >= res || id.y >= res) { return; }
+  let uv = (vec2f(id.xy) + 0.5) / rp.simRes;
+  let dist = length(uv - SPHERE_CENTER);
+  if (dist > SPHERE_RADIUS) {
+    textureStore(rdDst, id.xy, vec4f(1.0, 0.0, 0.0, 0.0));
+    return;
+  }
+
+  let c = textureLoad(rdSrc, id.xy, 0);
+  let A = c.r;
+  let B = c.g;
+
+  // 5-point Laplacian
+  let scale = rp.rdScale * 4.0 + 0.5;
+  let cR = textureLoad(rdSrc, vec2u(min(id.x + 1u, res - 1u), id.y), 0);
+  let cL = textureLoad(rdSrc, vec2u(max(id.x, 1u) - 1u, id.y), 0);
+  let cU = textureLoad(rdSrc, vec2u(id.x, min(id.y + 1u, res - 1u)), 0);
+  let cD = textureLoad(rdSrc, vec2u(id.x, max(id.y, 1u) - 1u), 0);
+
+  let lapA = (cR.r + cL.r + cU.r + cD.r - 4.0 * A) * scale;
+  let lapB = (cR.g + cL.g + cU.g + cD.g - 4.0 * B) * scale;
+
+  let f = rp.feedRate;
+  let k = rp.killRate;
+  let ABB = A * B * B;
+  let newA = A + (Da * lapA - ABB + f * (1.0 - A)) * rp.rdAmount;
+  let newB = B + (Db * lapB + ABB - (f + k) * B) * rp.rdAmount;
+
+  textureStore(rdDst, id.xy, vec4f(clamp(newA, 0.0, 1.0), clamp(newB, 0.0, 1.0), 0.0, 0.0));
+}
+`;
+
+// ─── RD Coupling Shader (injects dye + velocity from RD field) ──────────────
+const rdCouplingShader = /* wgsl */`
+struct RDParams {
+  time: f32,
+  rdAmount: f32,
+  simRes: f32,
+  feedRate: f32,
+  killRate: f32,
+  rdDyeAmount: f32,
+  rdForceAmount: f32,
+  rdScale: f32,
+};
+
+@group(0) @binding(0) var<uniform> rp: RDParams;
+@group(0) @binding(1) var rdSrc: texture_2d<f32>;
+@group(0) @binding(2) var dyeSrc: texture_2d<f32>;
+@group(0) @binding(3) var velSrc: texture_2d<f32>;
+@group(0) @binding(4) var dyeDst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var velDst: texture_storage_2d<rgba16float, write>;
+
+const SPHERE_CENTER = vec2f(0.5, 0.5);
+const SPHERE_RADIUS: f32 = 0.37;
+
+@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let res = u32(rp.simRes);
+  if (id.x >= res || id.y >= res) { return; }
+  let uv = (vec2f(id.xy) + 0.5) / rp.simRes;
+  let dist = length(uv - SPHERE_CENTER);
+
+  var dye = textureLoad(dyeSrc, id.xy, 0);
+  var vel = textureLoad(velSrc, id.xy, 0);
+
+  if (dist > SPHERE_RADIUS) {
+    textureStore(dyeDst, id.xy, dye);
+    textureStore(velDst, id.xy, vel);
+    return;
+  }
+
+  let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.06, dist);
+  let rd = textureLoad(rdSrc, id.xy, 0);
+  let B = rd.g;
+
+  // Inject dye proportional to chemical B
+  let existingBrightness = max(dye.r, max(dye.g, dye.b));
+  let headroom = max(1.0 - existingBrightness, 0.0);
+
+  // Color varies spatially (same pattern as dyeNoiseShader)
+  let velAngle = atan2(vel.y, vel.x);
+  let colorPhase = velAngle * 0.5 + rp.time * 0.05 + dot(uv, vec2f(5.0, 3.0));
+  let cR = 0.3 + 0.7 * max(sin(colorPhase), 0.0);
+  let cG = 0.3 + 0.7 * max(sin(colorPhase + 2.094), 0.0);
+  let cB = 0.3 + 0.7 * max(sin(colorPhase + 4.189), 0.0);
+  let spatialColor = vec3f(cR, cG, cB);
+
+  let dyeInject = B * rp.rdDyeAmount * edgeFade * headroom;
+  dye += vec4f(spatialColor * dyeInject, 0.0);
+
+  // Add force from RD gradient
+  let rdR = textureLoad(rdSrc, vec2u(min(id.x + 1u, res - 1u), id.y), 0).g;
+  let rdL = textureLoad(rdSrc, vec2u(max(id.x, 1u) - 1u, id.y), 0).g;
+  let rdU = textureLoad(rdSrc, vec2u(id.x, min(id.y + 1u, res - 1u)), 0).g;
+  let rdD = textureLoad(rdSrc, vec2u(id.x, max(id.y, 1u) - 1u), 0).g;
+  let grad = vec2f(rdR - rdL, rdU - rdD) * 0.5;
+  vel += vec4f(grad * rp.rdForceAmount * 50.0 * edgeFade, 0.0, 0.0);
+
+  textureStore(dyeDst, id.xy, dye);
+  textureStore(velDst, id.xy, vel);
+}
+`;
+
+// ─── Temperature/Buoyancy Shaders ────────────────────────────────────────────
+
+const temperatureAdvectShader = /* wgsl */`
+struct TempParams {
+  dt: f32,
+  dx: f32,
+  simRes: f32,
+  dissipation: f32,
+};
+
+const SPHERE_CENTER = vec2f(0.5, 0.5);
+const SPHERE_RADIUS: f32 = 0.37;
+
+@group(0) @binding(0) var<uniform> tp: TempParams;
+@group(0) @binding(1) var velTex: texture_2d<f32>;
+@group(0) @binding(2) var tempSrc: texture_2d<f32>;
+@group(0) @binding(3) var sampl: sampler;
+@group(0) @binding(4) var tempDst: texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let res = u32(tp.simRes);
+  if (id.x >= res || id.y >= res) { return; }
+  let uv = (vec2f(id.xy) + 0.5) / tp.simRes;
+  let toCenter = uv - SPHERE_CENTER;
+  let dist = length(toCenter);
+  if (dist > SPHERE_RADIUS) {
+    textureStore(tempDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+    return;
+  }
+  let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.04, dist);
+  let vel = textureLoad(velTex, id.xy, 0).xy;
+  let backUV = uv - tp.dt * vel * tp.dx;
+  let backToCenter = backUV - SPHERE_CENTER;
+  let backDist = length(backToCenter);
+  var sampUV = backUV;
+  if (backDist > SPHERE_RADIUS) {
+    sampUV = SPHERE_CENTER + backToCenter / backDist * SPHERE_RADIUS;
+  }
+  let clamped = clamp(sampUV, vec2f(0.5 / tp.simRes), vec2f(1.0 - 0.5 / tp.simRes));
+  let advected = textureSampleLevel(tempSrc, sampl, clamped, 0.0).r;
+  let temp = advected * tp.dissipation * edgeFade;
+  textureStore(tempDst, id.xy, vec4f(temp, 0.0, 0.0, 1.0));
+}
+`;
+
+const buoyancyShader = /* wgsl */`
+struct BuoyancyParams {
+  simRes: f32,
+  dt: f32,
+  buoyancy: f32,
+  pad: f32,
+};
+
+const SPHERE_CENTER = vec2f(0.5, 0.5);
+const SPHERE_RADIUS: f32 = 0.37;
+
+@group(0) @binding(0) var<uniform> bp: BuoyancyParams;
+@group(0) @binding(1) var tempTex: texture_2d<f32>;
+@group(0) @binding(2) var velSrc: texture_2d<f32>;
+@group(0) @binding(3) var velDst: texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let res = u32(bp.simRes);
+  if (id.x >= res || id.y >= res) { return; }
+  let uv = (vec2f(id.xy) + 0.5) / bp.simRes;
+  let toCenter = uv - SPHERE_CENTER;
+  let dist = length(toCenter);
+  if (dist > SPHERE_RADIUS) {
+    textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+    return;
+  }
+  let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.04, dist);
+  let temp = textureLoad(tempTex, id.xy, 0).r;
+  var vel = textureLoad(velSrc, id.xy, 0).xy;
+  vel.y += bp.buoyancy * (temp - 0.5) * bp.dt * edgeFade;
+  textureStore(velDst, id.xy, vec4f(vel * edgeFade, 0.0, 1.0));
+}
+`;
+
+const tempSplatShader = /* wgsl */`
+${commonHeader}
+
+struct Splat {
+  x: f32, y: f32, dx: f32, dy: f32,
+  r: f32, g: f32, b: f32, radius: f32,
+};
+
+@group(0) @binding(1) var tempSrc: texture_2d<f32>;
+@group(0) @binding(2) var tempDst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var<storage, read> splats: array<Splat>;
+@group(0) @binding(4) var<uniform> splatMeta: vec4u;
+
+@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let res = u32(p.simRes);
+  if (id.x >= res || id.y >= res) { return; }
+  let uv = (vec2f(id.xy) + 0.5) / p.simRes;
+  let toCenter = uv - SPHERE_CENTER;
+  let dist = length(toCenter);
+  if (dist > SPHERE_RADIUS) {
+    textureStore(tempDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+    return;
+  }
+  let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS - 0.02, dist);
+  var temp = textureLoad(tempSrc, id.xy, 0).r;
+  let count = min(splatMeta.x, ${MAX_SPLATS}u);
+  for (var i = 0u; i < count; i++) {
+    let s = splats[i];
+    let diff = uv - vec2f(s.x, s.y);
+    let dist2 = dot(diff, diff);
+    let strength = exp(-dist2 / (2.0 * s.radius * s.radius));
+    let dyeIntensity = (s.r + s.g + s.b) / 3.0;
+    temp += strength * boundaryFade * dyeIntensity * 0.5;
+  }
+  temp = clamp(temp, 0.0, 1.0);
+  textureStore(tempDst, id.xy, vec4f(temp, 0.0, 0.0, 1.0));
+}
+`;
+
 // ─── Particle Compact Shader (GPU indirect draw — builds visible index list) ──
 function makeParticleCompactShader(count) {
   return /* wgsl */`
@@ -1233,6 +1594,7 @@ struct DisplayUniforms {
   accentColor: vec4f, // xyz=accentColor RGB, w=colorBlend
   sheenColor: vec4f,  // xyz=sheenColor RGB, w=metallic
   tipColor: vec4f,    // xyz=tipColor RGB, w=roughness
+  depth: vec4f,       // x=depthAmount, y=depthSpeed, z=pad, w=pad
 };
 @group(0) @binding(2) var<uniform> du: DisplayUniforms;
 
@@ -1296,8 +1658,21 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // );
   // ─────────────────────────────────────────────────────────────────────
 
-  // Sample fluid dye
-  let raw = textureSampleLevel(dyeTex, samp, uv, 0.0).rgb;
+  // Sample fluid dye (with optional depth/parallax)
+  let depthAmt = du.depth.x;
+  let depthSpd = du.depth.y;
+  var raw: vec3f;
+  if (depthAmt > 0.01) {
+    let pPhase = time * depthSpd * 0.3;
+    let parallaxOff = vec2f(cos(pPhase), sin(pPhase * 0.7)) * depthAmt * 0.03;
+    let backUV = uv + parallaxOff * 0.5;
+    let frontUV = uv - parallaxOff * 0.5;
+    let backSample = textureSampleLevel(dyeTex, samp, backUV, 0.0).rgb;
+    let frontSample = textureSampleLevel(dyeTex, samp, frontUV, 0.0).rgb;
+    raw = mix(backSample, frontSample, 0.6);
+  } else {
+    raw = textureSampleLevel(dyeTex, samp, uv, 0.0).rgb;
+  }
   let intensity = dot(raw, vec3f(0.3, 0.6, 0.1));
 
   // Fluid base — gradient from accent (thin/wispy) to base (dense)
@@ -1598,6 +1973,8 @@ async function main() {
   const divTex = makeTex('divergence');
   let dyeA = makeTex('dyeA'), dyeB = makeTex('dyeB');
   const curlTex = makeTex('curl');
+  let rdA = makeTex('rdA'), rdB = makeTex('rdB');
+  let tempA = makeTex('tempA'), tempB = makeTex('tempB');
 
   const linearSampler = device.createSampler({
     minFilter: 'linear', magFilter: 'linear',
@@ -1647,9 +2024,9 @@ async function main() {
 
   // displayUB: [width, height, time, sheenStrength, baseR, baseG, baseB, pad, accentR, accentG, accentB, colorBlend, sheenR, sheenG, sheenB, pad, tipR, tipG, tipB, pad]
   const displayUB = device.createBuffer({
-    size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const displayUBData = new Float32Array(20);
+  const displayUBData = new Float32Array(24);
   const bloomParamData = new Float32Array(8);
   const bloomCompositeData = new Float32Array(1);
 
@@ -1806,6 +2183,63 @@ async function main() {
   });
   const cleanupData = new Float32Array([SIM_RES, 0, 0, 0]);
   device.queue.writeBuffer(cleanupBuf, 0, cleanupData);
+
+  // ─── Reaction-Diffusion pipeline ──────────────────────────────────────────
+  const rdPipe = buildPipeline(reactionDiffusionShader, 'reactionDiffusion',
+    ['uniform', 'texture', 'storage']);
+
+  const rdBuf = device.createBuffer({
+    size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const rdData = new Float32Array(8); // [time, rdAmount, simRes, feedRate, killRate, rdDyeAmount, rdForceAmount, rdScale]
+
+  // RD Coupling pipeline: uniform, texture(rd), texture(dye), texture(vel), storage(dyeDst), storage(velDst)
+  const rdCouplingBGL = device.createBindGroupLayout({
+    label: 'rdCoupling_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+    ],
+  });
+  const rdCouplingModule = device.createShaderModule({ code: rdCouplingShader, label: 'rdCoupling' });
+  checkShader(rdCouplingModule, 'rdCoupling');
+  const rdCouplingPipeline = device.createComputePipeline({
+    label: 'rdCoupling',
+    layout: device.createPipelineLayout({ bindGroupLayouts: [rdCouplingBGL] }),
+    compute: { module: rdCouplingModule, entryPoint: 'main' },
+  });
+
+  // ─── Temperature/Buoyancy pipelines ─────────────────────────────────────
+  // Temperature advect: custom BGL (uniform, texture(vel), texture(temp), sampler, storage(tempDst))
+  const tempAdvectPipe = buildPipeline(temperatureAdvectShader, 'tempAdvect',
+    ['uniform', 'texture', 'texture', 'sampler', 'storage']);
+
+  const tempParamBuf = device.createBuffer({
+    size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const tempParamData = new Float32Array(4); // [dt, dx, simRes, dissipation]
+
+  // Buoyancy: custom BGL (uniform, texture(temp), texture(vel), storage(velDst))
+  const buoyancyPipe = buildPipeline(buoyancyShader, 'buoyancy',
+    ['uniform', 'texture', 'texture', 'storage']);
+
+  const buoyancyBuf = device.createBuffer({
+    size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const buoyancyData = new Float32Array(4); // [simRes, dt, buoyancy, pad]
+
+  // Temperature splat: reuses batchSplatBGL layout (uniform, texture, storage-tex, storage-buf, uniform)
+  const tempSplatModule = device.createShaderModule({ code: tempSplatShader, label: 'tempSplat' });
+  checkShader(tempSplatModule, 'tempSplat');
+  const tempSplatPipe = device.createComputePipeline({
+    label: 'tempSplat',
+    layout: batchSplatLayout,
+    compute: { module: tempSplatModule, entryPoint: 'main' },
+  });
 
   // ─── Display render pipeline ────────────────────────────────────────────
   const displayBGL = device.createBindGroupLayout({
@@ -2219,10 +2653,106 @@ async function main() {
   let velFlip = 0;   // 0: velA is current, 1: velB is current
   let dyeFlip = 0;   // 0: dyeA is current, 1: dyeB is current
   let pressFlip = 0; // 0: pressA is current, 1: pressB is current
+  let rdFlip = 0;    // 0: rdA is current, 1: rdB is current
+  let tempFlip = 0;   // 0: tempA is current, 1: tempB is current
 
   const velTexs = [velA, velB];
   const dyeTexs = [dyeA, dyeB];
   const pressTexs = [pressA, pressB];
+  const rdTexs = [rdA, rdB];
+  const tempTexs = [tempA, tempB];
+
+  // ─── RD Texture Initialization (A=1, B=0 everywhere, seed B patches) ───
+  {
+    const pixels = new Float32Array(SIM_RES * SIM_RES * 4);
+    for (let i = 0; i < SIM_RES * SIM_RES; i++) {
+      pixels[i * 4] = 1.0;     // A = 1.0
+      pixels[i * 4 + 1] = 0.0; // B = 0.0
+      pixels[i * 4 + 2] = 0.0;
+      pixels[i * 4 + 3] = 0.0;
+    }
+    // Seed small random B patches near center
+    for (let s = 0; s < 20; s++) {
+      const cx = Math.floor(SIM_RES * 0.5 + (Math.random() - 0.5) * SIM_RES * 0.3);
+      const cy = Math.floor(SIM_RES * 0.5 + (Math.random() - 0.5) * SIM_RES * 0.3);
+      const r = 2 + Math.floor(Math.random() * 4);
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          const px = cx + dx, py = cy + dy;
+          if (px < 0 || px >= SIM_RES || py < 0 || py >= SIM_RES) continue;
+          if (dx * dx + dy * dy > r * r) continue;
+          const idx = (py * SIM_RES + px) * 4;
+          pixels[idx] = 0.5;      // A reduced
+          pixels[idx + 1] = 0.25; // B seeded
+        }
+      }
+    }
+    // Convert to float16 for rgba16float texture
+    const u16 = new Uint16Array(SIM_RES * SIM_RES * 4);
+    for (let i = 0; i < pixels.length; i++) {
+      // Float32 to Float16 conversion
+      const f = pixels[i];
+      const view = new DataView(new ArrayBuffer(4));
+      view.setFloat32(0, f);
+      const bits = view.getUint32(0);
+      const sign = (bits >> 16) & 0x8000;
+      const exp = ((bits >> 23) & 0xFF) - 127 + 15;
+      const mant = (bits >> 13) & 0x3FF;
+      if (exp <= 0) u16[i] = sign;
+      else if (exp >= 31) u16[i] = sign | 0x7C00;
+      else u16[i] = sign | (exp << 10) | mant;
+    }
+    device.queue.writeTexture(
+      { texture: rdA },
+      u16.buffer,
+      { bytesPerRow: SIM_RES * 8, rowsPerImage: SIM_RES },
+      { width: SIM_RES, height: SIM_RES }
+    );
+    // Copy same init to rdB
+    device.queue.writeTexture(
+      { texture: rdB },
+      u16.buffer,
+      { bytesPerRow: SIM_RES * 8, rowsPerImage: SIM_RES },
+      { width: SIM_RES, height: SIM_RES }
+    );
+  }
+
+  // ─── Temperature texture init (0.5 = ambient everywhere) ──────────────
+  {
+    const pixels = new Float32Array(SIM_RES * SIM_RES * 4);
+    for (let i = 0; i < SIM_RES * SIM_RES; i++) {
+      pixels[i * 4] = 0.5;     // R = temperature = 0.5 (ambient)
+      pixels[i * 4 + 1] = 0.0;
+      pixels[i * 4 + 2] = 0.0;
+      pixels[i * 4 + 3] = 1.0;
+    }
+    const u16 = new Uint16Array(SIM_RES * SIM_RES * 4);
+    for (let i = 0; i < pixels.length; i++) {
+      const f = pixels[i];
+      const view = new DataView(new ArrayBuffer(4));
+      view.setFloat32(0, f);
+      const bits = view.getUint32(0);
+      const sign = (bits >> 16) & 0x8000;
+      const exp = ((bits >> 23) & 0xFF) - 127 + 15;
+      const mant = (bits >> 13) & 0x3FF;
+      if (exp <= 0) u16[i] = sign;
+      else if (exp >= 31) u16[i] = sign | 0x7C00;
+      else u16[i] = sign | (exp << 10) | mant;
+    }
+    device.queue.writeTexture(
+      { texture: tempA },
+      u16.buffer,
+      { bytesPerRow: SIM_RES * 8, rowsPerImage: SIM_RES },
+      { width: SIM_RES, height: SIM_RES }
+    );
+    device.queue.writeTexture(
+      { texture: tempB },
+      u16.buffer,
+      { bytesPerRow: SIM_RES * 8, rowsPerImage: SIM_RES },
+      { width: SIM_RES, height: SIM_RES }
+    );
+  }
+
 
   // ─── Batch splat GPU resources ──────────────────────────────────────────
   const splatBuf = device.createBuffer({
@@ -2304,6 +2834,43 @@ async function main() {
      bg(cleanupBGL, [ubuf(cleanupBuf), tview(velA), tview(dyeB), tview(velB), tview(dyeA)])],
     [bg(cleanupBGL, [ubuf(cleanupBuf), tview(velB), tview(dyeA), tview(velA), tview(dyeB)]),
      bg(cleanupBGL, [ubuf(cleanupBuf), tview(velB), tview(dyeB), tview(velA), tview(dyeA)])],
+  ];
+  // RD step: reads rd[cur], writes rd[1-cur] — ping-pong
+  const rdStepBGs = [
+    bg(rdPipe.layout, [ubuf(rdBuf), tview(rdA), tview(rdB)]),
+    bg(rdPipe.layout, [ubuf(rdBuf), tview(rdB), tview(rdA)]),
+  ];
+  // RD coupling: reads rd[cur] + dye[cur] + vel[cur], writes dye[1-cur] + vel[1-cur]
+  // [rdFlip][velFlip][dyeFlip] — 8 variants
+  const rdCouplingBGs = [
+    [[bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdA), tview(dyeA), tview(velA), tview(dyeB), tview(velB)]),
+      bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdA), tview(dyeB), tview(velA), tview(dyeA), tview(velB)])],
+     [bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdA), tview(dyeA), tview(velB), tview(dyeB), tview(velA)]),
+      bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdA), tview(dyeB), tview(velB), tview(dyeA), tview(velA)])]],
+    [[bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdB), tview(dyeA), tview(velA), tview(dyeB), tview(velB)]),
+      bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdB), tview(dyeB), tview(velA), tview(dyeA), tview(velB)])],
+     [bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdB), tview(dyeA), tview(velB), tview(dyeB), tview(velA)]),
+      bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdB), tview(dyeB), tview(velB), tview(dyeA), tview(velA)])]],
+  ];
+  // ─── Temperature/Buoyancy bind groups ──────────────────────────────────
+  // tempSplat: uses batchSplatBGL (uniform, texture, storage-tex, storage-buf, uniform)
+  const tempSplatBGs = [
+    bg(batchSplatBGL, [ubuf(paramBuf), tview(tempA), tview(tempB), ubuf(splatBuf), ubuf(splatCountBuf)]),
+    bg(batchSplatBGL, [ubuf(paramBuf), tview(tempB), tview(tempA), ubuf(splatBuf), ubuf(splatCountBuf)]),
+  ];
+  // tempAdvect: reads vel[cur] + temp[cur], writes temp[1-cur] — 4 variants [velFlip][tempFlip]
+  const tempAdvectBGs = [
+    [bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velA), tview(tempA), linearSampler, tview(tempB)]),
+     bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velA), tview(tempB), linearSampler, tview(tempA)])],
+    [bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velB), tview(tempA), linearSampler, tview(tempB)]),
+     bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velB), tview(tempB), linearSampler, tview(tempA)])],
+  ];
+  // buoyancy: reads temp[cur] + vel[cur], writes vel[1-cur] — 4 variants [tempFlip][velFlip]
+  const buoyancyBGs = [
+    [bg(buoyancyPipe.layout, [ubuf(buoyancyBuf), tview(tempA), tview(velA), tview(velB)]),
+     bg(buoyancyPipe.layout, [ubuf(buoyancyBuf), tview(tempA), tview(velB), tview(velA)])],
+    [bg(buoyancyPipe.layout, [ubuf(buoyancyBuf), tview(tempB), tview(velA), tview(velB)]),
+     bg(buoyancyPipe.layout, [ubuf(buoyancyBuf), tview(tempB), tview(velB), tview(velA)])],
   ];
   // display: reads dye[cur]
   const displayBGs = [
@@ -2944,6 +3511,10 @@ async function main() {
     }
   }
 
+  // ─── Chemotaxis proxy grid (32x32) ─────────────────────────────────────
+  const CHEMO_RES = 32;
+  const dyeProxyGrid = new Float32Array(CHEMO_RES * CHEMO_RES);
+
   // ─── Flockers — Reynolds boids + blob interaction ──────────────────────
   const flockers = [];
   let lastFlockCount = 0;
@@ -3031,6 +3602,21 @@ async function main() {
         dvy += dy / d * force;
       }
 
+      // Chemotaxis: steer toward higher dye proxy values
+      const chemo = state.flockChemotaxis;
+      if (chemo > 0.01) {
+        const gx = Math.floor(f.x * CHEMO_RES), gy = Math.floor(f.y * CHEMO_RES);
+        const eps = 1;
+        if (gx > eps && gx < CHEMO_RES - eps - 1 && gy > eps && gy < CHEMO_RES - eps - 1) {
+          const cR = dyeProxyGrid[gy * CHEMO_RES + gx + 1];
+          const cL = dyeProxyGrid[gy * CHEMO_RES + gx - 1];
+          const cU = dyeProxyGrid[(gy + 1) * CHEMO_RES + gx];
+          const cD = dyeProxyGrid[(gy - 1) * CHEMO_RES + gx];
+          dvx += (cR - cL) * chemo * 0.005;
+          dvy += (cU - cD) * chemo * 0.005;
+        }
+      }
+
       // Random jitter
       dvx += (Math.random() - 0.5) * 0.001;
       dvy += (Math.random() - 0.5) * 0.001;
@@ -3079,13 +3665,30 @@ async function main() {
     updateBlobs(dt);
     updateFlockers(dt);
 
+    // Mood lighting: shift colors with slow sinusoidal cycle
+    let moodBaseColor = state.baseColor;
+    let moodAccentColor = state.accentColor;
+    let moodTipColor = state.tipColor;
+    if (state.moodAmount > 0.01) {
+      const moodPhase = time * state.moodSpeed * 0.1;
+      const warmShift = Math.sin(moodPhase) * state.moodAmount * 0.15;
+      const shiftColor = (c) => [
+        Math.max(0, Math.min(2, c[0] + warmShift)),
+        Math.max(0, Math.min(2, c[1] + warmShift * 0.5)),
+        Math.max(0, Math.min(2, c[2] - warmShift * 0.3)),
+      ];
+      moodBaseColor = shiftColor(state.baseColor);
+      moodAccentColor = shiftColor(state.accentColor);
+      moodTipColor = shiftColor(state.tipColor);
+    }
+
     // Pre-convert colors to Oklab on CPU (avoids per-particle GPU conversion)
     const okGlitBase = linearToOklabCPU(state.glitterColor);
     const okGlitAccent = linearToOklabCPU(state.glitterAccent);
     const okGlitTip = linearToOklabCPU(state.glitterTip);
-    const okBaseCol = linearToOklabCPU(state.baseColor);
-    const okAccentCol = linearToOklabCPU(state.accentColor);
-    const okTipCol = linearToOklabCPU(state.tipColor);
+    const okBaseCol = linearToOklabCPU(moodBaseColor);
+    const okAccentCol = linearToOklabCPU(moodAccentColor);
+    const okTipCol = linearToOklabCPU(moodTipColor);
 
     // Update screen/particle/display uniform buffers
     particleUBData[0] = canvas.width;
@@ -3126,7 +3729,14 @@ async function main() {
     displayUBData[17] = okTipCol[1];
     displayUBData[18] = okTipCol[2];
     displayUBData[19] = state.roughness;
+    displayUBData[20] = state.depthAmount;
+    displayUBData[21] = state.depthSpeed;
+    displayUBData[22] = 0; // pad
+    displayUBData[23] = 0; // pad
     device.queue.writeBuffer(displayUB, 0, displayUBData);
+
+    // Decay + update chemotaxis proxy grid
+    for (let i = 0; i < CHEMO_RES * CHEMO_RES; i++) dyeProxyGrid[i] *= 0.95;
 
     // Collect splats into pre-allocated buffer
     splatCount = 0;
@@ -3273,6 +3883,15 @@ async function main() {
     }
     if (pointer.moved) { pointer.moved = false; }
 
+    // Update chemotaxis proxy grid from splats
+    for (let i = 0; i < splatCount; i++) {
+      const sx = splatArrayData[i * 8], sy = splatArrayData[i * 8 + 1];
+      const gx = Math.floor(sx * CHEMO_RES), gy = Math.floor(sy * CHEMO_RES);
+      if (gx >= 0 && gx < CHEMO_RES && gy >= 0 && gy < CHEMO_RES) {
+        dyeProxyGrid[gy * CHEMO_RES + gx] = Math.min(dyeProxyGrid[gy * CHEMO_RES + gx] + 1.0, 10.0);
+      }
+    }
+
     // ── Upload batch splat data + write simulation params ──
     splatCountUData[0] = splatCount;
     if (splatCount > 0) device.queue.writeBuffer(splatCountBuf, 0, splatCountUData);
@@ -3299,6 +3918,16 @@ async function main() {
       p2.dispatchWorkgroups(dispatch, dispatch);
       p2.end();
       dyeFlip ^= 1;
+    }
+
+    // ── Temperature Splat (inject heat where dye splats land) ──
+    if (splatCount > 0 && state.tempAmount > 0.01) {
+      const p = enc.beginComputePass();
+      p.setPipeline(tempSplatPipe);
+      p.setBindGroup(0, tempSplatBGs[tempFlip]);
+      p.dispatchWorkgroups(dispatch, dispatch);
+      p.end();
+      tempFlip ^= 1;
     }
 
     // ── Pass 2+3: Fused Curl + Vorticity (reads vel[cur], writes curlTex + vel[1-cur]) ──
@@ -3361,6 +3990,36 @@ async function main() {
       dyeFlip ^= 1;
     }
 
+    // ── Temperature Advect (reads vel[cur] + temp[cur], writes temp[1-cur]) ──
+    if (state.tempAmount > 0.01) {
+      tempParamData[0] = dt;
+      tempParamData[1] = 1.0 / SIM_RES;
+      tempParamData[2] = SIM_RES;
+      tempParamData[3] = state.tempDissipation;
+      device.queue.writeBuffer(tempParamBuf, 0, tempParamData);
+      const p = enc.beginComputePass();
+      p.setPipeline(tempAdvectPipe.pipeline);
+      p.setBindGroup(0, tempAdvectBGs[velFlip][tempFlip]);
+      p.dispatchWorkgroups(dispatch, dispatch);
+      p.end();
+      tempFlip ^= 1;
+    }
+
+    // ── Buoyancy (reads temp[cur] + vel[cur], writes vel[1-cur]) ──
+    if (state.tempAmount > 0.01 && state.tempBuoyancy > 0.01) {
+      buoyancyData[0] = SIM_RES;
+      buoyancyData[1] = dt;
+      buoyancyData[2] = state.tempBuoyancy * 50.0;
+      buoyancyData[3] = 0;
+      device.queue.writeBuffer(buoyancyBuf, 0, buoyancyData);
+      const p = enc.beginComputePass();
+      p.setPipeline(buoyancyPipe.pipeline);
+      p.setBindGroup(0, buoyancyBGs[tempFlip][velFlip]);
+      p.dispatchWorkgroups(dispatch, dispatch);
+      p.end();
+      velFlip ^= 1;
+    }
+
     // ── Curl Noise (field-wide velocity perturbation) ──
     if (state.noiseAmount > 0.01) {
       noiseData[0] = time;
@@ -3401,6 +4060,40 @@ async function main() {
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
       dyeFlip ^= 1;
+    }
+
+    // ── Reaction-Diffusion (Gray-Scott, gated by rdAmount) ──
+    if (state.rdAmount > 0.01) {
+      rdData[0] = time;
+      rdData[1] = state.rdAmount;
+      rdData[2] = SIM_RES;
+      rdData[3] = state.rdFeedRate;
+      rdData[4] = state.rdKillRate;
+      rdData[5] = state.rdDyeAmount;
+      rdData[6] = state.rdForceAmount;
+      rdData[7] = state.rdScale;
+      device.queue.writeBuffer(rdBuf, 0, rdData);
+
+      // Run multiple RD iterations per frame for speed
+      for (let i = 0; i < 4; i++) {
+        const p = enc.beginComputePass();
+        p.setPipeline(rdPipe.pipeline);
+        p.setBindGroup(0, rdStepBGs[rdFlip]);
+        p.dispatchWorkgroups(dispatch, dispatch);
+        p.end();
+        rdFlip ^= 1;
+      }
+
+      // Coupling: inject dye + velocity from RD field
+      if (state.rdDyeAmount > 0.01 || state.rdForceAmount > 0.01) {
+        const p = enc.beginComputePass();
+        p.setPipeline(rdCouplingPipeline);
+        p.setBindGroup(0, rdCouplingBGs[rdFlip][velFlip][dyeFlip]);
+        p.dispatchWorkgroups(dispatch, dispatch);
+        p.end();
+        dyeFlip ^= 1;
+        velFlip ^= 1;
+      }
     }
 
     // ── Sphere Cleanup (hard-zero vel+dye outside sphere) ──
@@ -3728,6 +4421,36 @@ async function main() {
   wireSlider('flockBlobReact', 'flockBlobReact');
   wireSlider('noiseDyeIntensity', 'noiseDyeIntensity');
   wireSlider('dyeNoiseAmount', 'dyeNoiseAmount');
+  // RD
+  wireSlider('rdAmount', 'rdAmount');
+  wireSlider('rdFeedRate', 'rdFeedRate', v => v.toFixed(3));
+  wireSlider('rdKillRate', 'rdKillRate', v => v.toFixed(3));
+  wireSlider('rdDyeAmount', 'rdDyeAmount');
+  wireSlider('rdForceAmount', 'rdForceAmount');
+  wireSlider('rdScale', 'rdScale');
+  // Temp
+  wireSlider('tempAmount', 'tempAmount');
+  wireSlider('tempBuoyancy', 'tempBuoyancy');
+  wireSlider('tempDissipation', 'tempDissipation', v => v.toFixed(3));
+  wireSlider('tempDyeTint', 'tempDyeTint');
+  // Chemotaxis / Depth / Mood / Palette
+  wireSlider('flockChemotaxis', 'flockChemotaxis');
+  wireSlider('depthAmount', 'depthAmount');
+  wireSlider('depthSpeed', 'depthSpeed');
+  wireSlider('moodAmount', 'moodAmount');
+  wireSlider('moodSpeed', 'moodSpeed');
+  // Palette slider with special handling
+  (() => {
+    const slider = document.getElementById('paletteIndex');
+    const valSpan = document.getElementById('paletteIndexVal');
+    if (!slider) return;
+    slider.addEventListener('input', () => {
+      const idx = parseInt(slider.value);
+      state.paletteIndex = idx;
+      if (valSpan) valSpan.textContent = idx < 0 ? 'Manual' : PALETTES[idx]?.name || idx;
+      if (idx >= 0) { applyPalette(idx); syncAllUI(); }
+    });
+  })();
   wireSlider('bloomIntensity', 'bloomIntensity', v => v.toFixed(2));
   wireSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
   wireSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
@@ -3789,6 +4512,31 @@ async function main() {
     syncSlider('flockBlobReact', 'flockBlobReact');
     syncSlider('noiseDyeIntensity', 'noiseDyeIntensity');
     syncSlider('dyeNoiseAmount', 'dyeNoiseAmount');
+    // RD
+    syncSlider('rdAmount', 'rdAmount');
+    syncSlider('rdFeedRate', 'rdFeedRate', v => v.toFixed(3));
+    syncSlider('rdKillRate', 'rdKillRate', v => v.toFixed(3));
+    syncSlider('rdDyeAmount', 'rdDyeAmount');
+    syncSlider('rdForceAmount', 'rdForceAmount');
+    syncSlider('rdScale', 'rdScale');
+    // Temp
+    syncSlider('tempAmount', 'tempAmount');
+    syncSlider('tempBuoyancy', 'tempBuoyancy');
+    syncSlider('tempDissipation', 'tempDissipation', v => v.toFixed(3));
+    syncSlider('tempDyeTint', 'tempDyeTint');
+    // Chemotaxis / Depth / Mood
+    syncSlider('flockChemotaxis', 'flockChemotaxis');
+    syncSlider('depthAmount', 'depthAmount');
+    syncSlider('depthSpeed', 'depthSpeed');
+    syncSlider('moodAmount', 'moodAmount');
+    syncSlider('moodSpeed', 'moodSpeed');
+    // Palette
+    {
+      const palSlider = document.getElementById('paletteIndex');
+      const palVal = document.getElementById('paletteIndexVal');
+      if (palSlider) palSlider.value = state.paletteIndex;
+      if (palVal) palVal.textContent = state.paletteIndex < 0 ? 'Manual' : (PALETTES[state.paletteIndex]?.name || state.paletteIndex);
+    }
     syncColor('baseColor', 'baseColor');
     syncColor('accentColor', 'accentColor');
     syncColor('glitterColor', 'glitterColor');
@@ -3874,6 +4622,26 @@ async function main() {
     // Dye noise
     state.noiseDyeIntensity = Math.random();
     state.dyeNoiseAmount = Math.random() * 0.15;
+    // RD
+    state.rdAmount = Math.random();
+    state.rdFeedRate = 0.01 + Math.random() * 0.07;
+    state.rdKillRate = 0.04 + Math.random() * 0.03;
+    state.rdDyeAmount = Math.random();
+    state.rdForceAmount = Math.random();
+    state.rdScale = Math.random();
+    // Temp
+    state.tempAmount = Math.random();
+    state.tempBuoyancy = Math.random();
+    state.tempDissipation = 0.95 + Math.random() * 0.05;
+    state.tempDyeTint = Math.random();
+    // Chemotaxis / Depth / Mood
+    state.flockChemotaxis = Math.random();
+    state.depthAmount = Math.random();
+    state.depthSpeed = Math.random();
+    state.moodAmount = Math.random();
+    state.moodSpeed = Math.random();
+    state.paletteIndex = Math.floor(Math.random() * 51) - 1; // -1 to 49
+    if (state.paletteIndex >= 0) applyPalette(state.paletteIndex);
     // NOTE: particleCount is intentionally NOT randomized
     syncAllUI();
   });
@@ -3923,6 +4691,22 @@ async function main() {
     flockBlobReact: { min: -1, max: 1, step: 0.01 },
     noiseDyeIntensity: { min: 0, max: 1, step: 0.01 },
     dyeNoiseAmount: { min: 0, max: 0.15, step: 0.001 },
+    rdAmount: { min: 0, max: 1, step: 0.01 },
+    rdFeedRate: { min: 0.01, max: 0.08, step: 0.001 },
+    rdKillRate: { min: 0.04, max: 0.07, step: 0.001 },
+    rdDyeAmount: { min: 0, max: 1, step: 0.01 },
+    rdForceAmount: { min: 0, max: 1, step: 0.01 },
+    rdScale: { min: 0, max: 1, step: 0.01 },
+    tempAmount: { min: 0, max: 1, step: 0.01 },
+    tempBuoyancy: { min: 0, max: 1, step: 0.01 },
+    tempDissipation: { min: 0.95, max: 1.0, step: 0.001 },
+    tempDyeTint: { min: 0, max: 1, step: 0.01 },
+    flockChemotaxis: { min: 0, max: 1, step: 0.01 },
+    depthAmount: { min: 0, max: 1, step: 0.01 },
+    depthSpeed: { min: 0, max: 1, step: 0.01 },
+    moodAmount: { min: 0, max: 1, step: 0.01 },
+    moodSpeed: { min: 0, max: 1, step: 0.01 },
+    paletteIndex: { min: -1, max: 49, step: 1 },
   };
   const morphColors = ['baseColor', 'accentColor', 'tipColor', 'glitterColor', 'glitterAccent', 'glitterTip', 'sheenColor'];
 
@@ -4117,6 +4901,22 @@ async function main() {
     if (!name) return;
     if (!confirm(`Delete example "${name}"?`)) return;
     await bo.deleteExample(name);
+  });
+
+  // ─── Preset Browser ─────────────────────────────────────────────────
+  let currentPresetIdx = -1;
+  const presetNameEl = document.getElementById('presetName');
+  document.getElementById('presetPrev')?.addEventListener('click', () => {
+    if (bo.examples.length === 0) return;
+    currentPresetIdx = (currentPresetIdx - 1 + bo.examples.length) % bo.examples.length;
+    bo.loadExample(bo.examples[currentPresetIdx], state, syncAllUI);
+    if (presetNameEl) presetNameEl.textContent = bo.examples[currentPresetIdx].name;
+  });
+  document.getElementById('presetNext')?.addEventListener('click', () => {
+    if (bo.examples.length === 0) return;
+    currentPresetIdx = (currentPresetIdx + 1) % bo.examples.length;
+    bo.loadExample(bo.examples[currentPresetIdx], state, syncAllUI);
+    if (presetNameEl) presetNameEl.textContent = bo.examples[currentPresetIdx].name;
   });
 
   // ─── Recording UI ────────────────────────────────────────────────────

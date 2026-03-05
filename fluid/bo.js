@@ -56,6 +56,25 @@ export const SLIDER_SPACE = {
   // Dye-coupled noise
   noiseDyeIntensity: { min: 0,    max: 1,     step: 0.01 },
   dyeNoiseAmount:    { min: 0,    max: 0.15,  step: 0.001 },
+  // Reaction-diffusion
+  rdAmount:          { min: 0,    max: 1,     step: 0.01 },
+  rdFeedRate:        { min: 0.01, max: 0.08,  step: 0.001 },
+  rdKillRate:        { min: 0.04, max: 0.07,  step: 0.001 },
+  rdDyeAmount:       { min: 0,    max: 1,     step: 0.01 },
+  rdForceAmount:     { min: 0,    max: 1,     step: 0.01 },
+  rdScale:           { min: 0,    max: 1,     step: 0.01 },
+  // Temperature/buoyancy
+  tempAmount:        { min: 0,    max: 1,     step: 0.01 },
+  tempBuoyancy:      { min: 0,    max: 1,     step: 0.01 },
+  tempDissipation:   { min: 0.95, max: 1.0,   step: 0.001 },
+  tempDyeTint:       { min: 0,    max: 1,     step: 0.01 },
+  // Chemotaxis / Depth / Mood
+  flockChemotaxis:   { min: 0,    max: 1,     step: 0.01 },
+  depthAmount:       { min: 0,    max: 1,     step: 0.01 },
+  depthSpeed:        { min: 0,    max: 1,     step: 0.01 },
+  moodAmount:        { min: 0,    max: 1,     step: 0.01 },
+  moodSpeed:         { min: 0,    max: 1,     step: 0.01 },
+  paletteIndex:      { min: -1,   max: 49,    step: 1 },
   // Material properties
   metallic:          { min: 0,    max: 1,     step: 0.01 },
   roughness:         { min: 0,    max: 1,     step: 0.01 },

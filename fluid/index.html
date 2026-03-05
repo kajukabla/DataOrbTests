@@ -422,6 +422,77 @@
         <label>Dye Noise <span class="val" id="dyeNoiseAmountVal">0.0</span></label>
         <input type="range" id="dyeNoiseAmount" min="0.0" max="0.15" step="0.001" value="0.0">
       </div>
+      <!-- Reaction-Diffusion -->
+      <div class="setting-group">
+        <label>RD Amount <span class="val" id="rdAmountVal">0.00</span></label>
+        <input type="range" id="rdAmount" min="0.0" max="1.0" step="0.01" value="0.0">
+      </div>
+      <div class="setting-group">
+        <label>RD Feed Rate <span class="val" id="rdFeedRateVal">0.04</span></label>
+        <input type="range" id="rdFeedRate" min="0.01" max="0.08" step="0.001" value="0.04">
+      </div>
+      <div class="setting-group">
+        <label>RD Kill Rate <span class="val" id="rdKillRateVal">0.06</span></label>
+        <input type="range" id="rdKillRate" min="0.04" max="0.07" step="0.001" value="0.06">
+      </div>
+      <div class="setting-group">
+        <label>RD Dye Amount <span class="val" id="rdDyeAmountVal">0.00</span></label>
+        <input type="range" id="rdDyeAmount" min="0.0" max="1.0" step="0.01" value="0.0">
+      </div>
+      <div class="setting-group">
+        <label>RD Force <span class="val" id="rdForceAmountVal">0.00</span></label>
+        <input type="range" id="rdForceAmount" min="0.0" max="1.0" step="0.01" value="0.0">
+      </div>
+      <div class="setting-group">
+        <label>RD Scale <span class="val" id="rdScaleVal">0.50</span></label>
+        <input type="range" id="rdScale" min="0.0" max="1.0" step="0.01" value="0.5">
+      </div>
+      <!-- Temperature/Buoyancy -->
+      <div class="setting-group">
+        <label>Temp Amount <span class="val" id="tempAmountVal">0.00</span></label>
+        <input type="range" id="tempAmount" min="0.0" max="1.0" step="0.01" value="0.0">
+      </div>
+      <div class="setting-group">
+        <label>Temp Buoyancy <span class="val" id="tempBuoyancyVal">0.50</span></label>
+        <input type="range" id="tempBuoyancy" min="0.0" max="1.0" step="0.01" value="0.5">
+      </div>
+      <div class="setting-group">
+        <label>Temp Dissipation <span class="val" id="tempDissipationVal">0.990</span></label>
+        <input type="range" id="tempDissipation" min="0.95" max="1.0" step="0.001" value="0.99">
+      </div>
+      <div class="setting-group">
+        <label>Temp Dye Tint <span class="val" id="tempDyeTintVal">0.00</span></label>
+        <input type="range" id="tempDyeTint" min="0.0" max="1.0" step="0.01" value="0.0">
+      </div>
+      <!-- Chemotaxis -->
+      <div class="setting-group">
+        <label>Flock Chemotaxis <span class="val" id="flockChemotaxisVal">0.00</span></label>
+        <input type="range" id="flockChemotaxis" min="0.0" max="1.0" step="0.01" value="0.0">
+      </div>
+      <!-- Depth/Parallax -->
+      <div class="setting-group">
+        <label>Depth Amount <span class="val" id="depthAmountVal">0.00</span></label>
+        <input type="range" id="depthAmount" min="0.0" max="1.0" step="0.01" value="0.0">
+      </div>
+      <div class="setting-group">
+        <label>Depth Speed <span class="val" id="depthSpeedVal">0.30</span></label>
+        <input type="range" id="depthSpeed" min="0.0" max="1.0" step="0.01" value="0.3">
+      </div>
+      <!-- Mood Lighting -->
+      <div class="setting-group">
+        <label>Mood Amount <span class="val" id="moodAmountVal">0.00</span></label>
+        <input type="range" id="moodAmount" min="0.0" max="1.0" step="0.01" value="0.0">
+      </div>
+      <div class="setting-group">
+        <label>Mood Speed <span class="val" id="moodSpeedVal">0.30</span></label>
+        <input type="range" id="moodSpeed" min="0.0" max="1.0" step="0.01" value="0.3">
+      </div>
+      <!-- Palette -->
+      <div class="setting-group">
+        <label>Palette <span class="val" id="paletteIndexVal">-1</span></label>
+        <input type="range" id="paletteIndex" min="-1" max="49" step="1" value="-1">
+      </div>
+      <!-- Bloom -->
       <div class="setting-group">
         <label>Bloom Intensity <span class="val" id="bloomIntensityVal">0.00</span></label>
         <input type="range" id="bloomIntensity" min="0.0" max="25.0" step="0.01" value="0.00">
@@ -482,6 +553,12 @@
     </div>
     <div id="boCount" style="color:#aaa; font-size:13px; font-family:system-ui,-apple-system,sans-serif; margin-top:4px;"></div>
     <div id="boPhase" style="color:#666; font-size:10px; font-family:system-ui,-apple-system,sans-serif;"></div>
+  </div>
+
+  <div id="presetBrowser" style="position:fixed; top:10px; left:50%; transform:translateX(-50%); z-index:100; display:flex; gap:12px; align-items:center; font-family:system-ui; color:#aaa; font-size:13px;">
+    <button id="presetPrev" style="background:none; border:1px solid #555; color:#aaa; padding:2px 8px; cursor:pointer; border-radius:4px;">&#9664;</button>
+    <span id="presetName" style="min-width:120px; text-align:center;">&mdash;</span>
+    <button id="presetNext" style="background:none; border:1px solid #555; color:#aaa; padding:2px 8px; cursor:pointer; border-radius:4px;">&#9654;</button>
   </div>
 
   <script type="module" src="main.js"></script>
