@@ -2951,13 +2951,18 @@ async function main() {
   function initFlockers(count) {
     flockers.length = 0;
     for (let i = 0; i < count; i++) {
-      const sx = 0.3 + Math.random() * 0.4;
-      const sy = 0.3 + Math.random() * 0.4;
+      // Start in a ring around center with random angle
+      const angle = (i / count) * Math.PI * 2 + Math.random() * 0.3;
+      const r = 0.08 + Math.random() * 0.12;
+      const sx = 0.5 + Math.cos(angle) * r;
+      const sy = 0.5 + Math.sin(angle) * r;
       flockers.push({
         x: sx, y: sy, _prevX: sx, _prevY: sy,
-        vx: (Math.random() - 0.5) * 0.02,
-        vy: (Math.random() - 0.5) * 0.02,
+        vx: 0, vy: 0,
         colorPhase: i * 0.12,
+        // Per-flocker orbit params for baseline circular motion
+        orbitSpeed: 0.3 + Math.random() * 0.4,
+        orbitDir: Math.random() < 0.5 ? 1 : -1,
       });
     }
   }
@@ -2972,90 +2977,85 @@ async function main() {
     const coh = state.flockCohesion;
     const blobReact = state.flockBlobReact;
     const speed = state.flockSpeed;
-    const maxSpd = (0.1 + speed * 0.6) * dt;
-
-    // Compute flock centroid for global cohesion (prevents splitting)
-    let flockCx = 0, flockCy = 0;
-    for (const f of flockers) { flockCx += f.x; flockCy += f.y; }
-    flockCx /= flockers.length; flockCy /= flockers.length;
+    const maxSpd = (0.002 + speed * 0.008);
+    const FLOCK_R = 0.22; // keep flockers well inside visible area
 
     for (const f of flockers) {
+      // Start with desired velocity = 0
+      let dvx = 0, dvy = 0;
+
+      // Baseline: gentle orbit around center
+      const toCx = f.x - 0.5, toCy = f.y - 0.5;
+      const distC = Math.sqrt(toCx * toCx + toCy * toCy) + 0.001;
+      // Tangential orbit velocity
+      const orbSpd = f.orbitSpeed * speed * 0.004;
+      dvx += -toCy / distC * orbSpd * f.orbitDir;
+      dvy += toCx / distC * orbSpd * f.orbitDir;
+
+      // Pull toward preferred orbit radius (keeps them from center and edges)
+      const preferredR = 0.06 + Math.random() * 0.001; // tiny jitter
+      const rDiff = distC - preferredR;
+      dvx -= toCx / distC * rDiff * 0.01;
+      dvy -= toCy / distC * rDiff * 0.01;
+
+      // Flocking: separation, alignment, cohesion
       let sx = 0, sy = 0, sepN = 0;
       let ax = 0, ay = 0, cx = 0, cy = 0, n = 0;
-
-      // Flocking forces from neighbors (perception radius ~0.24)
       for (const other of flockers) {
         if (other === f) continue;
         const dx = other.x - f.x, dy = other.y - f.y;
         const d2 = dx * dx + dy * dy;
-        if (d2 > 0.06) continue;
-        const d = Math.sqrt(d2);
+        if (d2 > 0.04) continue; // perception radius ~0.2
+        const d = Math.sqrt(d2) + 0.0001;
         n++;
-        // Separation — normalized by neighbor count
-        if (d < 0.05 && d > 0.0001) { sx -= dx / d; sy -= dy / d; sepN++; }
+        if (d < 0.03) { sx -= dx / d; sy -= dy / d; sepN++; }
         ax += other.vx; ay += other.vy;
         cx += other.x; cy += other.y;
       }
-
-      // Normalize separation so it doesn't explode with many neighbors
       if (sepN > 0) { sx /= sepN; sy /= sepN; }
-
       if (n > 0) {
         ax /= n; ay /= n;
         cx = cx / n - f.x; cy = cy / n - f.y;
+        dvx += sx * sep * 0.003 + (ax - f.vx) * ali * 0.1 + cx * coh * 0.005;
+        dvy += sy * sep * 0.003 + (ay - f.vy) * ali * 0.1 + cy * coh * 0.005;
       }
 
-      // Apply flocking forces
-      f.vx += sx * sep * 0.15 + (ax - f.vx) * ali * 0.08 + cx * coh * 0.03;
-      f.vy += sy * sep * 0.15 + (ay - f.vy) * ali * 0.08 + cy * coh * 0.03;
-
-      // Global cohesion toward flock centroid (prevents group splitting)
-      f.vx += (flockCx - f.x) * 0.02;
-      f.vy += (flockCy - f.y) * 0.02;
-
-      // Blob interaction: positive = attract, negative = flee
-      for (const blob of blobs) {
-        const dx = blob.x - f.x, dy = blob.y - f.y;
+      // Blob + draw bot interaction
+      const reactTargets = [...blobs, ...drawBots];
+      for (const t of reactTargets) {
+        const dx = t.x - f.x, dy = t.y - f.y;
         const d = Math.sqrt(dx * dx + dy * dy) + 0.001;
-        const force = blobReact * 0.03 / (d * d + 0.01);
-        f.vx += dx / d * force;
-        f.vy += dy / d * force;
+        if (d > 0.2) continue;
+        const force = blobReact * 0.001 / (d + 0.02);
+        dvx += dx / d * force;
+        dvy += dy / d * force;
       }
 
-      // Draw bot interaction (same react as blobs)
-      for (const bot of drawBots) {
-        const dx = bot.x - f.x, dy = bot.y - f.y;
-        const d = Math.sqrt(dx * dx + dy * dy) + 0.001;
-        const force = blobReact * 0.02 / (d * d + 0.01);
-        f.vx += dx / d * force;
-        f.vy += dy / d * force;
-      }
+      // Random jitter
+      dvx += (Math.random() - 0.5) * 0.001;
+      dvy += (Math.random() - 0.5) * 0.001;
 
-      // Center pull — strong near edge, gentle in center
-      const toCx = 0.5 - f.x, toCy = 0.5 - f.y;
-      const distFromCenter = Math.sqrt(toCx * toCx + toCy * toCy);
-      const edgePull = 0.005 + distFromCenter * distFromCenter * 0.8;
-      f.vx += toCx * edgePull;
-      f.vy += toCy * edgePull;
-
-      // Slight random jitter for organic feel
-      f.vx += (Math.random() - 0.5) * 0.003;
-      f.vy += (Math.random() - 0.5) * 0.003;
-
-      // Velocity damping (prevents runaway accumulation)
-      f.vx *= 0.95;
-      f.vy *= 0.95;
+      // Smooth velocity update (heavy damping for stability)
+      f.vx = f.vx * 0.85 + dvx * 0.15;
+      f.vy = f.vy * 0.85 + dvy * 0.15;
 
       // Speed limit
       const spd = Math.sqrt(f.vx * f.vx + f.vy * f.vy);
-      if (spd > maxSpd) {
-        f.vx *= maxSpd / spd;
-        f.vy *= maxSpd / spd;
-      }
+      if (spd > maxSpd) { f.vx *= maxSpd / spd; f.vy *= maxSpd / spd; }
 
       f.x += f.vx;
       f.y += f.vy;
-      clampToSphere(f);
+
+      // Hard boundary — push back smoothly, no jitter
+      const dEdge = Math.sqrt((f.x - 0.5) ** 2 + (f.y - 0.5) ** 2);
+      if (dEdge > FLOCK_R) {
+        const nx = (f.x - 0.5) / dEdge, ny = (f.y - 0.5) / dEdge;
+        f.x = 0.5 + nx * FLOCK_R;
+        f.y = 0.5 + ny * FLOCK_R;
+        // Kill outward velocity component
+        const outward = f.vx * nx + f.vy * ny;
+        if (outward > 0) { f.vx -= outward * nx * 1.5; f.vy -= outward * ny * 1.5; }
+      }
     }
   }
 
