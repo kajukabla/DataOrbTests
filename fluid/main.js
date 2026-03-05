@@ -1334,8 +1334,10 @@ async function main() {
     return;
   }
 
+  const gpuT0 = performance.now();
   console.log('Init: requesting GPU adapter...');
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  console.log(`Init: adapter acquired (${(performance.now() - gpuT0).toFixed(0)}ms)`);
   if (!adapter) {
     errorDiv.style.display = 'block';
     errorDiv.textContent = 'No WebGPU adapter found.';
@@ -1344,13 +1346,28 @@ async function main() {
   }
 
   console.log('Init: requesting GPU device...');
+  const deviceT0 = performance.now();
   const device = await adapter.requestDevice({
     requiredLimits: {
       maxBufferSize: Math.min(adapter.limits.maxBufferSize, 1024 * 1024 * 1024),
       maxStorageBufferBindingSize: Math.min(adapter.limits.maxStorageBufferBindingSize, 1024 * 1024 * 1024),
     },
   });
+  console.log(`Init: device acquired (${(performance.now() - deviceT0).toFixed(0)}ms, total GPU: ${(performance.now() - gpuT0).toFixed(0)}ms)`);
   device.lost.then(info => console.error('WebGPU device lost:', info.message));
+
+  // GPU queue depth tracking — cap pending frames to prevent unbounded queue buildup
+  let frameRunning = true;
+  let gpuFramesPending = 0;
+  let gpuFramesSkipped = 0;
+
+  // Stop render loop + destroy device on unload. Queue cap limits pending GPU work
+  // to ~2 frames so destroy() drains in <1ms instead of 17s.
+  window.addEventListener('beforeunload', () => {
+    frameRunning = false;
+    console.log(`beforeunload: gpuFramesPending=${gpuFramesPending}, framesSkipped=${gpuFramesSkipped}`);
+    device.destroy();
+  });
 
   // Derive max particle count from granted limits
   const maxParticles = Math.min(16777216, Math.floor(device.limits.maxStorageBufferBindingSize / PARTICLE_STRIDE));
@@ -2596,7 +2613,16 @@ async function main() {
 
   // ─── Frame loop ─────────────────────────────────────────────────────────
   function frame() {
+    if (!frameRunning) return;
     requestAnimationFrame(frame);
+
+    // Cap GPU queue depth: skip frame if GPU is >2 frames behind
+    if (gpuFramesPending > 2) {
+      gpuFramesSkipped++;
+      return;
+    }
+    gpuFramesPending++;
+
     const dt = 0.016 * state.simSpeed;
     time += dt;
 
@@ -3038,6 +3064,7 @@ async function main() {
     //   rp.draw(3); rp.end(); }
 
     device.queue.submit([enc.finish()]);
+    device.queue.onSubmittedWorkDone().then(() => { gpuFramesPending--; });
   }
 
   // ─── Wire Settings UI ──────────────────────────────────────────────────
