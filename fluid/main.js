@@ -98,10 +98,10 @@ struct Params {
 @group(0) @binding(0) var<uniform> p: Params;
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS: f32 = 0.39;
+const SPHERE_RADIUS: f32 = 0.37;
 `;
 
-const MAX_SPLATS = 64;
+const MAX_SPLATS = 128;
 
 const batchSplatShaderVel = /* wgsl */`
 ${commonHeader}
@@ -503,7 +503,7 @@ fn vnoise(p: vec2f) -> f32 {
 }
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS = 0.39;
+const SPHERE_RADIUS = 0.37;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -571,7 +571,7 @@ struct DyeNoiseParams {
 @group(0) @binding(3) var dyeDst: texture_storage_2d<rgba16float, write>;
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS = 0.39;
+const SPHERE_RADIUS = 0.37;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -626,6 +626,34 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   dye += vec4f(spatialColor * curlDye, 0.0);
 
   textureStore(dyeDst, id.xy, dye);
+}
+`;
+
+// ─── Sphere Cleanup Shader (hard-zero vel+dye outside sphere every frame) ────
+const sphereCleanupShader = /* wgsl */`
+const SPHERE_CENTER = vec2f(0.5, 0.5);
+const SPHERE_RADIUS = 0.37;
+
+struct CleanupParams { simRes: f32, pad1: f32, pad2: f32, pad3: f32, };
+@group(0) @binding(0) var<uniform> cp: CleanupParams;
+@group(0) @binding(1) var velSrc: texture_2d<f32>;
+@group(0) @binding(2) var dyeSrc: texture_2d<f32>;
+@group(0) @binding(3) var velDst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(4) var dyeDst: texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let res = u32(cp.simRes);
+  if (id.x >= res || id.y >= res) { return; }
+  let uv = (vec2f(id.xy) + 0.5) / cp.simRes;
+  let dist = length(uv - SPHERE_CENTER);
+  if (dist > SPHERE_RADIUS) {
+    textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 0.0));
+    textureStore(dyeDst, id.xy, vec4f(0.0, 0.0, 0.0, 0.0));
+  } else {
+    textureStore(velDst, id.xy, textureLoad(velSrc, id.xy, 0));
+    textureStore(dyeDst, id.xy, textureLoad(dyeSrc, id.xy, 0));
+  }
 }
 `;
 
@@ -1244,7 +1272,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // Sphere mask in simulation UV space (already 1:1)
   let centered = uv - vec2f(0.5, 0.5);
   let screenDist = length(centered);
-  let screenRadius = 0.39;
+  let screenRadius = 0.37;
   let mask = 1.0 - smoothstep(screenRadius - 0.003, screenRadius, screenDist);
 
   // ── Glass marble (commented out) ──────────────────────────────────────
@@ -1292,12 +1320,18 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // color *= exp(-absorptionColor * pathLength * 2.0);
   // ─────────────────────────────────────────────────────────────────────
 
-  // Surface gradient for multi-lobe metallic sheen
+  // Surface gradient for multi-lobe metallic sheen (clamp samples to sphere)
   let texel = vec2f(1.0 / 512.0);
-  let iL = dot(textureSampleLevel(dyeTex, samp, uv - vec2f(texel.x * 2.0, 0.0), 0.0).rgb, vec3f(0.3, 0.6, 0.1));
-  let iR = dot(textureSampleLevel(dyeTex, samp, uv + vec2f(texel.x * 2.0, 0.0), 0.0).rgb, vec3f(0.3, 0.6, 0.1));
-  let iB = dot(textureSampleLevel(dyeTex, samp, uv - vec2f(0.0, texel.y * 2.0), 0.0).rgb, vec3f(0.3, 0.6, 0.1));
-  let iT = dot(textureSampleLevel(dyeTex, samp, uv + vec2f(0.0, texel.y * 2.0), 0.0).rgb, vec3f(0.3, 0.6, 0.1));
+  let uvL = uv - vec2f(texel.x * 2.0, 0.0);
+  let uvR = uv + vec2f(texel.x * 2.0, 0.0);
+  let uvB = uv - vec2f(0.0, texel.y * 2.0);
+  let uvT = uv + vec2f(0.0, texel.y * 2.0);
+  // If any sample is outside sphere, use center value instead
+  let cVal = dot(raw, vec3f(0.3, 0.6, 0.1));
+  let iL = select(cVal, dot(textureSampleLevel(dyeTex, samp, uvL, 0.0).rgb, vec3f(0.3, 0.6, 0.1)), length(uvL - vec2f(0.5)) < screenRadius);
+  let iR = select(cVal, dot(textureSampleLevel(dyeTex, samp, uvR, 0.0).rgb, vec3f(0.3, 0.6, 0.1)), length(uvR - vec2f(0.5)) < screenRadius);
+  let iB = select(cVal, dot(textureSampleLevel(dyeTex, samp, uvB, 0.0).rgb, vec3f(0.3, 0.6, 0.1)), length(uvB - vec2f(0.5)) < screenRadius);
+  let iT = select(cVal, dot(textureSampleLevel(dyeTex, samp, uvT, 0.0).rgb, vec3f(0.3, 0.6, 0.1)), length(uvT - vec2f(0.5)) < screenRadius);
   let grad = vec2f(iR - iL, iT - iB);
   let gradLen = length(grad);
   let sheenDir = normalize(vec2f(0.4, 0.6));
@@ -1749,6 +1783,29 @@ async function main() {
     size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   const dyeNoiseData = new Float32Array(8); // [time, amount, simRes, pad, r, g, b, a]
+
+  // ─── Sphere Cleanup pipeline (hard-zero outside sphere every frame) ─────
+  const cleanupBGL = device.createBindGroupLayout({
+    label: 'cleanup_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+    ],
+  });
+  const cleanupModule = device.createShaderModule({ code: sphereCleanupShader, label: 'sphereCleanup' });
+  const cleanupPipeline = device.createComputePipeline({
+    label: 'sphereCleanup',
+    layout: device.createPipelineLayout({ bindGroupLayouts: [cleanupBGL] }),
+    compute: { module: cleanupModule, entryPoint: 'main' },
+  });
+  const cleanupBuf = device.createBuffer({
+    size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const cleanupData = new Float32Array([SIM_RES, 0, 0, 0]);
+  device.queue.writeBuffer(cleanupBuf, 0, cleanupData);
 
   // ─── Display render pipeline ────────────────────────────────────────────
   const displayBGL = device.createBindGroupLayout({
@@ -2240,6 +2297,13 @@ async function main() {
      bg(dyeNoisePipe.layout, [ubuf(dyeNoiseBuf), tview(velA), tview(dyeB), tview(dyeA)])],
     [bg(dyeNoisePipe.layout, [ubuf(dyeNoiseBuf), tview(velB), tview(dyeA), tview(dyeB)]),
      bg(dyeNoisePipe.layout, [ubuf(dyeNoiseBuf), tview(velB), tview(dyeB), tview(dyeA)])],
+  ];
+  // sphereCleanup: reads vel[cur]+dye[cur], writes vel[1-cur]+dye[1-cur] — 4 variants
+  const cleanupBGs = [
+    [bg(cleanupBGL, [ubuf(cleanupBuf), tview(velA), tview(dyeA), tview(velB), tview(dyeB)]),
+     bg(cleanupBGL, [ubuf(cleanupBuf), tview(velA), tview(dyeB), tview(velB), tview(dyeA)])],
+    [bg(cleanupBGL, [ubuf(cleanupBuf), tview(velB), tview(dyeA), tview(velA), tview(dyeB)]),
+     bg(cleanupBGL, [ubuf(cleanupBuf), tview(velB), tview(dyeB), tview(velA), tview(dyeA)])],
   ];
   // display: reads dye[cur]
   const displayBGs = [
@@ -2833,12 +2897,19 @@ async function main() {
     }
   }
 
-  const SPHERE_R_AGENTS = 0.35;
+  const SPHERE_R_AGENTS = 0.30;
 
   function clampToSphere(agent) {
     const dx = agent.x - 0.5, dy = agent.y - 0.5;
     const d = Math.sqrt(dx * dx + dy * dy);
     if (d > SPHERE_R_AGENTS) {
+      // Reflect velocity off boundary
+      const nx = dx / d, ny = dy / d;
+      const outward = agent.vx * nx + agent.vy * ny;
+      if (outward > 0) {
+        agent.vx -= 2 * outward * nx;
+        agent.vy -= 2 * outward * ny;
+      }
       agent.x = 0.5 + dx / d * SPHERE_R_AGENTS * 0.95;
       agent.y = 0.5 + dy / d * SPHERE_R_AGENTS * 0.95;
     }
@@ -2903,8 +2974,14 @@ async function main() {
     const speed = state.flockSpeed;
     const maxSpd = (0.1 + speed * 0.6) * dt;
 
+    // Compute flock centroid for global cohesion (prevents splitting)
+    let flockCx = 0, flockCy = 0;
+    for (const f of flockers) { flockCx += f.x; flockCy += f.y; }
+    flockCx /= flockers.length; flockCy /= flockers.length;
+
     for (const f of flockers) {
-      let sx = 0, sy = 0, ax = 0, ay = 0, cx = 0, cy = 0, n = 0;
+      let sx = 0, sy = 0, sepN = 0;
+      let ax = 0, ay = 0, cx = 0, cy = 0, n = 0;
 
       // Flocking forces from neighbors (perception radius ~0.24)
       for (const other of flockers) {
@@ -2914,17 +2991,27 @@ async function main() {
         if (d2 > 0.06) continue;
         const d = Math.sqrt(d2);
         n++;
-        if (d < 0.05 && d > 0.0001) { sx -= dx / d; sy -= dy / d; }
+        // Separation — normalized by neighbor count
+        if (d < 0.05 && d > 0.0001) { sx -= dx / d; sy -= dy / d; sepN++; }
         ax += other.vx; ay += other.vy;
         cx += other.x; cy += other.y;
       }
 
+      // Normalize separation so it doesn't explode with many neighbors
+      if (sepN > 0) { sx /= sepN; sy /= sepN; }
+
       if (n > 0) {
         ax /= n; ay /= n;
         cx = cx / n - f.x; cy = cy / n - f.y;
-        f.vx += sx * sep * 0.2 + (ax - f.vx) * ali * 0.1 + cx * coh * 0.04;
-        f.vy += sy * sep * 0.2 + (ay - f.vy) * ali * 0.1 + cy * coh * 0.04;
       }
+
+      // Apply flocking forces
+      f.vx += sx * sep * 0.15 + (ax - f.vx) * ali * 0.08 + cx * coh * 0.03;
+      f.vy += sy * sep * 0.15 + (ay - f.vy) * ali * 0.08 + cy * coh * 0.03;
+
+      // Global cohesion toward flock centroid (prevents group splitting)
+      f.vx += (flockCx - f.x) * 0.02;
+      f.vy += (flockCy - f.y) * 0.02;
 
       // Blob interaction: positive = attract, negative = flee
       for (const blob of blobs) {
@@ -2935,11 +3022,29 @@ async function main() {
         f.vy += dy / d * force;
       }
 
-      // Center pull + slight random jitter
-      f.vx += (0.5 - f.x) * 0.01;
-      f.vy += (0.5 - f.y) * 0.01;
-      f.vx += (Math.random() - 0.5) * 0.002;
-      f.vy += (Math.random() - 0.5) * 0.002;
+      // Draw bot interaction (same react as blobs)
+      for (const bot of drawBots) {
+        const dx = bot.x - f.x, dy = bot.y - f.y;
+        const d = Math.sqrt(dx * dx + dy * dy) + 0.001;
+        const force = blobReact * 0.02 / (d * d + 0.01);
+        f.vx += dx / d * force;
+        f.vy += dy / d * force;
+      }
+
+      // Center pull — strong near edge, gentle in center
+      const toCx = 0.5 - f.x, toCy = 0.5 - f.y;
+      const distFromCenter = Math.sqrt(toCx * toCx + toCy * toCy);
+      const edgePull = 0.005 + distFromCenter * distFromCenter * 0.8;
+      f.vx += toCx * edgePull;
+      f.vy += toCy * edgePull;
+
+      // Slight random jitter for organic feel
+      f.vx += (Math.random() - 0.5) * 0.003;
+      f.vy += (Math.random() - 0.5) * 0.003;
+
+      // Velocity damping (prevents runaway accumulation)
+      f.vx *= 0.95;
+      f.vy *= 0.95;
 
       // Speed limit
       const spd = Math.sqrt(f.vx * f.vx + f.vy * f.vy);
@@ -3295,6 +3400,17 @@ async function main() {
       p.setBindGroup(0, dyeNoiseBGs[velFlip][dyeFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
+      dyeFlip ^= 1;
+    }
+
+    // ── Sphere Cleanup (hard-zero vel+dye outside sphere) ──
+    {
+      const p = enc.beginComputePass();
+      p.setPipeline(cleanupPipeline);
+      p.setBindGroup(0, cleanupBGs[velFlip][dyeFlip]);
+      p.dispatchWorkgroups(dispatch, dispatch);
+      p.end();
+      velFlip ^= 1;
       dyeFlip ^= 1;
     }
 
