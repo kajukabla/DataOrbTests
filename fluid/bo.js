@@ -318,7 +318,7 @@ export class BOController {
 
     // Force exploration every 3rd suggestion to prevent GP collapse
     this._suggestionCount = (this._suggestionCount || 0) + 1;
-    if (this._suggestionCount % 3 === 0) {
+    if (this._suggestionCount % 2 === 0) {
       console.log('BO: Next suggestion — Explore (random)');
       return randomNormalized();
     }
@@ -435,24 +435,6 @@ export class BOController {
         bestEI = ei;
         bestX = new Float64Array(xStar);
       }
-    }
-
-    // Seed example params + noisy variants into candidate evaluation
-    for (const ex of this.examples) {
-      try {
-        const base = stateToNormalized(ex.params);
-        for (let v = 0; v < 4; v++) {
-          for (let j = 0; j < D; j++) {
-            xStar[j] = v === 0 ? base[j] : Math.max(0, Math.min(1, base[j] + (Math.random() - 0.5) * 0.1));
-          }
-          const { mean, variance } = gpPredict(this.model, xStar);
-          const ei = expectedImprovement(mean, variance, fBest, xi);
-          if (ei > bestEI) {
-            bestEI = ei;
-            bestX = new Float64Array(xStar);
-          }
-        }
-      } catch (e) { /* skip bad example */ }
     }
 
     return bestX || randomNormalized();
