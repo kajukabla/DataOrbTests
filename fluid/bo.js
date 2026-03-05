@@ -39,6 +39,23 @@ export const SLIDER_SPACE = {
   drawBotRecMix:     { min: 0,    max: 1,     step: 0.01 },
   drawBotChaos:      { min: 0,    max: 1,     step: 0.01 },
   drawBotDrift:      { min: 0,    max: 1,     step: 0.01 },
+  prismaticAmount:   { min: 0,    max: 20,    step: 0.1  },
+  // Blobs — large Brownian-motion agents
+  blobCount:         { min: 0,    max: 4,     step: 1    },
+  blobSpeed:         { min: 0,    max: 1,     step: 0.01 },
+  blobSize:          { min: 0,    max: 1,     step: 0.01 },
+  blobWander:        { min: 0,    max: 1,     step: 0.01 },
+  // Flockers — boids swarm
+  flockCount:        { min: 0,    max: 50,    step: 1    },
+  flockSpeed:        { min: 0,    max: 1,     step: 0.01 },
+  flockSize:         { min: 0,    max: 1,     step: 0.01 },
+  flockSeparation:   { min: 0,    max: 1,     step: 0.01 },
+  flockAlignment:    { min: 0,    max: 1,     step: 0.01 },
+  flockCohesion:     { min: 0,    max: 1,     step: 0.01 },
+  flockBlobReact:    { min: -1,   max: 1,     step: 0.01 },
+  // Dye-coupled noise
+  noiseDyeIntensity: { min: 0,    max: 1,     step: 0.01 },
+  dyeNoiseAmount:    { min: 0,    max: 0.15,  step: 0.001 },
   // Color channels (7 colors × 3 channels = 21 dims)
   baseColor_0:       { min: 0, max: 1, step: 0.01 },
   baseColor_1:       { min: 0, max: 1, step: 0.01 },
@@ -682,8 +699,9 @@ export class BOController {
   /** Toggle locking motion/dynamics params. */
   toggleLockMotion() {
     const motionKeys = SLIDER_KEYS.filter(k =>
-      k.startsWith('drawBot') || ['simSpeed', 'injectorSpeed', 'noiseAmount',
-        'noiseFrequency', 'noiseSpeed', 'curlStrength'].includes(k));
+      k.startsWith('drawBot') || k.startsWith('blob') || k.startsWith('flock') ||
+      ['simSpeed', 'injectorSpeed', 'noiseAmount', 'noiseFrequency', 'noiseSpeed',
+        'curlStrength', 'dyeNoiseAmount'].includes(k));
     const allLocked = motionKeys.every(k => this.lockedKeys.has(k));
     if (allLocked) {
       motionKeys.forEach(k => this.lockedKeys.delete(k));
