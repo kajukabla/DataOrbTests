@@ -806,21 +806,24 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let A = c.r;
   let B = c.g;
 
-  // 5-point Laplacian
-  let scale = rp.rdScale * 4.0 + 0.5;
-  let cR = textureLoad(rdSrc, vec2u(min(id.x + 1u, res - 1u), id.y), 0);
-  let cL = textureLoad(rdSrc, vec2u(max(id.x, 1u) - 1u, id.y), 0);
-  let cU = textureLoad(rdSrc, vec2u(id.x, min(id.y + 1u, res - 1u)), 0);
-  let cD = textureLoad(rdSrc, vec2u(id.x, max(id.y, 1u) - 1u), 0);
+  // 5-point Laplacian with step size based on scale
+  // scale controls grid spacing: low = fine patterns, high = coarse patterns
+  let step = u32(max(1.0, rp.rdScale * 3.0 + 1.0));
+  let cR = textureLoad(rdSrc, vec2u(min(id.x + step, res - 1u), id.y), 0);
+  let cL = textureLoad(rdSrc, vec2u(u32(max(i32(id.x) - i32(step), 0)), id.y), 0);
+  let cU = textureLoad(rdSrc, vec2u(id.x, min(id.y + step, res - 1u)), 0);
+  let cD = textureLoad(rdSrc, vec2u(id.x, u32(max(i32(id.y) - i32(step), 0))), 0);
 
-  let lapA = (cR.r + cL.r + cU.r + cD.r - 4.0 * A) * scale;
-  let lapB = (cR.g + cL.g + cU.g + cD.g - 4.0 * B) * scale;
+  let lapA = cR.r + cL.r + cU.r + cD.r - 4.0 * A;
+  let lapB = cR.g + cL.g + cU.g + cD.g - 4.0 * B;
 
   let f = rp.feedRate;
   let k = rp.killRate;
   let ABB = A * B * B;
-  let newA = A + (Da * lapA - ABB + f * (1.0 - A)) * rp.rdAmount;
-  let newB = B + (Db * lapB + ABB - (f + k) * B) * rp.rdAmount;
+  // Fixed timestep for stability — rdAmount controls coupling, not timestep
+  let dt = 0.8;
+  let newA = A + (Da * lapA - ABB + f * (1.0 - A)) * dt;
+  let newB = B + (Db * lapB + ABB - (f + k) * B) * dt;
 
   textureStore(rdDst, id.xy, vec4f(clamp(newA, 0.0, 1.0), clamp(newB, 0.0, 1.0), 0.0, 0.0));
 }
@@ -2671,11 +2674,11 @@ async function main() {
       pixels[i * 4 + 2] = 0.0;
       pixels[i * 4 + 3] = 0.0;
     }
-    // Seed small random B patches near center
-    for (let s = 0; s < 20; s++) {
-      const cx = Math.floor(SIM_RES * 0.5 + (Math.random() - 0.5) * SIM_RES * 0.3);
-      const cy = Math.floor(SIM_RES * 0.5 + (Math.random() - 0.5) * SIM_RES * 0.3);
-      const r = 2 + Math.floor(Math.random() * 4);
+    // Seed random B patches — large enough for RD to nucleate
+    for (let s = 0; s < 30; s++) {
+      const cx = Math.floor(SIM_RES * 0.5 + (Math.random() - 0.5) * SIM_RES * 0.4);
+      const cy = Math.floor(SIM_RES * 0.5 + (Math.random() - 0.5) * SIM_RES * 0.4);
+      const r = 5 + Math.floor(Math.random() * 10);
       for (let dy = -r; dy <= r; dy++) {
         for (let dx = -r; dx <= r; dx++) {
           const px = cx + dx, py = cy + dy;
