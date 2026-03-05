@@ -52,11 +52,16 @@
       pointer-events: auto;
       background: rgba(0,0,0,0.92);
       height: 100%;
-      padding: 48px 14px 14px;
-      overflow-y: auto;
+      box-sizing: border-box;
+      padding: 48px 14px 20px;
+      overflow-y: scroll;
       color: #bbb;
       font: 11px/1.6 system-ui, -apple-system, sans-serif;
     }
+    #settingsContent::-webkit-scrollbar { width: 6px; }
+    #settingsContent::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); }
+    #settingsContent::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }
+    #settingsContent::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.35); }
     .setting-group {
       margin-bottom: 10px;
     }
@@ -185,14 +190,24 @@
         <select id="particleCountSelect">
           <option value="262144">262K</option>
           <option value="1048576">1M</option>
+          <option value="2097152">2M</option>
+          <option value="3145728">3M</option>
           <option value="4194304" selected>4M</option>
           <option value="8388608">8M</option>
           <option value="16777216">16M</option>
         </select>
       </div>
       <div class="setting-group">
+        <label>Particle Size <span class="val" id="particleSizeVal">0.9</span></label>
+        <input type="range" id="particleSize" min="0.1" max="3.0" step="0.01" value="0.9">
+      </div>
+      <div class="setting-group">
         <label>Size Randomness <span class="val" id="sizeRandomnessVal">0.3</span></label>
         <input type="range" id="sizeRandomness" min="0.0" max="1.0" step="0.01" value="0.3">
+      </div>
+      <div class="setting-group">
+        <label>Glint Brightness <span class="val" id="glintBrightnessVal">0.1</span></label>
+        <input type="range" id="glintBrightness" min="0.0" max="1.0" step="0.01" value="0.1">
       </div>
       <div class="setting-group">
         <label>Base Color</label>
@@ -223,8 +238,8 @@
         <input type="range" id="colorBlend" min="0.0" max="1.0" step="0.01" value="0.5">
       </div>
       <div class="setting-group">
-        <label>Prismatic Amount <span class="val" id="prismaticAmountVal">5.0</span></label>
-        <input type="range" id="prismaticAmount" min="0.0" max="20.0" step="0.5" value="5.0">
+        <label>Prismatic Amount <span class="val" id="prismaticAmountVal">20.0</span></label>
+        <input type="range" id="prismaticAmount" min="0.0" max="20.0" step="0.5" value="20.0">
       </div>
       <div class="setting-group">
         <label>Sheen Strength <span class="val" id="sheenStrengthVal">1.5</span></label>
@@ -314,19 +329,23 @@
       </div>
       <div class="setting-group">
         <label>Draw Bot Count <span class="val" id="drawBotCountVal">0</span></label>
-        <input type="range" id="drawBotCount" min="0" max="4" step="1" value="0">
+        <input type="range" id="drawBotCount" min="0" max="8" step="1" value="0">
       </div>
       <div class="setting-group">
         <label>Draw Bot Speed <span class="val" id="drawBotSpeedVal">0.5</span></label>
         <input type="range" id="drawBotSpeed" min="0.0" max="1.0" step="0.01" value="0.5">
       </div>
       <div class="setting-group">
-        <label>Draw Bot Size <span class="val" id="drawBotSizeVal">0.5</span></label>
-        <input type="range" id="drawBotSize" min="0.0" max="1.0" step="0.01" value="0.5">
+        <label>Draw Bot Turn Rate <span class="val" id="drawBotTurnRateVal">0.5</span></label>
+        <input type="range" id="drawBotTurnRate" min="0.0" max="1.0" step="0.01" value="0.5">
       </div>
       <div class="setting-group">
-        <label>Draw Bot Force <span class="val" id="drawBotForceVal">0.5</span></label>
-        <input type="range" id="drawBotForce" min="0.0" max="1.0" step="0.01" value="0.5">
+        <label>Draw Bot Speed Var <span class="val" id="drawBotSpeedVarVal">0.5</span></label>
+        <input type="range" id="drawBotSpeedVar" min="0.0" max="1.0" step="0.01" value="0.5">
+      </div>
+      <div class="setting-group">
+        <label>Draw Bot Rec Mix <span class="val" id="drawBotRecMixVal">0.5</span></label>
+        <input type="range" id="drawBotRecMix" min="0.0" max="1.0" step="0.01" value="0.5">
       </div>
       <div class="setting-group">
         <label>Draw Bot Chaos <span class="val" id="drawBotChaosVal">0.3</span></label>
@@ -335,6 +354,18 @@
       <div class="setting-group">
         <label>Draw Bot Drift <span class="val" id="drawBotDriftVal">0.5</span></label>
         <input type="range" id="drawBotDrift" min="0.0" max="1.0" step="0.01" value="0.5">
+      </div>
+      <div class="setting-group">
+        <label>Bloom Intensity <span class="val" id="bloomIntensityVal">0.00</span></label>
+        <input type="range" id="bloomIntensity" min="0.0" max="25.0" step="0.01" value="0.00">
+      </div>
+      <div class="setting-group">
+        <label>Bloom Threshold <span class="val" id="bloomThresholdVal">0.80</span></label>
+        <input type="range" id="bloomThreshold" min="0.0" max="1.0" step="0.01" value="0.40">
+      </div>
+      <div class="setting-group">
+        <label>Bloom Radius <span class="val" id="bloomRadiusVal">0.50</span></label>
+        <input type="range" id="bloomRadius" min="0.0" max="10.0" step="0.01" value="0.50">
       </div>
     </div>
   </div>

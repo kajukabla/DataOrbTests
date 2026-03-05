@@ -13,7 +13,6 @@ import {
 export const SLIDER_SPACE = {
   simSpeed:          { min: 0,    max: 3,     step: 0.01 },
   sizeRandomness:    { min: 0,    max: 1,     step: 0.01 },
-  prismaticAmount:   { min: 0,    max: 20,    step: 0.5  },
   colorBlend:        { min: 0,    max: 1,     step: 0.01 },
   sheenStrength:     { min: 0,    max: 1,     step: 0.01 },
   clickSize:         { min: 0,    max: 1,     step: 0.01 },
@@ -32,10 +31,11 @@ export const SLIDER_SPACE = {
   dyeDissipation:    { min: 0.98, max: 1.0,   step: 0.001 },
   pressureIters:     { min: 10,   max: 60,    step: 1    },
   pressureDecay:     { min: 0,    max: 1,     step: 0.01 },
-  drawBotCount:      { min: 0,    max: 4,     step: 1    },
+  drawBotCount:      { min: 0,    max: 8,     step: 1    },
   drawBotSpeed:      { min: 0,    max: 1,     step: 0.01 },
-  drawBotSize:       { min: 0,    max: 1,     step: 0.01 },
-  drawBotForce:      { min: 0,    max: 1,     step: 0.01 },
+  drawBotTurnRate:   { min: 0,    max: 1,     step: 0.01 },
+  drawBotSpeedVar:   { min: 0,    max: 1,     step: 0.01 },
+  drawBotRecMix:     { min: 0,    max: 1,     step: 0.01 },
   drawBotChaos:      { min: 0,    max: 1,     step: 0.01 },
   drawBotDrift:      { min: 0,    max: 1,     step: 0.01 },
   // Color channels (7 colors × 3 channels = 21 dims)
@@ -94,9 +94,14 @@ export function stateToNormalized(state) {
   for (let i = 0; i < D; i++) {
     const key = SLIDER_KEYS[i];
     const s = SLIDER_SPACE[key];
-    x[i] = (getStateVal(state, key) - s.min) / (s.max - s.min);
-    if (x[i] < 0) x[i] = 0;
-    if (x[i] > 1) x[i] = 1;
+    const val = getStateVal(state, key);
+    if (val === undefined || val === null || Number.isNaN(val)) {
+      x[i] = 0.5;
+    } else {
+      x[i] = (val - s.min) / (s.max - s.min);
+      if (x[i] < 0) x[i] = 0;
+      if (x[i] > 1) x[i] = 1;
+    }
   }
   return x;
 }
@@ -112,6 +117,11 @@ export function normalizedToState(x, state) {
     if (val > s.max) val = s.max;
     setStateVal(state, key, val);
   }
+  // Clamp critical params so the sim is always visually active
+  if (state.simSpeed < 0.5) state.simSpeed = 0.5;
+  if (state.injectorIntensity < 0.3) state.injectorIntensity = 0.3;
+  if (state.injectorCount < 1) state.injectorCount = 1;
+  if (state.splatForce < 3000) state.splatForce = 3000;
 }
 
 /** Generate a random normalized vector in [0,1]^D. */
@@ -244,8 +254,10 @@ export class BOController {
   /** Rebuild GP model from all ratings (+ examples as synthetic rating:1). */
   retrain() {
     const startMs = performance.now();
-    // Prepend examples as synthetic positive ratings
-    const syntheticRatings = this.examples.map(ex => ({ params: ex.params, rating: 1 }));
+    // Prepend examples as synthetic positive ratings, but fade out as real data accumulates
+    const N_real = this.ratings.length;
+    const useExamples = N_real < 30; // stop injecting examples after 30 real ratings
+    const syntheticRatings = useExamples ? this.examples.map(ex => ({ params: ex.params, rating: 1 })) : [];
     const allRatings = [...syntheticRatings, ...this.ratings];
     const { X, y, N } = ratingsToTrainingData(allRatings);
     if (N < 5) { console.log(`BO: Retrain skipped — need 5+ ratings (have ${N}, ${syntheticRatings.length} examples)`); this.model = null; return; }
@@ -289,11 +301,29 @@ export class BOController {
     const N = this.ratings.length;
 
     if (N < 10 || !this.model) {
+      if (this.examples.length > 0 && N % 2 === 0) {
+        const ex = this.examples[N % this.examples.length];
+        const x = stateToNormalized(ex.params);
+        for (let i = 0; i < D; i++) {
+          x[i] += (Math.random() - 0.5) * 0.15;
+          if (x[i] < 0) x[i] = 0;
+          if (x[i] > 1) x[i] = 1;
+        }
+        console.log(`BO: Next suggestion — Phase 1 (example seed "${ex.name}", N=${N})`);
+        return x;
+      }
       console.log(`BO: Next suggestion — Phase 1 (random, N=${N})`);
       return randomNormalized();
     }
 
-    const xi = N < 30 ? 0.01 : 0.001;
+    // Force exploration every 3rd suggestion to prevent GP collapse
+    this._suggestionCount = (this._suggestionCount || 0) + 1;
+    if (this._suggestionCount % 3 === 0) {
+      console.log('BO: Next suggestion — Explore (random)');
+      return randomNormalized();
+    }
+
+    const xi = N < 30 ? 0.01 : 0.05;
     console.log(`BO: Next suggestion — Phase ${N < 30 ? 2 : 3} (EI, xi=${xi})`);
     const nCandidates = N < 30 ? 1000 : 1500;
 
@@ -327,23 +357,37 @@ export class BOController {
    * @param {function} syncAllUI - callback to sync UI after applying new params
    */
   rate(state, rating, syncAllUI) {
-    // Snapshot current params (including color channels)
-    const params = {};
-    for (const key of SLIDER_KEYS) params[key] = getStateVal(state, key);
+    try {
+      // Snapshot current params (including color channels)
+      const params = {};
+      for (const key of SLIDER_KEYS) params[key] = getStateVal(state, key);
 
-    this.ratings.push({ params, rating, timestamp: Date.now() });
-    console.log(`BO: Rating ${rating === 1 ? '👍' : '👎'} recorded (${this.ratings.length} total)`);
-    saveRatings(this.ratings);
-    this.maybeRetrain();
+      this.ratings.push({ params, rating, timestamp: Date.now() });
+      console.log(`BO: Rating ${rating === 1 ? '👍' : '👎'} recorded (${this.ratings.length} total)`);
+      saveRatings(this.ratings);
+      this.maybeRetrain();
 
-    // Flash indicator
-    this.flashRating(rating);
+      // Flash indicator
+      this.flashRating(rating);
 
-    // Apply next config (colors are now in the BO vector, no separate randomize)
-    const nextX = this.getNextParams();
-    normalizedToState(nextX, state);
-    if (syncAllUI) syncAllUI();
-    this.updateOverlay();
+      // Apply next config — fall back to random if EI/GP throws
+      let nextX;
+      try {
+        nextX = this.getNextParams();
+      } catch (e) {
+        console.warn('BO: getNextParams failed, using random:', e);
+        nextX = randomNormalized();
+      }
+
+      normalizedToState(nextX, state);
+      if (syncAllUI) syncAllUI();
+      this.updateOverlay();
+    } catch (e) {
+      console.error('BO: rate() crashed:', e);
+      // Recover: apply random config so UI doesn't freeze
+      normalizedToState(randomNormalized(), state);
+      if (syncAllUI) syncAllUI();
+    }
   }
 
   /**
@@ -392,6 +436,25 @@ export class BOController {
         bestX = new Float64Array(xStar);
       }
     }
+
+    // Seed example params + noisy variants into candidate evaluation
+    for (const ex of this.examples) {
+      try {
+        const base = stateToNormalized(ex.params);
+        for (let v = 0; v < 4; v++) {
+          for (let j = 0; j < D; j++) {
+            xStar[j] = v === 0 ? base[j] : Math.max(0, Math.min(1, base[j] + (Math.random() - 0.5) * 0.1));
+          }
+          const { mean, variance } = gpPredict(this.model, xStar);
+          const ei = expectedImprovement(mean, variance, fBest, xi);
+          if (ei > bestEI) {
+            bestEI = ei;
+            bestX = new Float64Array(xStar);
+          }
+        }
+      } catch (e) { /* skip bad example */ }
+    }
+
     return bestX || randomNormalized();
   }
 

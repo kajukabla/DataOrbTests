@@ -41,10 +41,11 @@ const state = {
   dyeDissipation: 0.993,
   drawBotCount: 0,
   drawBotSpeed: 0.5,
-  drawBotSize: 0.5,
-  drawBotForce: 0.5,
   drawBotChaos: 0.3,
   drawBotDrift: 0.5,
+  drawBotTurnRate: 0.5,
+  drawBotSpeedVar: 0.5,
+  drawBotRecMix: 0.5,
   bloomIntensity: 0,
   bloomThreshold: 0.4,
   bloomRadius: 0.5,
@@ -2231,13 +2232,73 @@ async function main() {
   }
 
   // ─── Recording Controller ─────────────────────────────────────────────
-  const recording = { active: false, points: [], startTime: 0, recordings: [], cHeld: false };
+  const recording = { active: false, points: [], startTime: 0, recordings: [], cHeld: false, fingerprint: null };
   state.useRecordings = false;
+
+  function analyzeRecordings(recs) {
+    if (!recs.length) return null;
+    const speeds = [], turnRates = [], radii = [];
+    for (const rec of recs) {
+      const pts = rec.points;
+      for (let i = 1; i < pts.length; i++) {
+        const dx = pts[i].x - pts[i - 1].x;
+        const dy = pts[i].y - pts[i - 1].y;
+        const dt = pts[i].t - pts[i - 1].t;
+        if (dt < 0.001) continue;
+        speeds.push(Math.sqrt(dx * dx + dy * dy) / dt);
+        radii.push(Math.sqrt((pts[i].x - 0.5) ** 2 + (pts[i].y - 0.5) ** 2));
+        if (i >= 2) {
+          const pdx = pts[i - 1].x - pts[i - 2].x;
+          const pdy = pts[i - 1].y - pts[i - 2].y;
+          const a1 = Math.atan2(pdy, pdx);
+          const a2 = Math.atan2(dy, dx);
+          let da = a2 - a1;
+          if (da > Math.PI) da -= 2 * Math.PI;
+          if (da < -Math.PI) da += 2 * Math.PI;
+          turnRates.push(Math.abs(da / dt));
+        }
+      }
+    }
+    if (!speeds.length) return null;
+    const sorted = a => [...a].sort((x, y) => x - y);
+    const median = a => { const s = sorted(a); return s[Math.floor(s.length / 2)]; };
+    const mean = a => a.reduce((s, v) => s + v, 0) / a.length;
+    const stddev = a => { const m = mean(a); return Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length); };
+    const fp = {
+      avgSpeed: median(speeds),
+      speedVar: stddev(speeds) / (median(speeds) || 1),
+      avgTurnRate: turnRates.length ? median(turnRates) : 0,
+      turnRateVar: turnRates.length ? stddev(turnRates) / (median(turnRates) || 1) : 0,
+      avgRadius: median(radii),
+    };
+    console.log('Recording fingerprint:', fp);
+    return fp;
+  }
+
+  function seedStateFromFingerprint(fp) {
+    if (!fp) return;
+    // Map fingerprint to procedural params (normalized 0-1)
+    state.drawBotSpeed = Math.min(1, fp.avgSpeed / 1.5);        // ~1.5 units/s = fast
+    state.drawBotChaos = Math.min(1, fp.turnRateVar / 3.0);     // high variance = chaotic
+    state.drawBotDrift = Math.min(1, fp.avgRadius / 0.35);      // 0.35 = sphere edge
+    state.drawBotTurnRate = Math.min(1, fp.avgTurnRate / 15.0);  // ~15 rad/s = sharp turns
+    state.drawBotSpeedVar = Math.min(1, fp.speedVar / 2.0);     // coefficient of variation
+    console.log('Seeded bot params from recordings:', {
+      speed: state.drawBotSpeed.toFixed(2),
+      chaos: state.drawBotChaos.toFixed(2),
+      drift: state.drawBotDrift.toFixed(2),
+      turnRate: state.drawBotTurnRate.toFixed(2),
+      speedVar: state.drawBotSpeedVar.toFixed(2),
+    });
+  }
 
   // Load existing recordings on startup
   fetch('/api/recordings').then(r => r.ok ? r.json() : []).then(recs => {
     recording.recordings = Array.isArray(recs) ? recs : [];
     console.log(`Recordings: loaded ${recording.recordings.length} gestures`);
+    if (recording.recordings.length > 0) {
+      recording.fingerprint = analyzeRecordings(recording.recordings);
+    }
   }).catch(() => {});
 
   function finishRecording() {
@@ -2254,6 +2315,7 @@ async function main() {
         body: JSON.stringify(rec),
       }).catch(() => {});
       console.log(`Recording saved: ${rec.name} (${rec.points.length} points, ${recording.recordings.length} total)`);
+      recording.fingerprint = analyzeRecordings(recording.recordings);
     } else {
       console.log(`Recording discarded (${recording.points.length} points, need >= 5)`);
     }
@@ -2414,9 +2476,11 @@ async function main() {
   function initDrawBots(count) {
     drawBots.length = 0;
     for (let i = 0; i < count; i++) {
+      const startX = 0.3 + Math.random() * 0.4;
+      const startY = 0.3 + Math.random() * 0.4;
       drawBots.push({
-        x: 0.3 + Math.random() * 0.4,
-        y: 0.3 + Math.random() * 0.4,
+        x: startX, y: startY,
+        _prevX: startX, _prevY: startY,
         vx: 0, vy: 0,
         angle: Math.random() * Math.PI * 2,
         turnRate: 0,
@@ -2428,6 +2492,8 @@ async function main() {
         speedPhase: Math.random() * Math.PI * 2,
         orbitRadius: 0.08 + Math.random() * 0.22,  // Per-bot orbit scale
         symmetry: 3 + (i % 4),                      // 3-6 fold symmetry
+        // Blend mode fields
+        _mode: 'autonomous', _modeTimer: Math.random() * 3.0,
         // Recording playback fields
         _rec: null, _recIdx: 0, _recT: 0,
         _recRotation: 0, _recScale: 1, _recOffX: 0, _recOffY: 0,
@@ -2501,9 +2567,10 @@ async function main() {
     }
 
     if (bot._recIdx >= pts.length - 1) {
-      // Gesture finished — pause then pick new
-      bot._recPause = 0.3 + Math.random() * 0.7;
-      pickRecordingForBot(bot);
+      // Gesture finished — switch to autonomous for a while
+      bot._mode = 'autonomous';
+      bot._modeTimer = (1 - state.drawBotRecMix) * 6.0 + Math.random() * 2.0;
+      bot._rec = null;
       return;
     }
 
@@ -2532,6 +2599,59 @@ async function main() {
     bot.y = finalY;
   }
 
+  function updateBotAutonomous(bot, dt, speed, chaos, drift, turnRate, speedVar) {
+    const SPHERE_R = 0.35;
+    bot.noiseT += dt;
+    const t = bot.noiseT * speed;
+    const turnScale = 0.5 + turnRate * 3.0;
+
+    // Sacred geometry: multi-frequency sinusoidal creates spirograph-like patterns
+    const periodicSteer = (Math.sin(t * bot.baseFreq) * 1.5
+                        + Math.sin(t * bot.secondFreq) * 0.8
+                        + Math.sin(t * bot.baseFreq * bot.symmetry) * 0.3) * turnScale;
+
+    // Noise steering for chaos
+    const noiseSteer = (simplexNoise(bot.noiseT * (0.5 + chaos * 4)) * 2 - 1) * (1 + chaos * 10) * turnScale;
+
+    // Blend: chaos=0 → pure sacred geometry, chaos=1 → pure noise
+    const targetTurn = periodicSteer * (1 - chaos) + noiseSteer * chaos;
+    bot.turnRate += (targetTurn - bot.turnRate) * (0.02 + chaos * 0.3);
+    bot.angle += bot.turnRate * dt * speed;
+
+    // Speed varies organically over time
+    const sv = 1.0 + Math.sin(bot.noiseT * 0.7 + bot.speedPhase) * speedVar * 0.6;
+    const spd = speed * 0.3 * sv;
+    bot.vx = Math.cos(bot.angle) * spd;
+    bot.vy = Math.sin(bot.angle) * spd;
+
+    // Drift toward/away from center
+    const toCenterX = 0.5 - bot.x;
+    const toCenterY = 0.5 - bot.y;
+    const distFromCenter = Math.sqrt(toCenterX * toCenterX + toCenterY * toCenterY);
+    const centerPull = drift < 0.5
+      ? 0.02 + distFromCenter * 0.1
+      : 0.005 + distFromCenter * 0.03;
+    bot.vx += toCenterX * centerPull;
+    bot.vy += toCenterY * centerPull;
+
+    // Hard boundary: reflect off sphere edge
+    const newX = bot.x + bot.vx * dt;
+    const newY = bot.y + bot.vy * dt;
+    const newDist = Math.sqrt((newX - 0.5) ** 2 + (newY - 0.5) ** 2);
+    if (newDist > SPHERE_R) {
+      bot.angle = Math.atan2(0.5 - bot.y, 0.5 - bot.x) + (Math.random() - 0.5) * 1.0;
+      bot.vx *= -0.3;
+      bot.vy *= -0.3;
+    }
+    bot.x += bot.vx * dt;
+    bot.y += bot.vy * dt;
+    const d = Math.sqrt((bot.x - 0.5) ** 2 + (bot.y - 0.5) ** 2);
+    if (d > SPHERE_R) {
+      bot.x = 0.5 + (bot.x - 0.5) / d * SPHERE_R * 0.95;
+      bot.y = 0.5 + (bot.y - 0.5) / d * SPHERE_R * 0.95;
+    }
+  }
+
   function updateDrawBots(dt, time) {
     const count = Math.round(state.drawBotCount);
     if (count !== lastBotCount) {
@@ -2540,73 +2660,26 @@ async function main() {
     }
     if (count === 0) return;
 
-    // Recording playback mode
-    if (state.useRecordings && recording.recordings.length > 0) {
-      for (const bot of drawBots) {
-        updateDrawBotFromRecording(bot, dt);
-      }
-      return;
-    }
-
-    const speed = 0.1 + state.drawBotSpeed * 0.9;
+    const speed = 0.1 + state.drawBotSpeed * 2.9;
     const chaos = state.drawBotChaos;
     const drift = state.drawBotDrift;
-    const SPHERE_R = 0.35;
+    const turnRate = state.drawBotTurnRate;
+    const speedVar = state.drawBotSpeedVar;
+    const hasRecordings = state.useRecordings && recording.recordings.length > 0;
+    const recMix = hasRecordings ? state.drawBotRecMix : 0;
 
     for (const bot of drawBots) {
-      bot.noiseT += dt;
-
-      // Blend periodic (sacred geometry) and noise (chaos) steering
-      // Low chaos → repeating sacred patterns (spirals, rosettes, trefoils)
-      // High chaos → erratic zigzag, sharp turns
-      const t = bot.noiseT * speed;
-
-      // Sacred geometry: multi-frequency sinusoidal creates spirograph-like patterns
-      const periodicSteer = Math.sin(t * bot.baseFreq) * 1.5
-                          + Math.sin(t * bot.secondFreq) * 0.8
-                          + Math.sin(t * bot.baseFreq * bot.symmetry) * 0.3;
-
-      // Noise steering for chaos
-      const noiseSteer = (simplexNoise(bot.noiseT * (0.5 + chaos * 2)) * 2 - 1) * (1 + chaos * 4);
-
-      // Blend: chaos=0 → pure sacred geometry, chaos=1 → pure noise
-      const targetTurn = periodicSteer * (1 - chaos) + noiseSteer * chaos;
-      bot.turnRate += (targetTurn - bot.turnRate) * (0.02 + chaos * 0.08);
-      bot.angle += bot.turnRate * dt * speed;
-
-      // Speed varies organically over time
-      const speedVar = 1.0 + Math.sin(bot.noiseT * 0.7 + bot.speedPhase) * 0.3 * (1 - chaos * 0.5);
-      const spd = speed * 0.3 * speedVar;
-      bot.vx = Math.cos(bot.angle) * spd;
-      bot.vy = Math.sin(bot.angle) * spd;
-
-      // Drift toward/away from center
-      const toCenterX = 0.5 - bot.x;
-      const toCenterY = 0.5 - bot.y;
-      const distFromCenter = Math.sqrt(toCenterX * toCenterX + toCenterY * toCenterY);
-
-      const centerPull = drift < 0.5
-        ? 0.02 + distFromCenter * 0.1
-        : 0.005 + distFromCenter * 0.03;
-      bot.vx += toCenterX * centerPull;
-      bot.vy += toCenterY * centerPull;
-
-      // Hard boundary: reflect off sphere edge
-      const newX = bot.x + bot.vx * dt;
-      const newY = bot.y + bot.vy * dt;
-      const newDist = Math.sqrt((newX - 0.5) ** 2 + (newY - 0.5) ** 2);
-      if (newDist > SPHERE_R) {
-        bot.angle = Math.atan2(0.5 - bot.y, 0.5 - bot.x) + (Math.random() - 0.5) * 1.0;
-        bot.vx *= -0.3;
-        bot.vy *= -0.3;
-      }
-
-      bot.x += bot.vx * dt;
-      bot.y += bot.vy * dt;
-      const d = Math.sqrt((bot.x - 0.5) ** 2 + (bot.y - 0.5) ** 2);
-      if (d > SPHERE_R) {
-        bot.x = 0.5 + (bot.x - 0.5) / d * SPHERE_R * 0.95;
-        bot.y = 0.5 + (bot.y - 0.5) / d * SPHERE_R * 0.95;
+      if (recMix > 0 && bot._mode === 'recording') {
+        updateDrawBotFromRecording(bot, dt);
+      } else {
+        updateBotAutonomous(bot, dt, speed, chaos, drift, turnRate, speedVar);
+        if (recMix > 0) {
+          bot._modeTimer -= dt;
+          if (bot._modeTimer <= 0) {
+            bot._mode = 'recording';
+            bot._rec = null;
+          }
+        }
       }
     }
   }
@@ -2739,38 +2812,25 @@ async function main() {
       }
     }
 
-    // Draw bot splats — throttled to ~20Hz (like mouse input rate) instead of every frame
-    const botForce = state.drawBotForce * 6.0;  // same scale as clickStrength * 6.0
-    const botSize = 1.0 + state.drawBotSize * 8.0;  // match mouse clickSize * 8.0
+    // Draw bot splats — identical to mouse click-drag (always held down)
+    const str = state.clickStrength * 6.0;
+    const sz = 1.0 + state.clickSize * 8.0;
     for (const bot of drawBots) {
-      // Accumulate displacement between splats (like pointer.dx/dy accumulates between events)
-      const frameDx = bot.vx * dt;
-      const frameDy = bot.vy * dt;
-      bot._splatDx = (bot._splatDx || 0) + frameDx;
-      bot._splatDy = (bot._splatDy || 0) + frameDy;
-      bot._splatTimer = (bot._splatTimer || 0) + dt;
+      const dx = bot.x - bot._prevX;
+      const dy = bot.y - bot._prevY;
+      bot._prevX = bot.x;
+      bot._prevY = bot.y;
 
-      // Only splat ~20 times/sec (every 50ms), matching typical mouse event rate
-      if (bot._splatTimer < 0.05) continue;
-
-      const dx = bot._splatDx;
-      const dy = bot._splatDy;
-      const bspeed = Math.sqrt(dx * dx + dy * dy);
-      bot._splatDx = 0;
-      bot._splatDy = 0;
-      bot._splatTimer = 0;
-
-      if (bspeed < 0.0001) continue;  // skip if barely moved
+      const speed = Math.sqrt(dx * dx + dy * dy);
+      if (speed < 0.0001) continue;
 
       const col = palette(time * 0.15 + bot.colorPhase, 4);
       addSplat(
         bot.x, bot.y,
-        dx * state.splatForce * botForce,
-        dy * state.splatForce * botForce,
-        col[0] * botForce,              // match mouse: col * str, no extra dyeRamp
-        col[1] * botForce,
-        col[2] * botForce,
-        state.splatRadius * botSize * (1.0 + bspeed * 200)  // bspeed is small in normalized coords, scale up
+        dx * state.splatForce * str,
+        dy * state.splatForce * str,
+        col[0] * str, col[1] * str, col[2] * str,
+        state.splatRadius * sz * (1.0 + speed * 20)
       );
     }
 
@@ -3190,6 +3250,13 @@ async function main() {
   wireSlider('pressureIters', 'pressureIters', v => Math.round(v));
   wireSlider('pressureDecay', 'pressureDecay', v => v.toFixed(2));
   wireSlider('simSpeed', 'simSpeed');
+  wireSlider('drawBotCount', 'drawBotCount', v => Math.round(v));
+  wireSlider('drawBotSpeed', 'drawBotSpeed');
+  wireSlider('drawBotTurnRate', 'drawBotTurnRate');
+  wireSlider('drawBotSpeedVar', 'drawBotSpeedVar');
+  wireSlider('drawBotRecMix', 'drawBotRecMix');
+  wireSlider('drawBotChaos', 'drawBotChaos');
+  wireSlider('drawBotDrift', 'drawBotDrift');
   wireSlider('bloomIntensity', 'bloomIntensity', v => v.toFixed(2));
   wireSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
   wireSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
@@ -3230,8 +3297,9 @@ async function main() {
     syncSlider('pressureDecay', 'pressureDecay', v => v.toFixed(2));
     syncSlider('drawBotCount', 'drawBotCount', v => Math.round(v));
     syncSlider('drawBotSpeed', 'drawBotSpeed');
-    syncSlider('drawBotSize', 'drawBotSize');
-    syncSlider('drawBotForce', 'drawBotForce');
+    syncSlider('drawBotTurnRate', 'drawBotTurnRate');
+    syncSlider('drawBotSpeedVar', 'drawBotSpeedVar');
+    syncSlider('drawBotRecMix', 'drawBotRecMix');
     syncSlider('drawBotChaos', 'drawBotChaos');
     syncSlider('drawBotDrift', 'drawBotDrift');
     syncColor('baseColor', 'baseColor');
@@ -3293,10 +3361,11 @@ async function main() {
     state.pressureIters = Math.round(randRange(10, 60));
     state.pressureDecay = snapTo(randRange(0, 1), 0.01);
     // Draw bots
-    state.drawBotCount = Math.round(Math.random() * 4);
+    state.drawBotCount = Math.round(Math.random() * 8);
     state.drawBotSpeed = Math.random();
-    state.drawBotSize = Math.random();
-    state.drawBotForce = Math.random();
+    state.drawBotTurnRate = Math.random();
+    state.drawBotSpeedVar = Math.random();
+    state.drawBotRecMix = Math.random();
     state.drawBotChaos = Math.random();
     state.drawBotDrift = Math.random();
     // NOTE: particleCount is intentionally NOT randomized
@@ -3325,10 +3394,11 @@ async function main() {
     dyeDissipation: { min: 0.98, max: 1.0, step: 0.001 },
     pressureIters: { min: 10, max: 60, step: 1 },
     pressureDecay: { min: 0, max: 1, step: 0.01 },
-    drawBotCount: { min: 0, max: 4, step: 1 },
+    drawBotCount: { min: 0, max: 8, step: 1 },
     drawBotSpeed: { min: 0, max: 1, step: 0.01 },
-    drawBotSize:  { min: 0, max: 1, step: 0.01 },
-    drawBotForce: { min: 0, max: 1, step: 0.01 },
+    drawBotTurnRate: { min: 0, max: 1, step: 0.01 },
+    drawBotSpeedVar: { min: 0, max: 1, step: 0.01 },
+    drawBotRecMix: { min: 0, max: 1, step: 0.01 },
     drawBotChaos: { min: 0, max: 1, step: 0.01 },
     drawBotDrift: { min: 0, max: 1, step: 0.01 },
   };
@@ -3536,8 +3606,13 @@ async function main() {
     state.useRecordings = !state.useRecordings;
     useRecBtn.classList.toggle('active', state.useRecordings);
     if (state.useRecordings) {
-      // Reset playback state on bots
-      for (const bot of drawBots) { bot._rec = null; bot._recPause = 0; }
+      // Seed procedural params from recording fingerprint + reset bot modes
+      if (recording.fingerprint) seedStateFromFingerprint(recording.fingerprint);
+      for (const bot of drawBots) {
+        bot._rec = null; bot._recPause = 0;
+        bot._mode = 'autonomous'; bot._modeTimer = Math.random() * 2.0;
+      }
+      syncAllUI();
     }
     console.log(`Use Recordings: ${state.useRecordings} (${recording.recordings.length} gestures)`);
   });

@@ -162,6 +162,7 @@ const server = http.createServer(async (req, res) => {
       fs.mkdirSync(DATA_DIR, { recursive: true });
       let examples = [];
       try { examples = JSON.parse(fs.readFileSync(EXAMPLES_FILE, 'utf-8')); } catch {}
+      examples = examples.filter(e => e.name !== name);
       examples.push({ name, params: body.params, timestamp: Date.now() });
       fs.writeFileSync(EXAMPLES_FILE, JSON.stringify(examples));
       jsonResponse(res, 200, { ok: true });
