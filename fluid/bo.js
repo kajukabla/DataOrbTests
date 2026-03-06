@@ -17,61 +17,37 @@ export const SLIDER_SPACE = {
   sheenStrength:     { min: 0,    max: 1,     step: 0.01 },
   clickSize:         { min: 0,    max: 1,     step: 0.01 },
   clickStrength:     { min: 0,    max: 1,     step: 0.01 },
-  injectorIntensity: { min: 0,    max: 1,     step: 0.01 },
-  injectorSize:      { min: 0,    max: 1,     step: 0.01 },
-  injectorCount:     { min: 0,    max: 8,     step: 1    },
-  injectorSpeed:     { min: 0,    max: 1,     step: 0.01 },
+  burstBehavior:     { min: 0,    max: 4,     step: 1    },
   burstCount:        { min: 0,    max: 8,     step: 1    },
+  burstForce:        { min: 0,    max: 4,     step: 0.01 },
+  burstForceRandomness:{ min: 0,  max: 1,     step: 0.01 },
+  burstSpeed:        { min: 0,    max: 1.2,   step: 0.01 },
+  burstDuration:     { min: 0,    max: 2,     step: 0.01 },
   noiseAmount:       { min: 0,    max: 1,     step: 0.01 },
+  noiseType:         { min: 0,    max: 7,     step: 1    },
+  noiseBehavior:     { min: 0,    max: 8,     step: 1    },
   noiseFrequency:    { min: 0,    max: 1,     step: 0.01 },
   noiseSpeed:        { min: 0,    max: 1,     step: 0.01 },
+  noiseWarp:         { min: 0,    max: 1,     step: 0.01 },
+  noiseSharpness:    { min: 0,    max: 1,     step: 0.01 },
+  noiseAnisotropy:   { min: 0,    max: 1,     step: 0.01 },
+  noiseBlend:        { min: 0,    max: 1,     step: 0.01 },
   curlStrength:      { min: 0,    max: 50,    step: 1    },
   splatForce:        { min: 1000, max: 20000, step: 100  },
   velDissipation:    { min: 0.99, max: 1.0,   step: 0.001 },
   dyeDissipation:    { min: 0.98, max: 1.0,   step: 0.001 },
   pressureIters:     { min: 10,   max: 60,    step: 1    },
   pressureDecay:     { min: 0,    max: 1,     step: 0.01 },
-  drawBotCount:      { min: 0,    max: 8,     step: 1    },
-  drawBotSpeed:      { min: 0,    max: 1,     step: 0.01 },
-  drawBotSize:       { min: 0.01, max: 5,     step: 0.01 },
-  drawBotTurnRate:   { min: 0,    max: 1,     step: 0.01 },
-  drawBotSpeedVar:   { min: 0,    max: 1,     step: 0.01 },
-  drawBotRecMix:     { min: 0,    max: 1,     step: 0.01 },
-  drawBotChaos:      { min: 0,    max: 1,     step: 0.01 },
-  drawBotDrift:      { min: 0,    max: 1,     step: 0.01 },
   prismaticAmount:   { min: 0,    max: 20,    step: 0.1  },
-  // Blobs — large Brownian-motion agents
-  blobCount:         { min: 0,    max: 4,     step: 1    },
-  blobSpeed:         { min: 0,    max: 1,     step: 0.01 },
-  blobSize:          { min: 0,    max: 1,     step: 0.01 },
-  blobWander:        { min: 0,    max: 1,     step: 0.01 },
-  // Flockers — boids swarm
-  flockCount:        { min: 0,    max: 50,    step: 1    },
-  flockSpeed:        { min: 0,    max: 1,     step: 0.01 },
-  flockSize:         { min: 0,    max: 1,     step: 0.01 },
-  flockSeparation:   { min: 0,    max: 1,     step: 0.01 },
-  flockAlignment:    { min: 0,    max: 1,     step: 0.01 },
-  flockCohesion:     { min: 0,    max: 1,     step: 0.01 },
-  flockBlobReact:    { min: -1,   max: 1,     step: 0.01 },
   // Dye-coupled noise
   noiseDyeIntensity: { min: 0,    max: 1,     step: 0.01 },
   dyeNoiseAmount:    { min: 0,    max: 0.15,  step: 0.001 },
-  // Reaction-diffusion
-  rdAmount:          { min: 0,    max: 1,     step: 0.01 },
-  rdFeedRate:        { min: 0.01, max: 0.08,  step: 0.001 },
-  rdKillRate:        { min: 0.04, max: 0.07,  step: 0.001 },
-  rdDyeAmount:       { min: 0,    max: 1,     step: 0.01 },
-  rdForceAmount:     { min: 0,    max: 1,     step: 0.01 },
-  rdScale:           { min: 0,    max: 1,     step: 0.01 },
   // Temperature/buoyancy
   tempAmount:        { min: 0,    max: 1,     step: 0.01 },
   tempBuoyancy:      { min: 0,    max: 1,     step: 0.01 },
   tempDissipation:   { min: 0.95, max: 1.0,   step: 0.001 },
   tempDyeTint:       { min: 0,    max: 1,     step: 0.01 },
-  // Chemotaxis / Depth / Mood
-  flockChemotaxis:   { min: 0,    max: 1,     step: 0.01 },
-  depthAmount:       { min: 0,    max: 1,     step: 0.01 },
-  depthSpeed:        { min: 0,    max: 1,     step: 0.01 },
+  // Mood
   moodAmount:        { min: 0,    max: 1,     step: 0.01 },
   moodSpeed:         { min: 0,    max: 1,     step: 0.01 },
   paletteIndex:      { min: -1,   max: 49,    step: 1 },
@@ -179,10 +155,7 @@ export function normalizedToState(x, state, lockedKeys) {
   }
   // Clamp critical params so the sim is always visually active
   if (state.simSpeed < 0.2) state.simSpeed = 0.2;
-  if (state.injectorIntensity < 0.3) state.injectorIntensity = 0.3;
-  if (state.injectorCount < 1) state.injectorCount = 1;
   if (state.splatForce < 3000) state.splatForce = 3000;
-  state.burstCount = 0;
 }
 
 /** Generate a random normalized vector in [0,1]^D. */
@@ -367,6 +340,12 @@ export class BOController {
   }
 
   loadExample(example, state, syncAllUI) {
+    // Reset ALL slider params to defaults before applying preset
+    for (const key of SLIDER_KEYS) {
+      const s = SLIDER_SPACE[key];
+      setStateVal(state, key, s.min);
+    }
+    // Apply saved preset values
     for (const key of SLIDER_KEYS) {
       if (example.params[key] !== undefined) {
         setStateVal(state, key, example.params[key]);
@@ -734,8 +713,9 @@ export class BOController {
   /** Toggle locking motion/dynamics params. */
   toggleLockMotion() {
     const motionKeys = SLIDER_KEYS.filter(k =>
-      k.startsWith('drawBot') || k.startsWith('blob') || k.startsWith('flock') ||
-      ['simSpeed', 'injectorSpeed', 'noiseAmount', 'noiseFrequency', 'noiseSpeed',
+      ['simSpeed', 'burstBehavior', 'burstCount', 'burstForce', 'burstForceRandomness', 'burstSpeed', 'burstDuration',
+        'noiseAmount', 'noiseType', 'noiseBehavior', 'noiseFrequency', 'noiseSpeed',
+        'noiseWarp', 'noiseSharpness', 'noiseAnisotropy', 'noiseBlend',
         'curlStrength', 'dyeNoiseAmount'].includes(k));
     const allLocked = motionKeys.every(k => this.lockedKeys.has(k));
     if (allLocked) {

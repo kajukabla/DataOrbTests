@@ -4,6 +4,11 @@ const WORKGROUP = 8;
 const TEX_FMT = 'rgba16float';
 const PARTICLE_STRIDE = 32;       // 8 floats × 4 bytes
 const PARTICLE_WG = 256;
+const ENABLE_REACTION_DIFFUSION = false;
+// Shared hard containment radius for all simulation layers.
+// Slightly inset from 0.37 to prevent post-process/filter edge ridges.
+const SIM_SPHERE_RADIUS = 0.3665;
+const VISIBLE_SPHERE_RADIUS = SIM_SPHERE_RADIUS;
 
 const state = {
   particleCount: 4194304,   // 4M default
@@ -23,14 +28,23 @@ const state = {
   roughness: 0.4,
   clickSize: 0.5,
   clickStrength: 0.5,
-  injectorIntensity: 1.0,
-  noiseAmount: 0.0,
+  noiseAmount: 0.18,
   noiseFrequency: 0.5,
   noiseSpeed: 0.5,
-  injectorSize: 0.5,
-  injectorCount: 4,
-  injectorSpeed: 0.5,
+  noiseType: 0,         // 0..7 (dropdown, includes Jupiter)
+  noiseBehavior: 0,     // 0=none, 1=mirror, 2+=n-fold symmetry
+  noiseMapping: 0,      // 0=normal cartesian, 1=radial outflow
+  noiseWarp: 0.35,
+  noiseSharpness: 0.5,
+  noiseAnisotropy: 0.5,
+  noiseBlend: 0.5,
   burstCount: 0,
+  burstBehavior: 0,
+  burstForce: 1.0,
+  burstForceRandomness: 0.25,
+  burstSpeed: 0.4,
+  burstDuration: 0.25,
+  burstWidth: 0.3,
   sheenColor: [1.0, 0.9, 0.7],
   rimIntensity: 0.5,
   chromaticStrength: 1.0,
@@ -41,49 +55,28 @@ const state = {
   pressureDecay: 0.8,
   velDissipation: 0.998,
   dyeDissipation: 0.993,
-  drawBotCount: 0,
-  drawBotSpeed: 0.5,
-  drawBotSize: 3.0,
-  drawBotChaos: 0.3,
-  drawBotDrift: 0.5,
-  drawBotTurnRate: 0.5,
-  drawBotSpeedVar: 0.5,
-  drawBotRecMix: 0.5,
-  // Blobs — large Brownian-motion agents
-  blobCount: 0,
-  blobSpeed: 0.3,
-  blobSize: 0.7,
-  blobWander: 0.5,
-  // Flockers — small boids-style swarm
-  flockCount: 0,
-  flockSpeed: 0.5,
-  flockSize: 0.3,
-  flockSeparation: 0.6,
-  flockAlignment: 0.4,
-  flockCohesion: 0.5,
-  flockBlobReact: 0.3,
   // Dye-coupled noise
   noiseDyeIntensity: 0.0,
   dyeNoiseAmount: 0.0,
-  rdAmount: 0,
-  rdFeedRate: 0.04,
-  rdKillRate: 0.06,
+  // Reaction-diffusion is temporarily disabled.
+  rdAmount: 0.0,
+  rdFeedRate: 0.028,
+  rdKillRate: 0.056,
   rdDyeAmount: 0,
   rdForceAmount: 0,
-  rdScale: 0.5,
+  rdScale: 0.12,
   bloomIntensity: 0,
   bloomThreshold: 0.4,
   bloomRadius: 0.5,
   splatRadius: 0.0015,
   simSpeed: 1.0,
+  masterSpeed: 1.0,
   autoMorph: false,
   // Temperature/buoyancy
   tempAmount: 0,
   tempBuoyancy: 0.5,
   tempDissipation: 0.99,
   tempDyeTint: 0,
-  // Chemotaxis
-  flockChemotaxis: 0,
   // Depth/Parallax
   depthAmount: 0,
   depthSpeed: 0.3,
@@ -92,7 +85,162 @@ const state = {
   moodSpeed: 0.3,
   // Palette
   paletteIndex: -1,
+  // Face effector
+  faceEffectorMode: 0,
+  faceDebugMode: 0,
 };
+
+const FACE_TRACKER_LIB_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+const FACE_TRACKER_WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
+const FACE_TRACKER_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+
+const FACE_MODE_PROFILES = {
+  1: { // Vertex Burst Jets
+    noiseAmount: 0.14,
+    noiseType: 4,
+    noiseFrequency: 0.52,
+    noiseSpeed: 0.62,
+    noiseDyeIntensity: 0.12,
+    dyeNoiseAmount: 0.016,
+    curlStrength: 21,
+    tempAmount: 0.06,
+    tempBuoyancy: 0.45,
+    burstCount: 2,
+    burstForce: 0.42,
+  },
+  2: { // Mesh Noise Mask
+    noiseAmount: 0.26,
+    noiseType: 1,
+    noiseFrequency: 0.66,
+    noiseSpeed: 0.38,
+    noiseWarp: 0.92,
+    noiseSharpness: 0.66,
+    noiseBlend: 0.72,
+    noiseDyeIntensity: 0.2,
+    dyeNoiseAmount: 0.03,
+    curlStrength: 18,
+    tempAmount: 0.02,
+    tempBuoyancy: 0.3,
+    burstCount: 0,
+    burstForce: 0.2,
+  },
+  3: { // Mouth Shockwave
+    noiseAmount: 0.08,
+    noiseType: 0,
+    noiseFrequency: 0.44,
+    noiseSpeed: 0.5,
+    noiseDyeIntensity: 0.05,
+    dyeNoiseAmount: 0.012,
+    curlStrength: 15,
+    tempAmount: 0.22,
+    tempBuoyancy: 0.72,
+    burstCount: 1,
+    burstForce: 0.55,
+  },
+  4: { // Jawline Vortex
+    noiseAmount: 0.19,
+    noiseType: 5,
+    noiseFrequency: 0.58,
+    noiseSpeed: 0.55,
+    noiseAnisotropy: 0.88,
+    noiseDyeIntensity: 0.08,
+    dyeNoiseAmount: 0.014,
+    curlStrength: 32,
+    tempAmount: 0.1,
+    tempBuoyancy: 0.5,
+    burstCount: 0,
+    burstForce: 0.25,
+  },
+  5: { // Brow Shear Fans
+    noiseAmount: 0.15,
+    noiseType: 6,
+    noiseFrequency: 0.6,
+    noiseSpeed: 0.44,
+    noiseWarp: 0.65,
+    noiseSharpness: 0.7,
+    noiseDyeIntensity: 0.11,
+    dyeNoiseAmount: 0.02,
+    curlStrength: 24,
+    tempAmount: 0.08,
+    tempBuoyancy: 0.56,
+    burstCount: 0,
+    burstForce: 0.2,
+  },
+  6: { // Cheek Pulse Emitters
+    noiseAmount: 0.16,
+    noiseType: 3,
+    noiseFrequency: 0.68,
+    noiseSpeed: 0.58,
+    noiseBlend: 0.9,
+    noiseDyeIntensity: 0.14,
+    dyeNoiseAmount: 0.025,
+    curlStrength: 20,
+    tempAmount: 0.14,
+    tempBuoyancy: 0.6,
+    burstCount: 0,
+    burstForce: 0.22,
+  },
+  7: { // Fluid Texture Mesh
+    noiseAmount: 0.1,
+    noiseType: 2,
+    noiseFrequency: 0.5,
+    noiseSpeed: 0.34,
+    noiseDyeIntensity: 0.04,
+    dyeNoiseAmount: 0.008,
+    curlStrength: 14,
+    tempAmount: 0.04,
+    tempBuoyancy: 0.4,
+    burstCount: 0,
+    burstForce: 0.15,
+  },
+};
+
+const FACE_IDX = {
+  contour: [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109],
+  jaw: [323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93],
+  lips: [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95, 78],
+  leftBrow: [70, 63, 105, 66, 107],
+  rightBrow: [300, 293, 334, 296, 336],
+  leftEye: [33, 160, 158, 133, 153, 144],
+  rightEye: [263, 387, 385, 362, 380, 373],
+  nose: [1, 4, 6, 168, 195, 5, 98, 327],
+  cheeks: [50, 123, 117, 346, 352, 280],
+};
+
+function uniqueIndices(...groups) {
+  const out = [];
+  const seen = new Set();
+  for (const group of groups) {
+    for (const idx of group) {
+      if (seen.has(idx)) continue;
+      seen.add(idx);
+      out.push(idx);
+    }
+  }
+  return out;
+}
+
+const FACE_DENSE_INDICES = uniqueIndices(
+  FACE_IDX.contour,
+  FACE_IDX.lips,
+  FACE_IDX.leftEye,
+  FACE_IDX.rightEye,
+  FACE_IDX.leftBrow,
+  FACE_IDX.rightBrow,
+  FACE_IDX.nose,
+  FACE_IDX.cheeks
+);
+
+const FACE_DEBUG_PATHS = [
+  { points: FACE_IDX.contour, closed: true },
+  { points: FACE_IDX.lips, closed: true },
+  { points: FACE_IDX.leftEye, closed: true },
+  { points: FACE_IDX.rightEye, closed: true },
+  { points: FACE_IDX.leftBrow, closed: false },
+  { points: FACE_IDX.rightBrow, closed: false },
+  { points: FACE_IDX.jaw, closed: false },
+  { points: FACE_IDX.nose, closed: false },
+];
 
 // ─── Color Palettes ──────────────────────────────────────────────────────────
 function hexToLinear(hex) {
@@ -210,7 +358,7 @@ struct Params {
 @group(0) @binding(0) var<uniform> p: Params;
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS: f32 = 0.37;
+const SPHERE_RADIUS: f32 = ${SIM_SPHERE_RADIUS};
 `;
 
 const MAX_SPLATS = 128;
@@ -235,7 +383,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let uv = (vec2f(id.xy) + 0.5) / p.simRes;
   let toCenter = uv - SPHERE_CENTER;
   let dist = length(toCenter);
-  if (dist > SPHERE_RADIUS - 0.02) {
+  if (dist > SPHERE_RADIUS) {
     textureStore(dst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     return;
   }
@@ -248,6 +396,15 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let dist2 = dot(diff, diff);
     let strength = exp(-dist2 / (2.0 * s.radius * s.radius));
     vel += strength * boundaryFade * vec2f(s.dx, s.dy);
+  }
+  if (dist > SPHERE_RADIUS - 0.04) {
+    let normal = toCenter / max(dist, 1e-5);
+    let outward = dot(vel, normal);
+    if (outward > 0.0) {
+      vel -= normal * outward;
+    }
+    let wallT = clamp((dist - (SPHERE_RADIUS - 0.04)) / 0.04, 0.0, 1.0);
+    vel *= mix(1.0, 0.72, wallT);
   }
   textureStore(dst, id.xy, vec4f(vel, 0.0, 1.0));
 }
@@ -370,7 +527,16 @@ fn main(
   }
   N = N / lenN;
   let force = vec2f(N.y, -N.x) * curl * p.curlStrength;
-  let newVel = vel + force * p.dt;
+  var newVel = vel + force * p.dt;
+  if (dist > SPHERE_RADIUS - 0.04) {
+    let normal = (uv - SPHERE_CENTER) / max(dist, 1e-5);
+    let outward = dot(newVel, normal);
+    if (outward > 0.0) {
+      newVel -= normal * outward;
+    }
+    let wallT = clamp((dist - (SPHERE_RADIUS - 0.04)) / 0.04, 0.0, 1.0);
+    newVel *= mix(1.0, 0.75, wallT);
+  }
   textureStore(velDst, id.xy, vec4f(newVel, 0.0, 1.0));
 }
 `;
@@ -494,7 +660,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= res || id.y >= res) { return; }
   let uv = (vec2f(id.xy) + 0.5) / p.simRes;
 
-  // Sphere boundary — hard kill matches particle visibility (0.42)
+  // Sphere boundary: hard kill outside simulation circle
   let toCenter = uv - SPHERE_CENTER;
   let dist = length(toCenter);
   if (dist > SPHERE_RADIUS) {
@@ -544,7 +710,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= res || id.y >= res) { return; }
   let uv = (vec2f(id.xy) + 0.5) / p.simRes;
 
-  // Hard kill dye outside sphere — matches particle visibility
+  // Hard kill dye outside sphere
   let toCenter = uv - SPHERE_CENTER;
   let dist = length(toCenter);
   if (dist > SPHERE_RADIUS) {
@@ -586,6 +752,14 @@ struct NoiseParams {
   simRes: f32,
   frequency: f32,
   speed: f32,
+  noiseType: f32, // 0..7
+  behavior: f32,  // 0=none, 1=mirror, 2+=n-fold symmetry
+  mapping: f32,   // 0=cartesian, 1=radial outflow
+  warp: f32,
+  sharpness: f32,
+  anisotropy: f32,
+  blend: f32,
+  pad0: f32,
   pad1: f32,
   pad2: f32,
   pad3: f32,
@@ -594,6 +768,11 @@ struct NoiseParams {
 @group(0) @binding(0) var<uniform> np: NoiseParams;
 @group(0) @binding(1) var velSrc: texture_2d<f32>;
 @group(0) @binding(2) var velDst: texture_storage_2d<rgba16float, write>;
+
+const PI: f32 = 3.14159265359;
+const TAU: f32 = 6.28318530718;
+const SPHERE_CENTER = vec2f(0.5, 0.5);
+const SPHERE_RADIUS = ${SIM_SPHERE_RADIUS};
 
 fn hash(p: vec2f) -> f32 {
   var n = u32(dot(p, vec2f(127.1, 311.7)) * 43758.5453);
@@ -614,8 +793,179 @@ fn vnoise(p: vec2f) -> f32 {
   );
 }
 
-const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS = 0.37;
+fn rot2(p: vec2f, a: f32) -> vec2f {
+  let c = cos(a);
+  let s = sin(a);
+  return vec2f(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+
+fn worleyLite(p: vec2f) -> f32 {
+  let c = floor(p);
+  let f = fract(p);
+  let o0 = vec2f(0.0, 0.0);
+  let o1 = vec2f(1.0, 0.0);
+  let o2 = vec2f(0.0, 1.0);
+  let o3 = vec2f(1.0, 1.0);
+  let p0 = o0 + vec2f(hash(c + o0), hash(c + o0 + vec2f(17.0, 59.0))) - f;
+  let p1 = o1 + vec2f(hash(c + o1), hash(c + o1 + vec2f(17.0, 59.0))) - f;
+  let p2 = o2 + vec2f(hash(c + o2), hash(c + o2 + vec2f(17.0, 59.0))) - f;
+  let p3 = o3 + vec2f(hash(c + o3), hash(c + o3 + vec2f(17.0, 59.0))) - f;
+  let d = min(min(length(p0), length(p1)), min(length(p2), length(p3)));
+  return 1.0 - clamp(d, 0.0, 1.0);
+}
+
+fn applyNoiseMirror(uvRaw: vec2f) -> vec2f {
+  let pMirror = uvRaw - SPHERE_CENTER;
+  return SPHERE_CENTER + vec2f(abs(pMirror.x), pMirror.y);
+}
+
+fn applyNoiseMapping(uvRaw: vec2f, t: f32) -> vec2f {
+  if (np.mapping < 0.5) {
+    return uvRaw;
+  }
+
+  // Radial outflow mapping: domain scrolls from the center toward the edge.
+  let p = uvRaw - SPHERE_CENTER;
+  let r = length(p) / max(SPHERE_RADIUS, 1e-5);
+  let a = atan2(p.y, p.x);
+  let a01 = (a + PI) / TAU;
+  let radialScroll = r * (3.2 + np.frequency * 2.6) - t * (0.45 + np.speed * 1.8);
+  let twist = (vnoise(vec2f(a01 * 8.0, r * 4.0 + t * 0.2)) - 0.5) * (0.35 + np.warp * 0.75);
+  return vec2f(a01 * (1.0 + np.anisotropy * 3.0), radialScroll + twist);
+}
+
+fn scalarFieldCore(uvRaw: vec2f) -> f32 {
+  let t = np.time * (0.1 + np.speed * 2.0);
+  let uv = applyNoiseMapping(uvRaw, t);
+  let baseScale = 2.0 + np.frequency * 14.0;
+  var p = uv * baseScale;
+
+  // Profile defaults by type.
+  let ty = floor(np.noiseType + 0.5);
+  var pWarp = 0.20;
+  var pSharp = 0.25;
+  var pAniso = 0.15;
+  var pBlend = 0.20;
+  if (ty < 0.5) { // Classic Curl
+    pWarp = 0.20; pSharp = 0.20; pAniso = 0.10; pBlend = 0.20;
+  } else if (ty < 1.5) { // Domain-Warped Curl
+    pWarp = 0.95; pSharp = 0.35; pAniso = 0.30; pBlend = 0.40;
+  } else if (ty < 2.5) { // Ridged Fractal
+    pWarp = 0.40; pSharp = 1.00; pAniso = 0.35; pBlend = 0.35;
+  } else if (ty < 3.5) { // Voronoi / Cell
+    pWarp = 0.35; pSharp = 0.55; pAniso = 0.20; pBlend = 1.00;
+  } else if (ty < 4.5) { // Flow / Rotated
+    pWarp = 0.55; pSharp = 0.35; pAniso = 0.95; pBlend = 0.35;
+  } else if (ty < 5.5) { // Gabor-like
+    pWarp = 0.25; pSharp = 0.75; pAniso = 1.00; pBlend = 0.50;
+  } else if (ty < 6.5) { // Hybrid
+    pWarp = 0.80; pSharp = 0.70; pAniso = 0.65; pBlend = 0.75;
+  } else { // Jupiter
+    pWarp = 0.88; pSharp = 0.62; pAniso = 0.95; pBlend = 0.58;
+  }
+
+  // Shared sliders nudge profile defaults.
+  let warpW = clamp(mix(pWarp, np.warp, 0.65), 0.0, 1.0);
+  let sharpW = clamp(mix(pSharp, np.sharpness, 0.65), 0.0, 1.0);
+  let anisoW = clamp(mix(pAniso, np.anisotropy, 0.65), 0.0, 1.0);
+  let blendW = clamp(mix(pBlend, np.blend, 0.65), 0.0, 1.0);
+
+  // Domain warp.
+  let w = vec2f(
+    vnoise(p * 0.65 + vec2f(t * 0.23, -t * 0.17)),
+    vnoise(p * 0.65 + vec2f(-t * 0.19, t * 0.21))
+  ) * 2.0 - 1.0;
+  p += w * warpW * 2.4;
+
+  // Multi-scale base field.
+  let p2 = rot2(p * 2.0, 0.35 + anisoW * 1.2);
+  let p3 = rot2(p * 4.0, -0.5 - anisoW * 0.9);
+  let n1 = vnoise(p + vec2f(t * 0.30, t * 0.20));
+  let n2 = vnoise(p2 + vec2f(-t * 0.50, t * 0.40));
+  let n3 = vnoise(p3 + vec2f(t * 0.70, -t * 0.30));
+  let fbm = n1 * 0.5 + n2 * 0.3 + n3 * 0.2;
+
+  // Ridged multifractal feel.
+  let ridged = pow(1.0 - abs(fbm * 2.0 - 1.0), 1.0 + sharpW * 2.0);
+
+  // Banded/anisotropic streaking.
+  let lat = (uv.y - 0.5) * (10.0 + np.frequency * 38.0);
+  let jets = 0.5 + 0.5 * sin(lat + t * (0.6 + np.speed * 1.8) + (n1 - 0.5) * 3.2);
+  let dirTheta = (vnoise(uv * 0.6 + vec2f(9.0, 4.0)) * 2.0 - 1.0) * PI;
+  let dir = vec2f(cos(dirTheta), sin(dirTheta));
+  let streak = 0.5 + 0.5 * sin(dot(uv - SPHERE_CENTER, dir) * (18.0 + np.frequency * 30.0) + t * 1.2);
+  let banded = mix(fbm, fbm * mix(1.0, pow(jets, 1.7), anisoW), 0.6) * mix(1.0, streak, anisoW * 0.5);
+
+  // Cellular breakup + micro detail.
+  let cell = worleyLite(p * (1.4 + np.frequency * 1.6));
+  let micro = (vnoise(p * 7.0 + vec2f(t * 0.9, -t * 0.8)) - 0.5) * 2.0;
+
+  var s = mix(banded, ridged, sharpW);
+  s += (cell - 0.5) * blendW * 0.8;
+  s += micro * (0.15 + 0.12 * blendW);
+
+  // Type accents.
+  if (ty >= 6.5) {
+    // Jupiter: banded gas giant flow with storm cells and a red-spot style vortex.
+    let pPlanet = uvRaw - SPHERE_CENTER;
+    let latNorm = pPlanet.y / max(SPHERE_RADIUS, 1e-5);
+    let lon = (atan2(pPlanet.y, pPlanet.x) + PI) / TAU;
+    let shear = (vnoise(vec2f(latNorm * 3.0 + 17.0, t * 0.15)) - 0.5) * (0.8 + np.warp);
+    let bandPhase = latNorm * (18.0 + np.frequency * 22.0) + shear * 4.0 + t * (0.2 + np.speed * 1.2);
+    let bands = 0.5 + 0.5 * sin(bandPhase);
+    let storms = vnoise(vec2f(lon * 12.0 + t * 0.22, latNorm * 9.0 - t * 0.18));
+    let grsCenter = vec2f(0.76, 0.44);
+    let grsDelta = (uvRaw - grsCenter) / vec2f(0.09, 0.055);
+    let grsMask = exp(-dot(grsDelta, grsDelta));
+    let grsSwirl = 0.5 + 0.5 * sin(atan2(grsDelta.y, grsDelta.x) * 5.0 + t * 1.8);
+    var jupiter = mix(bands, storms, 0.35 + 0.2 * blendW);
+    jupiter = mix(jupiter, grsSwirl, grsMask * (0.55 + 0.3 * blendW));
+    s = mix(s, jupiter, 0.72);
+  } else if (ty >= 5.5) {
+    let hybridCell = worleyLite(rot2(p * 1.8, 0.9) + vec2f(t * 0.2, -t * 0.14));
+    s = mix(s, s + (hybridCell - 0.5) * 0.8, 0.35);
+  } else if (ty >= 4.5 && ty < 5.5) {
+    s = mix(s, streak, 0.45 + 0.3 * anisoW);
+  } else if (ty >= 3.5 && ty < 4.5) {
+    s = mix(s, cell, 0.55);
+  }
+
+  // Additional radial feel when radial mapping is enabled.
+  if (np.mapping > 0.5) {
+    let pRad = uvRaw - SPHERE_CENTER;
+    let r = length(pRad) / max(SPHERE_RADIUS, 1e-5);
+    let radialPulse = 0.5 + 0.5 * sin(r * (26.0 + np.frequency * 20.0) - t * (2.6 + np.speed * 4.2));
+    s = mix(s, radialPulse, 0.38 + 0.22 * np.blend);
+  }
+  return s;
+}
+
+fn scalarField(uvRaw: vec2f) -> f32 {
+  if (np.behavior < 0.5) {
+    return scalarFieldCore(uvRaw);
+  }
+  if (np.behavior < 1.5) {
+    // Pure left/right reflection of the source field.
+    return scalarFieldCore(applyNoiseMirror(uvRaw));
+  }
+
+  // 2+: n-fold reflected rotational symmetry without wedge folding spokes.
+  let folds = i32(clamp(floor(np.behavior + 0.5), 2.0, 8.0));
+  let p = uvRaw - SPHERE_CENTER;
+  var acc = 0.0;
+  var count = 0.0;
+  var i = 0;
+  loop {
+    if (i >= folds || i >= 8) { break; }
+    let a = TAU * f32(i) / f32(folds);
+    let pr = rot2(p, a);
+    let uvFold = SPHERE_CENTER + vec2f(abs(pr.x), pr.y);
+    acc += scalarFieldCore(uvFold);
+    count += 1.0;
+    i = i + 1;
+  }
+  return acc / max(count, 1.0);
+}
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -624,45 +974,40 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let uv = (vec2f(id.xy) + 0.5) / np.simRes;
 
   let dist = length(uv - SPHERE_CENTER);
-  if (dist > SPHERE_RADIUS - 0.03) {
-    textureStore(velDst, id.xy, textureLoad(velSrc, id.xy, 0));
+  if (dist > SPHERE_RADIUS) {
+    textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     return;
   }
-  // Fade noise to zero near sphere edge to prevent dye bleed
-  let edgeFade = smoothstep(SPHERE_RADIUS - 0.03, SPHERE_RADIUS - 0.08, dist);
+  let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.08, dist);
 
   var vel = textureLoad(velSrc, id.xy, 0).xy;
-
-  let baseScale = 2.0 + np.frequency * 14.0;
-  let ts = np.time * (0.1 + np.speed * 2.0);
-  var curl = vec2f(0.0);
   let eps = 1.0 / np.simRes;
+  let sC = scalarField(uv);
+  let sX = scalarField(uv + vec2f(eps, 0.0));
+  let sY = scalarField(uv + vec2f(0.0, eps));
+  var curl = vec2f(sY - sC, -(sX - sC)) / eps;
 
-  // Octave 1 — large swirls
-  let s1 = baseScale;
-  let p1 = uv * s1 + vec2f(ts * 0.3, ts * 0.2);
-  let n1c = vnoise(p1);
-  let n1x = vnoise(p1 + vec2f(eps * s1, 0.0));
-  let n1y = vnoise(p1 + vec2f(0.0, eps * s1));
-  curl += vec2f(n1y - n1c, -(n1x - n1c)) / eps * 0.5;
+  let uv2 = SPHERE_CENTER + (uv - SPHERE_CENTER) * 1.91;
+  let uv2X = SPHERE_CENTER + (uv + vec2f(eps, 0.0) - SPHERE_CENTER) * 1.91;
+  let uv2Y = SPHERE_CENTER + (uv + vec2f(0.0, eps) - SPHERE_CENTER) * 1.91;
+  let s2C = scalarField(uv2);
+  let s2X = scalarField(uv2X);
+  let s2Y = scalarField(uv2Y);
+  curl += vec2f(s2Y - s2C, -(s2X - s2C)) / eps * (0.35 + np.blend * 0.25);
 
-  // Octave 2 — medium detail
-  let s2 = baseScale * 2.0;
-  let p2 = uv * s2 + vec2f(-ts * 0.5, ts * 0.4);
-  let n2c = vnoise(p2);
-  let n2x = vnoise(p2 + vec2f(eps * s2, 0.0));
-  let n2y = vnoise(p2 + vec2f(0.0, eps * s2));
-  curl += vec2f(n2y - n2c, -(n2x - n2c)) / eps * 0.3;
-
-  // Octave 3 — fine detail
-  let s3 = baseScale * 4.0;
-  let p3 = uv * s3 + vec2f(ts * 0.7, -ts * 0.3);
-  let n3c = vnoise(p3);
-  let n3x = vnoise(p3 + vec2f(eps * s3, 0.0));
-  let n3y = vnoise(p3 + vec2f(0.0, eps * s3));
-  curl += vec2f(n3y - n3c, -(n3x - n3c)) / eps * 0.2;
-
-  vel += curl * np.amount * 8.0 * edgeFade;
+  var behaviorGain = 1.0;
+  if (np.behavior >= 2.0) { behaviorGain = 0.82; }
+  let layerBoost = 1.0 + (np.sharpness + np.warp + np.anisotropy + np.blend) * 0.35;
+  vel += curl * np.amount * (7.0 + 2.0 * layerBoost) * edgeFade * behaviorGain;
+  if (dist > SPHERE_RADIUS - 0.04) {
+    let normal = (uv - SPHERE_CENTER) / max(dist, 1e-5);
+    let outward = dot(vel, normal);
+    if (outward > 0.0) {
+      vel -= normal * outward;
+    }
+    let wallT = clamp((dist - (SPHERE_RADIUS - 0.04)) / 0.04, 0.0, 1.0);
+    vel *= mix(1.0, 0.8, wallT);
+  }
   textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
 }
 `;
@@ -683,7 +1028,7 @@ struct DyeNoiseParams {
 @group(0) @binding(3) var dyeDst: texture_storage_2d<rgba16float, write>;
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS = 0.37;
+const SPHERE_RADIUS = ${SIM_SPHERE_RADIUS};
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -744,7 +1089,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 // ─── Sphere Cleanup Shader (hard-zero vel+dye outside sphere every frame) ────
 const sphereCleanupShader = /* wgsl */`
 const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS = 0.37;
+const SPHERE_RADIUS = ${SIM_SPHERE_RADIUS};
+const VISIBLE_RADIUS = ${VISIBLE_SPHERE_RADIUS};
 
 struct CleanupParams { simRes: f32, pad1: f32, pad2: f32, pad3: f32, };
 @group(0) @binding(0) var<uniform> cp: CleanupParams;
@@ -759,12 +1105,28 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= res || id.y >= res) { return; }
   let uv = (vec2f(id.xy) + 0.5) / cp.simRes;
   let dist = length(uv - SPHERE_CENTER);
-  if (dist > SPHERE_RADIUS) {
-    textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 0.0));
-    textureStore(dyeDst, id.xy, vec4f(0.0, 0.0, 0.0, 0.0));
+  var vel = textureLoad(velSrc, id.xy, 0).xy;
+  var dye = textureLoad(dyeSrc, id.xy, 0).rgb;
+
+  if (dist > VISIBLE_RADIUS || dist > SPHERE_RADIUS) {
+    textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+    textureStore(dyeDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
   } else {
-    textureStore(velDst, id.xy, textureLoad(velSrc, id.xy, 0));
-    textureStore(dyeDst, id.xy, textureLoad(dyeSrc, id.xy, 0));
+    if (dist > VISIBLE_RADIUS - 0.05) {
+      let normal = (uv - SPHERE_CENTER) / max(dist, 1e-5);
+      let outward = dot(vel, normal);
+      if (outward > 0.0) {
+        vel -= normal * outward;
+      }
+      let wallT = clamp((dist - (VISIBLE_RADIUS - 0.05)) / 0.05, 0.0, 1.0);
+      vel *= mix(1.0, 0.7, wallT);
+    }
+    // Keep a narrow hard-clear band so RD/noise cannot form visible edge ridges.
+    if (dist > VISIBLE_RADIUS - 0.006) {
+      dye = vec3f(0.0, 0.0, 0.0);
+    }
+    textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
+    textureStore(dyeDst, id.xy, vec4f(dye, 1.0));
   }
 }
 `;
@@ -780,14 +1142,19 @@ struct RDParams {
   rdDyeAmount: f32,
   rdForceAmount: f32,
   rdScale: f32,
+  flowCoupling: f32,
+  noiseAmount: f32,
+  noiseFrequency: f32,
+  noiseSpeed: f32,
 };
 
 @group(0) @binding(0) var<uniform> rp: RDParams;
 @group(0) @binding(1) var rdSrc: texture_2d<f32>;
-@group(0) @binding(2) var rdDst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var velSrc: texture_2d<f32>;
+@group(0) @binding(3) var rdDst: texture_storage_2d<rgba16float, write>;
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS: f32 = 0.37;
+const SPHERE_RADIUS: f32 = ${SIM_SPHERE_RADIUS};
 const Da: f32 = 1.0;
 const Db: f32 = 0.5;
 
@@ -803,25 +1170,51 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   }
 
   let c = textureLoad(rdSrc, id.xy, 0);
-  let A = c.r;
-  let B = c.g;
+  let vel = textureLoad(velSrc, id.xy, 0).xy;
+  let flowPx = clamp(round(vel * (0.03 + rp.noiseFrequency * 0.06)), vec2f(-3.0), vec2f(3.0));
+  let samplePos = vec2i(
+    clamp(i32(id.x) - i32(flowPx.x), 0, i32(res) - 1),
+    clamp(i32(id.y) - i32(flowPx.y), 0, i32(res) - 1)
+  );
+  let adv = textureLoad(rdSrc, vec2u(samplePos), 0);
+  let flowMix = clamp(rp.flowCoupling * (0.2 + rp.noiseAmount * 0.8), 0.0, 1.0) * 0.35;
+  let A = mix(c.r, adv.r, flowMix);
+  let B = mix(c.g, adv.g, flowMix);
 
-  // 5-point Laplacian (fixed step=1, pattern size via feed/kill rates)
-  let cR = textureLoad(rdSrc, vec2u(min(id.x + 1u, res - 1u), id.y), 0);
-  let cL = textureLoad(rdSrc, vec2u(max(id.x, 1u) - 1u, id.y), 0);
-  let cU = textureLoad(rdSrc, vec2u(id.x, min(id.y + 1u, res - 1u)), 0);
-  let cD = textureLoad(rdSrc, vec2u(id.x, max(id.y, 1u) - 1u), 0);
+  // 9-point Laplacian — keep legacy presets (rdScale ~0.5) in an active, not over-diffused, range.
+  let step = u32(1.0 + floor(rp.rdScale * 3.0));
+  let cR = textureLoad(rdSrc, vec2u(min(id.x + step, res - 1u), id.y), 0);
+  let cL = textureLoad(rdSrc, vec2u(max(id.x, step) - step, id.y), 0);
+  let cU = textureLoad(rdSrc, vec2u(id.x, min(id.y + step, res - 1u)), 0);
+  let cD = textureLoad(rdSrc, vec2u(id.x, max(id.y, step) - step), 0);
+  let cUR = textureLoad(rdSrc, vec2u(min(id.x + step, res - 1u), min(id.y + step, res - 1u)), 0);
+  let cUL = textureLoad(rdSrc, vec2u(max(id.x, step) - step, min(id.y + step, res - 1u)), 0);
+  let cDR = textureLoad(rdSrc, vec2u(min(id.x + step, res - 1u), max(id.y, step) - step), 0);
+  let cDL = textureLoad(rdSrc, vec2u(max(id.x, step) - step, max(id.y, step) - step), 0);
 
-  let lapA = cR.r + cL.r + cU.r + cD.r - 4.0 * A;
-  let lapB = cR.g + cL.g + cU.g + cD.g - 4.0 * B;
+  let lapA = (cR.r + cL.r + cU.r + cD.r) * 0.2 + (cUR.r + cUL.r + cDR.r + cDL.r) * 0.05 - A;
+  let lapB = (cR.g + cL.g + cU.g + cD.g) * 0.2 + (cUR.g + cUL.g + cDR.g + cDL.g) * 0.05 - B;
 
-  let f = rp.feedRate;
-  let k = rp.killRate;
+  // Slow autonomous drift keeps the pattern morphing even without direct user splats.
+  let t = rp.time * (0.16 + rp.noiseSpeed * 0.4);
+  let waveA = sin(dot(uv, vec2f(9.0 + rp.noiseFrequency * 10.0, 7.0 + rp.noiseFrequency * 8.0)) + t);
+  let waveB = cos(dot(uv, vec2f(6.0 + rp.noiseFrequency * 8.0, 11.0 + rp.noiseFrequency * 9.0)) - t * 0.8);
+  let drift = 0.0025 * rp.rdAmount * (0.3 + rp.noiseAmount * 0.7);
+  let f = clamp(rp.feedRate + waveA * drift, 0.005, 0.09);
+  let k = clamp(rp.killRate + waveB * drift * 0.8, 0.02, 0.085);
   let ABB = A * B * B;
-  // Fixed timestep for stability — rdAmount controls coupling, not timestep
-  let dt = 0.8;
-  let newA = A + (Da * lapA - ABB + f * (1.0 - A)) * dt;
-  let newB = B + (Db * lapB + ABB - (f + k) * B) * dt;
+  let dt = 0.22 + rp.rdAmount * 0.58;
+  var newA = A + (Da * lapA - ABB + f * (1.0 - A)) * dt;
+  var newB = B + (Db * lapB + ABB - (f + k) * B) * dt;
+
+  // Autonomous + flow-driven nucleation: prevents dead-lock at uniform A=1/B=0 and lets clicks/noise kick RD alive.
+  let velMag = length(vel);
+  let nucWave = max(0.0, sin(dot(uv, vec2f(57.0, 41.0)) + t * 1.7));
+  let baseNucleation = (0.00025 + rp.noiseAmount * 0.00085) * rp.rdAmount;
+  let flowNucleation = min(0.018, velMag * 0.00018 * (0.3 + rp.flowCoupling * 0.7));
+  let seed = (baseNucleation * nucWave + flowNucleation) * (1.0 - B) * max(A, 0.0);
+  newB += seed;
+  newA -= seed * 0.58;
 
   textureStore(rdDst, id.xy, vec4f(clamp(newA, 0.0, 1.0), clamp(newB, 0.0, 1.0), 0.0, 0.0));
 }
@@ -838,6 +1231,10 @@ struct RDParams {
   rdDyeAmount: f32,
   rdForceAmount: f32,
   rdScale: f32,
+  flowCoupling: f32,
+  noiseAmount: f32,
+  noiseFrequency: f32,
+  noiseSpeed: f32,
 };
 
 @group(0) @binding(0) var<uniform> rp: RDParams;
@@ -848,7 +1245,7 @@ struct RDParams {
 @group(0) @binding(5) var velDst: texture_storage_2d<rgba16float, write>;
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS: f32 = 0.37;
+const SPHERE_RADIUS: f32 = ${SIM_SPHERE_RADIUS};
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -858,11 +1255,11 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let dist = length(uv - SPHERE_CENTER);
 
   var dye = textureLoad(dyeSrc, id.xy, 0);
-  var vel = textureLoad(velSrc, id.xy, 0);
+  var vel = textureLoad(velSrc, id.xy, 0).xy;
 
   if (dist > SPHERE_RADIUS) {
-    textureStore(dyeDst, id.xy, dye);
-    textureStore(velDst, id.xy, vel);
+    textureStore(dyeDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+    textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     return;
   }
 
@@ -882,7 +1279,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let cB = 0.3 + 0.7 * max(sin(colorPhase + 4.189), 0.0);
   let spatialColor = vec3f(cR, cG, cB);
 
-  let dyeInject = B * rp.rdDyeAmount * edgeFade * headroom;
+  let activeB = smoothstep(0.03, 0.45, B);
+  let dyeInject = activeB * rp.rdDyeAmount * 1.35 * edgeFade * headroom;
   dye += vec4f(spatialColor * dyeInject, 0.0);
 
   // Add force from RD gradient
@@ -891,10 +1289,19 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let rdU = textureLoad(rdSrc, vec2u(id.x, min(id.y + 1u, res - 1u)), 0).g;
   let rdD = textureLoad(rdSrc, vec2u(id.x, max(id.y, 1u) - 1u), 0).g;
   let grad = vec2f(rdR - rdL, rdU - rdD) * 0.5;
-  vel += vec4f(grad * rp.rdForceAmount * 50.0 * edgeFade, 0.0, 0.0);
+  vel += grad * rp.rdForceAmount * 90.0 * edgeFade;
+  if (dist > SPHERE_RADIUS - 0.04) {
+    let normal = (uv - SPHERE_CENTER) / max(dist, 1e-5);
+    let outward = dot(vel, normal);
+    if (outward > 0.0) {
+      vel -= normal * outward;
+    }
+    let wallT = clamp((dist - (SPHERE_RADIUS - 0.04)) / 0.04, 0.0, 1.0);
+    vel *= mix(1.0, 0.78, wallT);
+  }
 
   textureStore(dyeDst, id.xy, dye);
-  textureStore(velDst, id.xy, vel);
+  textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
 }
 `;
 
@@ -909,7 +1316,7 @@ struct TempParams {
 };
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS: f32 = 0.37;
+const SPHERE_RADIUS: f32 = ${SIM_SPHERE_RADIUS};
 
 @group(0) @binding(0) var<uniform> tp: TempParams;
 @group(0) @binding(1) var velTex: texture_2d<f32>;
@@ -953,7 +1360,7 @@ struct BuoyancyParams {
 };
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS: f32 = 0.37;
+const SPHERE_RADIUS: f32 = ${SIM_SPHERE_RADIUS};
 
 @group(0) @binding(0) var<uniform> bp: BuoyancyParams;
 @group(0) @binding(1) var tempTex: texture_2d<f32>;
@@ -975,7 +1382,17 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let temp = textureLoad(tempTex, id.xy, 0).r;
   var vel = textureLoad(velSrc, id.xy, 0).xy;
   vel.y += bp.buoyancy * (temp - 0.5) * bp.dt * edgeFade;
-  textureStore(velDst, id.xy, vec4f(vel * edgeFade, 0.0, 1.0));
+  vel *= edgeFade;
+  if (dist > SPHERE_RADIUS - 0.04) {
+    let normal = toCenter / max(dist, 1e-5);
+    let outward = dot(vel, normal);
+    if (outward > 0.0) {
+      vel -= normal * outward;
+    }
+    let wallT = clamp((dist - (SPHERE_RADIUS - 0.04)) / 0.04, 0.0, 1.0);
+    vel *= mix(1.0, 0.8, wallT);
+  }
+  textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
 }
 `;
 
@@ -1016,6 +1433,53 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   }
   temp = clamp(temp, 0.0, 1.0);
   textureStore(tempDst, id.xy, vec4f(temp, 0.0, 0.0, 1.0));
+}
+`;
+
+const rdSplatShader = /* wgsl */`
+${commonHeader}
+
+struct Splat {
+  x: f32, y: f32, dx: f32, dy: f32,
+  r: f32, g: f32, b: f32, radius: f32,
+};
+
+@group(0) @binding(1) var rdSrc: texture_2d<f32>;
+@group(0) @binding(2) var rdDst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var<storage, read> splats: array<Splat>;
+@group(0) @binding(4) var<uniform> splatMeta: vec4u;
+
+@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let res = u32(p.simRes);
+  if (id.x >= res || id.y >= res) { return; }
+  let uv = (vec2f(id.xy) + 0.5) / p.simRes;
+  let toCenter = uv - SPHERE_CENTER;
+  let dist = length(toCenter);
+  if (dist > SPHERE_RADIUS) {
+    textureStore(rdDst, id.xy, vec4f(1.0, 0.0, 0.0, 0.0));
+    return;
+  }
+  let boundaryFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.06, dist);
+  var rd = textureLoad(rdSrc, id.xy, 0);
+  var A = rd.r;
+  var B = rd.g;
+  var seed = 0.0;
+  let count = min(splatMeta.x, ${MAX_SPLATS}u);
+  for (var i = 0u; i < count; i++) {
+    let s = splats[i];
+    let rad = max(s.radius, 0.00005);
+    let diff = uv - vec2f(s.x, s.y);
+    let dist2 = dot(diff, diff);
+    let strength = exp(-dist2 / (2.0 * rad * rad));
+    let velStim = clamp(length(vec2f(s.dx, s.dy)) * 0.002, 0.0, 1.0);
+    let dyeStim = clamp((s.r + s.g + s.b) * 0.2, 0.0, 1.0);
+    seed += strength * max(velStim, dyeStim);
+  }
+  let seedAmt = min(seed * boundaryFade * 0.08, 0.25);
+  B = clamp(B + seedAmt, 0.0, 1.0);
+  A = clamp(A - seedAmt * 0.55, 0.0, 1.0);
+  textureStore(rdDst, id.xy, vec4f(A, B, 0.0, 0.0));
 }
 `;
 
@@ -1131,7 +1595,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   var part = particles[idx];
 
   // Sample velocity at particle position
-  let vel = textureSampleLevel(velTex, samp, vec2f(part.posX, part.posY), 0.0).xy;
+  var vel = textureSampleLevel(velTex, samp, vec2f(part.posX, part.posY), 0.0).xy;
 
   // ── Glass marble velocity fix (commented out) ─────────────────────────
   // var vel = ... (use var instead of let above to enable this)
@@ -1149,6 +1613,23 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
   // Advect particle with fluid
   let dt = p.dt;
+  var prePos = vec2f(part.posX, part.posY);
+  let preToCenter = prePos - SPHERE_CENTER;
+  let preDist = length(preToCenter);
+  if (preDist > SPHERE_RADIUS) {
+    let n = preToCenter / max(preDist, 1e-5);
+    prePos = SPHERE_CENTER + n * (SPHERE_RADIUS - 0.001);
+    part.posX = prePos.x;
+    part.posY = prePos.y;
+  }
+  let nearDist = length(prePos - SPHERE_CENTER);
+  if (nearDist > SPHERE_RADIUS - 0.03) {
+    let n = (prePos - SPHERE_CENTER) / max(nearDist, 1e-5);
+    let outward = dot(vel, n);
+    if (outward > 0.0) {
+      vel -= n * outward;
+    }
+  }
   part.posX += vel.x * dt * p.dx;
   part.posY += vel.y * dt * p.dx;
 
@@ -1191,9 +1672,16 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
   // Boundary / respawn check
   let toCenter = vec2f(part.posX, part.posY) - SPHERE_CENTER;
-  let dist = length(toCenter);
+  var dist = length(toCenter);
 
-  if (dist > SPHERE_RADIUS || part.life <= 0.0) {
+  if (dist > SPHERE_RADIUS) {
+    let n = toCenter / max(dist, 1e-5);
+    part.posX = SPHERE_CENTER.x + n.x * (SPHERE_RADIUS - 0.001);
+    part.posY = SPHERE_CENTER.y + n.y * (SPHERE_RADIUS - 0.001);
+    dist = SPHERE_RADIUS - 0.001;
+  }
+
+  if (part.life <= 0.0) {
     let timeU = u32(p.time * 1000.0);
     let h1 = pcg(idx + timeU * 7919u);
     let h2 = pcg(h1);
@@ -1229,7 +1717,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   // ── Color computation (moved from vertex shader) ──
   let particleUV = vec2f(part.posX, part.posY);
   let centered = particleUV - vec2f(0.5, 0.5);
-  if (length(centered) > 0.42) {
+  if (length(centered) > ${VISIBLE_SPHERE_RADIUS}) {
     colors[idx] = vec4f(0.0);
     return;
   }
@@ -1428,14 +1916,14 @@ fn main(in: FSIn) -> @location(0) vec4f {
   );
   let centered = uv - vec2f(0.5, 0.5);
   let sphereDist = length(centered);
-  if (sphereDist > 0.42) { discard; }
-  let sphereFade = 1.0 - smoothstep(0.40, 0.42, sphereDist);
+  let sphereRadius = ${VISIBLE_SPHERE_RADIUS};
+  if (sphereDist > sphereRadius) { discard; }
 
   // Circular cutout + soft edge
   let d = length(in.localUV - vec2f(0.5));
   if (d > 0.5) { discard; }
   let edge = 1.0 - smoothstep(0.3, 0.5, d);
-  return vec4f(in.color * edge * sphereFade, in.alpha * edge * sphereFade);
+  return vec4f(in.color * edge, in.alpha * edge);
 }
 `;
 
@@ -1561,6 +2049,7 @@ const bloomCompositeShader = /* wgsl */`
 @group(0) @binding(1) var bloomTex: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
 @group(0) @binding(3) var<uniform> intensity: f32;
+const SCREEN_RADIUS = ${VISIBLE_SPHERE_RADIUS};
 
 @vertex
 fn vert(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
@@ -1575,7 +2064,15 @@ fn frag(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let uv = pos.xy / texSize;
   let scene = textureSampleLevel(sceneTex, samp, uv, 0.0).rgb;
   let bloom = textureSampleLevel(bloomTex, samp, uv, 0.0).rgb;
-  return vec4f(scene + bloom * intensity, 1.0);
+  var color = scene + bloom * intensity;
+  let aspect = texSize.x / texSize.y;
+  let simUV = vec2f(
+    (uv.x - 0.5) * max(aspect, 1.0) + 0.5,
+    (uv.y - 0.5) * max(1.0 / aspect, 1.0) + 0.5
+  );
+  let dist = length(simUV - vec2f(0.5, 0.5));
+  if (dist > SCREEN_RADIUS) { color = vec3f(0.0); }
+  return vec4f(color, 1.0);
 }
 `;
 
@@ -1635,8 +2132,10 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // Sphere mask in simulation UV space (already 1:1)
   let centered = uv - vec2f(0.5, 0.5);
   let screenDist = length(centered);
-  let screenRadius = 0.37;
-  let mask = 1.0 - smoothstep(screenRadius - 0.003, screenRadius, screenDist);
+  let screenRadius = ${VISIBLE_SPHERE_RADIUS};
+  if (screenDist > screenRadius) {
+    return vec4f(0.0, 0.0, 0.0, 1.0);
+  }
 
   // ── Glass marble (commented out) ──────────────────────────────────────
   // let normPos = centered / screenRadius;
@@ -1659,21 +2158,8 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // );
   // ─────────────────────────────────────────────────────────────────────
 
-  // Sample fluid dye (with optional depth/parallax)
-  let depthAmt = du.depth.x;
-  let depthSpd = du.depth.y;
-  var raw: vec3f;
-  if (depthAmt > 0.01) {
-    let pPhase = time * depthSpd * 0.3;
-    let parallaxOff = vec2f(cos(pPhase), sin(pPhase * 0.7)) * depthAmt * 0.08;
-    let backUV = uv + parallaxOff * 0.5;
-    let frontUV = uv - parallaxOff * 0.5;
-    let backSample = textureSampleLevel(dyeTex, samp, backUV, 0.0).rgb;
-    let frontSample = textureSampleLevel(dyeTex, samp, frontUV, 0.0).rgb;
-    raw = mix(backSample, frontSample, 0.6);
-  } else {
-    raw = textureSampleLevel(dyeTex, samp, uv, 0.0).rgb;
-  }
+  // Sample fluid dye
+  let raw = textureSampleLevel(dyeTex, samp, uv, 0.0).rgb;
   let intensity = dot(raw, vec3f(0.3, 0.6, 0.1));
 
   // Fluid base — gradient from accent (thin/wispy) to base (dense)
@@ -1736,9 +2222,6 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 
 ${hdr ? '  // HDR: browser expects linear values, handles transfer function' : `  // Fast gamma approximation (max error ~0.003 vs pow(x, 0.4545))
   { let sq = sqrt(clamp(color, vec3f(0.0), vec3f(1.0))); color = sq * (0.585 + sq * 0.415); }`}
-
-  // Circular mask
-  color *= mask;
 
   return vec4f(color, 1.0);
 }
@@ -1842,12 +2325,560 @@ import { BOController, normalizedToState, stateToNormalized, SLIDER_KEYS, SLIDER
 
 // ─── WebGPU Init ─────────────────────────────────────────────────────────────
 
+const GPU_FAST_TIMEOUT_MS = 2500;
+const GPU_ADAPTER_ATTEMPT_TIMEOUT_MS = 8000;
+const GPU_ADAPTER_OVERALL_TIMEOUT_MS = 15000;
+const GPU_DEVICE_FAST_TIMEOUT_MS = 5000;
+const GPU_DEVICE_ATTEMPT_TIMEOUT_MS = 7000;
+const GPU_DEVICE_RACE_TIMEOUT_MS = 9000;
+const GPU_DEVICE_WAKE_RACE_TIMEOUT_MS = 7000;
+const GPU_DEVICE_EXTENDED_WAIT_MS = 25000;
+const GPU_WAKE_EVENT_TIMEOUT_MS = 8000;
+const GPU_INIT_DIAG_SAMPLE_MS = 3000;
+const MB = 1024 * 1024;
+const GPU_DEBUG_STORAGE_KEY = 'fluid.gpu_debug';
+const GPU_TRACE_LIMIT = 240;
+const gpuInitSessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+const gpuInitTraceT0 = performance.now();
+const gpuInitTrace = [];
+
+const gpuDebugEnabled = (() => {
+  try {
+    const q = new URLSearchParams(location.search);
+    const flag = q.get('gpu_debug');
+    if (flag === '1') {
+      sessionStorage.setItem(GPU_DEBUG_STORAGE_KEY, '1');
+      return true;
+    }
+    if (flag === '0') {
+      sessionStorage.removeItem(GPU_DEBUG_STORAGE_KEY);
+      return false;
+    }
+    return sessionStorage.getItem(GPU_DEBUG_STORAGE_KEY) === '1';
+  } catch {
+    return false;
+  }
+})();
+
+function lifecycleSnapshot() {
+  let hasFocus = false;
+  try { hasFocus = document.hasFocus(); } catch {}
+  return {
+    visibility: document.visibilityState,
+    hidden: document.hidden,
+    hasFocus,
+    wasDiscarded: !!document.wasDiscarded,
+    prerendering: !!document.prerendering,
+  };
+}
+
+function normalizeTraceFields(fields) {
+  if (!fields || typeof fields !== 'object') return null;
+  const out = {};
+  for (const [key, raw] of Object.entries(fields)) {
+    if (raw == null || typeof raw === 'string' || typeof raw === 'number' || typeof raw === 'boolean') {
+      out[key] = raw;
+      continue;
+    }
+    if (Array.isArray(raw)) {
+      out[key] = raw.slice(0, 8).map(v => (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') ? v : String(v));
+      continue;
+    }
+    out[key] = String(raw);
+  }
+  return out;
+}
+
+function traceInit(event, fields = null) {
+  const entry = {
+    session: gpuInitSessionId,
+    tMs: Number((performance.now() - gpuInitTraceT0).toFixed(1)),
+    event,
+    ...(normalizeTraceFields(fields) || {}),
+  };
+  gpuInitTrace.push(entry);
+  if (gpuInitTrace.length > GPU_TRACE_LIMIT) gpuInitTrace.shift();
+  if (gpuDebugEnabled) {
+    console.debug(`InitTrace +${entry.tMs}ms ${event}`, entry);
+  }
+  return entry;
+}
+
+function buildGpuInitSummary(reason, extra = null) {
+  return {
+    reason,
+    session: gpuInitSessionId,
+    elapsedMs: Number((performance.now() - gpuInitTraceT0).toFixed(1)),
+    lifecycle: lifecycleSnapshot(),
+    extra: normalizeTraceFields(extra),
+    recentTrace: gpuInitTrace.slice(-50),
+  };
+}
+
+function dumpGpuInitSummary(reason, extra = null) {
+  const summary = buildGpuInitSummary(reason, extra);
+  console.warn('Init diagnostics summary:', summary);
+  return summary;
+}
+
+if (typeof window !== 'undefined') {
+  window.dumpGpuInitSummary = (reason = 'manual', extra = null) => buildGpuInitSummary(reason, extra);
+  window.dumpGpuInitTrace = () => gpuInitTrace.slice();
+}
+
+traceInit('session-start', { href: location.href, ua: navigator.userAgent, ...lifecycleSnapshot() });
+document.addEventListener('visibilitychange', () => traceInit('evt-visibilitychange', lifecycleSnapshot()), true);
+window.addEventListener('focus', () => traceInit('evt-focus', lifecycleSnapshot()), true);
+window.addEventListener('blur', () => traceInit('evt-blur', lifecycleSnapshot()), true);
+window.addEventListener('pageshow', (e) => traceInit('evt-pageshow', { persisted: !!e.persisted, ...lifecycleSnapshot() }), true);
+window.addEventListener('pagehide', (e) => traceInit('evt-pagehide', { persisted: !!e.persisted, ...lifecycleSnapshot() }), true);
+document.addEventListener('freeze', () => traceInit('evt-freeze', lifecycleSnapshot()), true);
+document.addEventListener('resume', () => traceInit('evt-resume', lifecycleSnapshot()), true);
+
+function timeoutValue(ms, value = null) {
+  return new Promise(resolve => setTimeout(() => resolve(value), ms));
+}
+
+function withTimeout(promise, ms, value = null) {
+  return Promise.race([promise, timeoutValue(ms, value)]);
+}
+
+function waitForWakeEvent(timeoutMs = GPU_WAKE_EVENT_TIMEOUT_MS) {
+  return new Promise(resolve => {
+    let done = false;
+    const cleanup = () => {
+      window.removeEventListener('focus', onFocus, true);
+      window.removeEventListener('resize', onResize, true);
+      document.removeEventListener('visibilitychange', onVisibility, true);
+      window.removeEventListener('pointerdown', onPointer, true);
+      window.removeEventListener('keydown', onKey, true);
+      if (timer) clearTimeout(timer);
+    };
+    const finish = (reason) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(reason);
+    };
+    const onFocus = () => finish('focus');
+    const onResize = () => finish('resize');
+    const onPointer = () => finish('pointer');
+    const onKey = () => finish('key');
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') finish('visible');
+    };
+    window.addEventListener('focus', onFocus, true);
+    window.addEventListener('resize', onResize, true);
+    document.addEventListener('visibilitychange', onVisibility, true);
+    window.addEventListener('pointerdown', onPointer, true);
+    window.addEventListener('keydown', onKey, true);
+    const timer = timeoutMs > 0 ? setTimeout(() => finish(null), timeoutMs) : null;
+  });
+}
+
+function pageIsInteractive() {
+  let hasFocus = false;
+  try { hasFocus = document.hasFocus(); } catch {}
+  return document.visibilityState === 'visible' && hasFocus;
+}
+
+async function waitForInteractivePage(loadStatus, phase, timeoutMs = 8000) {
+  if (pageIsInteractive()) {
+    traceInit('interactive-ready', { phase, ...lifecycleSnapshot() });
+    return true;
+  }
+
+  traceInit('interactive-wait-start', { phase, timeoutMs, ...lifecycleSnapshot() });
+  if (loadStatus) loadStatus.textContent = `Waiting for active tab (${phase})...`;
+
+  return new Promise(resolve => {
+    let done = false;
+    const started = performance.now();
+    const cleanup = () => {
+      window.removeEventListener('focus', onFocus, true);
+      window.removeEventListener('pageshow', onPageShow, true);
+      document.removeEventListener('visibilitychange', onVisibility, true);
+      if (timer) clearTimeout(timer);
+    };
+    const finish = (ok, reason) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      traceInit('interactive-wait-end', {
+        phase,
+        ok,
+        reason,
+        ms: Number((performance.now() - started).toFixed(1)),
+        ...lifecycleSnapshot(),
+      });
+      resolve(ok);
+    };
+    const check = (reason) => {
+      if (pageIsInteractive()) finish(true, reason);
+    };
+    const onFocus = () => check('focus');
+    const onPageShow = () => check('pageshow');
+    const onVisibility = () => check('visibilitychange');
+    window.addEventListener('focus', onFocus, true);
+    window.addEventListener('pageshow', onPageShow, true);
+    document.addEventListener('visibilitychange', onVisibility, true);
+    const timer = timeoutMs > 0 ? setTimeout(() => finish(false, 'timeout'), timeoutMs) : null;
+    check('initial');
+  });
+}
+
+async function requestAdapterAdaptive(loadStatus) {
+  const q = new URLSearchParams(location.search);
+  const gpuPref = q.get('gpu');
+  const adapterT0 = performance.now();
+  const attempts = gpuPref === 'high'
+    ? [
+      { label: 'high-performance', options: { powerPreference: 'high-performance' } },
+      { label: 'default', options: {} },
+      { label: 'low-power', options: { powerPreference: 'low-power' } },
+    ]
+    : gpuPref === 'low'
+      ? [
+        { label: 'low-power', options: { powerPreference: 'low-power' } },
+        { label: 'default', options: {} },
+        { label: 'high-performance', options: { powerPreference: 'high-performance' } },
+      ]
+      : [
+        { label: 'default', options: {} },
+        { label: 'low-power', options: { powerPreference: 'low-power' } },
+        { label: 'high-performance', options: { powerPreference: 'high-performance' } },
+      ];
+
+  const fast = attempts[0];
+  traceInit('adapter-request-start', { first: fast.label, gpuPref: gpuPref || 'default-order', ...lifecycleSnapshot() });
+  if (loadStatus) loadStatus.textContent = `Requesting GPU adapter (${fast.label})...`;
+  console.log(`Init: requesting GPU adapter (${fast.label} first)...`);
+  const fastPromise = navigator.gpu.requestAdapter(fast.options).catch(() => null);
+  const fastAdapter = await withTimeout(fastPromise, GPU_FAST_TIMEOUT_MS, null);
+  if (fastAdapter) {
+    traceInit('adapter-fast-success', {
+      mode: fast.label,
+      ms: Number((performance.now() - adapterT0).toFixed(1)),
+      ...lifecycleSnapshot(),
+    });
+    return { adapter: fastAdapter, mode: fast.label, fallbackRace: false };
+  }
+
+  traceInit('adapter-fast-timeout', {
+    mode: fast.label,
+    timeoutMs: GPU_FAST_TIMEOUT_MS,
+    ...lifecycleSnapshot(),
+  });
+  console.warn(`Init: adapter request exceeded ${GPU_FAST_TIMEOUT_MS}ms; racing adapter preferences...`);
+  if (loadStatus) loadStatus.textContent = 'Waking GPU (trying fallbacks)...';
+
+  const deadline = performance.now() + GPU_ADAPTER_OVERALL_TIMEOUT_MS;
+  const remainingForFast = Math.max(0, deadline - performance.now());
+  const lateFast = await withTimeout(fastPromise, remainingForFast, null);
+  if (lateFast) {
+    traceInit('adapter-race-success', {
+      mode: fast.label,
+      ms: Number((performance.now() - adapterT0).toFixed(1)),
+      lateFast: true,
+      ...lifecycleSnapshot(),
+    });
+    return { adapter: lateFast, mode: fast.label, fallbackRace: true };
+  }
+
+  for (const attempt of attempts.slice(1)) {
+    const remaining = Math.max(0, deadline - performance.now());
+    if (remaining <= 0) break;
+    traceInit('adapter-fallback-start', { mode: attempt.label, remainingMs: Number(remaining.toFixed(1)) });
+    const adapter = await withTimeout(
+      navigator.gpu.requestAdapter(attempt.options).catch(() => null),
+      Math.min(GPU_ADAPTER_ATTEMPT_TIMEOUT_MS, remaining),
+      null
+    );
+    if (adapter) {
+      traceInit('adapter-race-success', {
+        mode: attempt.label,
+        ms: Number((performance.now() - adapterT0).toFixed(1)),
+        ...lifecycleSnapshot(),
+      });
+      return { adapter, mode: attempt.label, fallbackRace: true };
+    }
+  }
+
+  const remainingForFallback = Math.max(0, deadline - performance.now());
+  if (remainingForFallback > 0) {
+    traceInit('adapter-fallback-start', { mode: 'fallback-software', remainingMs: Number(remainingForFallback.toFixed(1)) });
+    const fallbackAdapter = await withTimeout(
+      navigator.gpu.requestAdapter({ forceFallbackAdapter: true }).catch(() => null),
+      Math.min(GPU_ADAPTER_ATTEMPT_TIMEOUT_MS, remainingForFallback),
+      null
+    );
+    if (fallbackAdapter) {
+      traceInit('adapter-race-success', {
+        mode: 'fallback-software',
+        ms: Number((performance.now() - adapterT0).toFixed(1)),
+        ...lifecycleSnapshot(),
+      });
+      return { adapter: fallbackAdapter, mode: 'fallback-software', fallbackRace: true };
+    }
+  }
+
+  traceInit('adapter-race-failed', {
+    timeoutMs: GPU_ADAPTER_OVERALL_TIMEOUT_MS,
+    ms: Number((performance.now() - adapterT0).toFixed(1)),
+    ...lifecycleSnapshot(),
+  });
+  return null;
+}
+
+function requestDeviceOnAdapter(adapter, requestMaxLimits) {
+  if (requestMaxLimits) {
+    return adapter.requestDevice({
+      requiredLimits: {
+        maxBufferSize: Math.min(adapter.limits.maxBufferSize, 1024 * MB),
+        maxStorageBufferBindingSize: Math.min(adapter.limits.maxStorageBufferBindingSize, 1024 * MB),
+      },
+    });
+  }
+  return adapter.requestDevice();
+}
+
+async function requestDeviceAdaptive(primaryAdapter, primaryMode, loadStatus, requestMaxLimits) {
+  const started = performance.now();
+  let statusTimer = null;
+  let wakePokeTimer = null;
+  let pendingDiagTimer = null;
+  const pending = Symbol('pending');
+  let statusStage = requestMaxLimits
+    ? 'Acquiring GPU device (max limits)...'
+    : 'Acquiring GPU device...';
+  const setStatusStage = (text) => {
+    statusStage = text;
+    if (loadStatus) {
+      const secs = Math.round((performance.now() - started) / 1000);
+      loadStatus.textContent = `${statusStage} ${secs}s`;
+    }
+  };
+  if (loadStatus) {
+    loadStatus.textContent = statusStage;
+    statusTimer = setInterval(() => {
+      const secs = Math.round((performance.now() - started) / 1000);
+      loadStatus.textContent = `${statusStage} ${secs}s`;
+    }, 1000);
+  }
+  traceInit('device-request-start', {
+    mode: primaryMode,
+    requestMaxLimits,
+    ...lifecycleSnapshot(),
+  });
+
+  let primaryRawPromise = null;
+  try {
+    console.log(`Init: invoking adapter.requestDevice() on ${primaryMode}...`);
+    traceInit('device-primary-dispatch', { mode: primaryMode, requestMaxLimits });
+    primaryRawPromise = requestDeviceOnAdapter(primaryAdapter, requestMaxLimits);
+    console.log('Init: adapter.requestDevice() returned a pending promise.');
+  } catch (err) {
+    traceInit('device-primary-sync-throw', { mode: primaryMode, error: err?.message || String(err) });
+    console.warn('Init: adapter.requestDevice() threw synchronously:', err?.message || err);
+  }
+  const primaryPromise = (primaryRawPromise || Promise.resolve(null))
+    .then(device => {
+      traceInit('device-primary-resolved', {
+        mode: primaryMode,
+        ok: !!device,
+        ms: Number((performance.now() - started).toFixed(1)),
+      });
+      return device ? { device, mode: primaryMode, downgradedLimits: false } : null;
+    })
+    .catch(err => {
+      traceInit('device-primary-error', {
+        mode: primaryMode,
+        error: err?.message || String(err),
+        ms: Number((performance.now() - started).toFixed(1)),
+      });
+      console.warn('Init: primary device request failed:', err?.message || err);
+      return null;
+    });
+
+  async function tryFallbackMode(mode, context = 'fallback', adapterOptions = null) {
+    const fallbackT0 = performance.now();
+    traceInit('device-fallback-start', {
+      mode,
+      context,
+      forceFallbackAdapter: !!(adapterOptions && adapterOptions.forceFallbackAdapter),
+      ...lifecycleSnapshot(),
+    });
+    const options = adapterOptions || (mode === 'default' ? {} : { powerPreference: mode });
+    const adapter = await withTimeout(
+      navigator.gpu.requestAdapter(options).catch(() => null),
+      GPU_ADAPTER_ATTEMPT_TIMEOUT_MS,
+      null
+    );
+    if (!adapter) {
+      traceInit('device-fallback-no-adapter', {
+        mode,
+        context,
+        ms: Number((performance.now() - fallbackT0).toFixed(1)),
+      });
+      return null;
+    }
+    const device = await withTimeout(
+      requestDeviceOnAdapter(adapter, false).catch(() => null),
+      GPU_DEVICE_ATTEMPT_TIMEOUT_MS,
+      null
+    );
+    if (!device) {
+      traceInit('device-fallback-no-device', {
+        mode,
+        context,
+        ms: Number((performance.now() - fallbackT0).toFixed(1)),
+      });
+      return null;
+    }
+    console.warn(`Init: ${context} acquired device on ${mode}.`);
+    traceInit('device-fallback-success', {
+      mode,
+      context,
+      ms: Number((performance.now() - fallbackT0).toFixed(1)),
+      ...lifecycleSnapshot(),
+    });
+    return { device, mode, downgradedLimits: requestMaxLimits };
+  }
+
+  async function tryFallbackModesSequential(modes, context = 'fallback', maxWaitMs = GPU_DEVICE_RACE_TIMEOUT_MS, includeSoftware = false) {
+    const deadline = performance.now() + maxWaitMs;
+    const ordered = includeSoftware ? [...modes, 'fallback-software'] : [...modes];
+    for (const mode of ordered) {
+      const remaining = Math.max(0, deadline - performance.now());
+      if (remaining <= 0) break;
+      const attemptPromise = mode === 'fallback-software'
+        ? tryFallbackMode('fallback-software', context, { forceFallbackAdapter: true })
+        : tryFallbackMode(mode, context);
+      const got = await withTimeout(attemptPromise, remaining, null);
+      if (got) return got;
+      const maybePrimary = await withTimeout(primaryPromise, 0, pending);
+      if (maybePrimary !== pending) return maybePrimary;
+    }
+    const maybePrimary = await withTimeout(primaryPromise, 0, pending);
+    return maybePrimary === pending ? null : maybePrimary;
+  }
+
+  try {
+    const fastDevice = await withTimeout(primaryPromise, GPU_DEVICE_FAST_TIMEOUT_MS, pending);
+    if (fastDevice !== pending) {
+      if (!fastDevice) return null;
+      traceInit('device-fast-success', {
+        mode: fastDevice.mode,
+        ms: Number((performance.now() - started).toFixed(1)),
+      });
+      return {
+        ...fastDevice,
+        fallbackRace: false,
+      };
+    }
+
+    traceInit('device-fast-timeout', {
+      timeoutMs: GPU_DEVICE_FAST_TIMEOUT_MS,
+      ...lifecycleSnapshot(),
+    });
+    console.warn(`Init: device request exceeded ${GPU_DEVICE_FAST_TIMEOUT_MS}ms; trying fallback adapters...`);
+    setStatusStage('Acquiring GPU device (racing adapters)...');
+    // Some browser/driver states recover after a synthetic resize + animation tick.
+    wakePokeTimer = setInterval(() => {
+      try { window.dispatchEvent(new Event('resize')); } catch {}
+      try { requestAnimationFrame(() => {}); } catch {}
+    }, 1500);
+    pendingDiagTimer = setInterval(() => {
+      const snap = lifecycleSnapshot();
+      traceInit('device-pending', snap);
+      console.warn('Init: device still pending...', snap);
+    }, GPU_INIT_DIAG_SAMPLE_MS);
+
+    const fallbackModes = ['default', 'low-power', 'high-performance'].filter(m => m !== primaryMode);
+    const fallbackRace = await tryFallbackModesSequential(fallbackModes, 'fallback-race', GPU_DEVICE_RACE_TIMEOUT_MS, true);
+    if (fallbackRace) {
+      if (fallbackRace.mode === 'fallback-software') {
+        console.warn('Init: using software fallback adapter/device.');
+      }
+      traceInit('device-race-success', {
+        mode: fallbackRace.mode,
+        ms: Number((performance.now() - started).toFixed(1)),
+      });
+      return { ...fallbackRace, fallbackRace: true };
+    }
+    traceInit('device-race-timeout', {
+      timeoutMs: GPU_DEVICE_RACE_TIMEOUT_MS,
+      ms: Number((performance.now() - started).toFixed(1)),
+      ...lifecycleSnapshot(),
+    });
+
+    const wakeOrPrimary = await Promise.race([
+      waitForWakeEvent(),
+      withTimeout(primaryPromise, GPU_WAKE_EVENT_TIMEOUT_MS, pending),
+    ]);
+    if (wakeOrPrimary && typeof wakeOrPrimary === 'object' && wakeOrPrimary.device) {
+      traceInit('device-primary-won-wake-race', {
+        mode: wakeOrPrimary.mode,
+        ms: Number((performance.now() - started).toFixed(1)),
+      });
+      return { ...wakeOrPrimary, fallbackRace: true };
+    }
+    const wakeReason = typeof wakeOrPrimary === 'string' ? wakeOrPrimary : null;
+    if (wakeReason) {
+      traceInit('device-wake-event', { wakeReason, ...lifecycleSnapshot() });
+      console.warn(`Init: wake event '${wakeReason}' detected while device pending; retrying device acquisition...`);
+      setStatusStage(`Retrying GPU device (${wakeReason})...`);
+      const wakeRace = await tryFallbackModesSequential(
+        ['default', 'low-power', 'high-performance'],
+        `wake-${wakeReason}`,
+        GPU_DEVICE_WAKE_RACE_TIMEOUT_MS,
+        true
+      );
+      if (wakeRace) {
+        if (wakeRace.mode === 'fallback-software') {
+          console.warn(`Init: wake-${wakeReason} using software fallback adapter/device.`);
+        }
+        traceInit('device-wake-race-success', {
+          wakeReason,
+          mode: wakeRace.mode,
+          ms: Number((performance.now() - started).toFixed(1)),
+        });
+        return { ...wakeRace, fallbackRace: true };
+      }
+      traceInit('device-wake-race-timeout', {
+        wakeReason,
+        timeoutMs: GPU_DEVICE_WAKE_RACE_TIMEOUT_MS,
+        ms: Number((performance.now() - started).toFixed(1)),
+      });
+    }
+
+    setStatusStage('Still acquiring GPU device...');
+    const latePrimary = await withTimeout(primaryPromise, GPU_DEVICE_EXTENDED_WAIT_MS, pending);
+    if (latePrimary !== pending) {
+      if (!latePrimary) return null;
+      traceInit('device-late-primary-success', {
+        mode: latePrimary.mode,
+        ms: Number((performance.now() - started).toFixed(1)),
+      });
+      return { ...latePrimary, fallbackRace: true };
+    }
+    traceInit('device-timeout', {
+      ms: Number((performance.now() - started).toFixed(1)),
+      ...lifecycleSnapshot(),
+    });
+    console.error(`Init: device acquisition timed out after ~${GPU_DEVICE_FAST_TIMEOUT_MS + GPU_DEVICE_RACE_TIMEOUT_MS + GPU_DEVICE_WAKE_RACE_TIMEOUT_MS + GPU_DEVICE_EXTENDED_WAIT_MS}ms.`);
+    dumpGpuInitSummary('device-timeout', { primaryMode, requestMaxLimits });
+    return null;
+  } finally {
+    if (statusTimer) clearInterval(statusTimer);
+    if (wakePokeTimer) clearInterval(wakePokeTimer);
+    if (pendingDiagTimer) clearInterval(pendingDiagTimer);
+  }
+}
+
 async function main() {
   const t0 = performance.now();
   const loadStatus = document.getElementById('loadStatus');
-  console.log('Init: creating BO controller...');
-  const bo = await BOController.create();
-  console.log(`Init: BO controller ready (${(performance.now() - t0).toFixed(0)}ms)`);
   const canvas = document.getElementById('canvas');
   const errorDiv = document.getElementById('error');
 
@@ -1857,27 +2888,97 @@ async function main() {
     return;
   }
 
+  const boT0 = performance.now();
+  console.log('Init: creating BO controller...');
+  const boPromise = BOController.create();
+
+  const adapterInteractive = await waitForInteractivePage(loadStatus, 'before-adapter', 8000);
+  if (!adapterInteractive) {
+    console.warn('Init: tab did not become fully active before adapter request; proceeding anyway.');
+  }
+
   const gpuT0 = performance.now();
-  console.log('Init: requesting GPU adapter...');
-  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-  console.log(`Init: adapter acquired (${(performance.now() - gpuT0).toFixed(0)}ms)`);
+  const adapterResult = await requestAdapterAdaptive(loadStatus);
+  const adapter = adapterResult?.adapter || null;
+  console.log(`Init: adapter acquired (${(performance.now() - gpuT0).toFixed(0)}ms, mode=${adapterResult?.mode || 'unknown'}${adapterResult?.fallbackRace ? ', raced' : ''})`);
+  traceInit('adapter-acquired', {
+    mode: adapterResult?.mode || 'unknown',
+    raced: !!adapterResult?.fallbackRace,
+    ms: Number((performance.now() - gpuT0).toFixed(1)),
+    ...lifecycleSnapshot(),
+  });
   if (!adapter) {
     errorDiv.style.display = 'block';
     errorDiv.textContent = 'No WebGPU adapter found.';
     console.error('No WebGPU adapter');
+    dumpGpuInitSummary('no-adapter');
     return;
   }
+  let adapterInfo = null;
+  try {
+    adapterInfo = adapter.info || (adapter.requestAdapterInfo ? await adapter.requestAdapterInfo() : null);
+  } catch {}
+  if (adapterInfo) {
+    const infoLog = {
+      vendor: adapterInfo.vendor || 'unknown',
+      architecture: adapterInfo.architecture || 'unknown',
+      description: adapterInfo.description || 'unknown',
+      isFallbackAdapter: !!adapterInfo.isFallbackAdapter,
+    };
+    console.log('Init: adapter info', infoLog);
+    traceInit('adapter-info', infoLog);
+  } else {
+    traceInit('adapter-info-unavailable');
+  }
 
-  console.log('Init: requesting GPU device...');
+  const bo = await boPromise;
+  console.log(`Init: BO controller ready (${(performance.now() - boT0).toFixed(0)}ms)`);
+
+  const q = new URLSearchParams(location.search);
+  const requestMaxLimits = q.get('gpu_limits') === 'max' || q.get('gpuLimits') === 'max';
+  const deviceInteractive = await waitForInteractivePage(loadStatus, 'before-device', 10000);
+  if (!deviceInteractive) {
+    console.warn('Init: tab did not become fully active before device request; proceeding anyway.');
+  }
+  // Yield one paint before requestDevice; helps avoid hard-reload GPU wake stalls.
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  await timeoutValue(0);
+  traceInit('visibility-ready', lifecycleSnapshot());
+
+  console.log(requestMaxLimits
+    ? 'Init: requesting GPU device (max limits mode)...'
+    : 'Init: requesting GPU device (default limits for fast startup)...');
   const deviceT0 = performance.now();
-  const device = await adapter.requestDevice({
-    requiredLimits: {
-      maxBufferSize: Math.min(adapter.limits.maxBufferSize, 1024 * 1024 * 1024),
-      maxStorageBufferBindingSize: Math.min(adapter.limits.maxStorageBufferBindingSize, 1024 * 1024 * 1024),
-    },
+  const deviceResult = await requestDeviceAdaptive(adapter, adapterResult?.mode || 'default', loadStatus, requestMaxLimits);
+  const device = deviceResult?.device || null;
+  if (!device) {
+    errorDiv.style.display = 'block';
+    errorDiv.textContent = 'Failed to acquire WebGPU device.';
+    console.error('No WebGPU device acquired.');
+    dumpGpuInitSummary('no-device', { adapterMode: adapterResult?.mode || 'unknown' });
+    return;
+  }
+  console.log(
+    `Init: device acquired (${(performance.now() - deviceT0).toFixed(0)}ms, total GPU: ${(performance.now() - gpuT0).toFixed(0)}ms, mode=${deviceResult.mode}${deviceResult.fallbackRace ? ', raced' : ''}${deviceResult.downgradedLimits ? ', downgraded-limits' : ''})`
+  );
+  traceInit('device-acquired', {
+    mode: deviceResult.mode,
+    raced: !!deviceResult.fallbackRace,
+    downgradedLimits: !!deviceResult.downgradedLimits,
+    deviceMs: Number((performance.now() - deviceT0).toFixed(1)),
+    totalGpuMs: Number((performance.now() - gpuT0).toFixed(1)),
+    ...lifecycleSnapshot(),
   });
-  console.log(`Init: device acquired (${(performance.now() - deviceT0).toFixed(0)}ms, total GPU: ${(performance.now() - gpuT0).toFixed(0)}ms)`);
-  device.lost.then(info => console.error('WebGPU device lost:', info.message));
+  if (deviceResult.downgradedLimits) {
+    console.warn('Init: max-limit request downgraded to default limits to avoid long device stall.');
+  }
+  device.lost.then(info => {
+    console.error('WebGPU device lost:', info.message);
+    dumpGpuInitSummary('device-lost', {
+      reason: info.reason || 'unknown',
+      message: info.message || 'unknown',
+    });
+  });
 
   // GPU queue depth tracking — cap pending frames to prevent unbounded queue buildup
   let frameRunning = true;
@@ -1942,8 +3043,10 @@ async function main() {
 
   function resize() {
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.round(canvas.clientWidth * dpr);
-    canvas.height = Math.round(canvas.clientHeight * dpr);
+    const cssW = canvas.clientWidth || window.innerWidth || 1;
+    const cssH = canvas.clientHeight || window.innerHeight || 1;
+    canvas.width = Math.max(1, Math.round(cssW * dpr));
+    canvas.height = Math.max(1, Math.round(cssH * dpr));
   }
   resize();
   window.addEventListener('resize', resize);
@@ -1974,7 +3077,8 @@ async function main() {
   const divTex = makeTex('divergence');
   let dyeA = makeTex('dyeA'), dyeB = makeTex('dyeB');
   const curlTex = makeTex('curl');
-  let rdA = makeTex('rdA'), rdB = makeTex('rdB');
+  let rdA = ENABLE_REACTION_DIFFUSION ? makeTex('rdA') : null;
+  let rdB = ENABLE_REACTION_DIFFUSION ? makeTex('rdB') : null;
   let tempA = makeTex('tempA'), tempB = makeTex('tempB');
 
   const linearSampler = device.createSampler({
@@ -2149,9 +3253,9 @@ async function main() {
     ['uniform', 'texture', 'storage']);
 
   const noiseBuf = device.createBuffer({
-    size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const noiseData = new Float32Array(8); // [time, amount, simRes, frequency, speed, pad, pad, pad]
+  const noiseData = new Float32Array(16); // [time, amount, simRes, frequency, speed, type, symmetry, mapping, warp, sharpness, anisotropy, blend, pad...]
 
   // Dye noise pipeline: injects dye where flow converges
   const dyeNoisePipe = buildPipeline(dyeNoiseShader, 'dyeNoise',
@@ -2185,34 +3289,41 @@ async function main() {
   const cleanupData = new Float32Array([SIM_RES, 0, 0, 0]);
   device.queue.writeBuffer(cleanupBuf, 0, cleanupData);
 
-  // ─── Reaction-Diffusion pipeline ──────────────────────────────────────────
-  const rdPipe = buildPipeline(reactionDiffusionShader, 'reactionDiffusion',
-    ['uniform', 'texture', 'storage']);
+  // ─── Reaction-Diffusion pipeline (disabled) ───────────────────────────────
+  let rdPipe = null;
+  let rdBuf = null;
+  let rdData = null;
+  let rdCouplingBGL = null;
+  let rdCouplingPipeline = null;
+  if (ENABLE_REACTION_DIFFUSION) {
+    rdPipe = buildPipeline(reactionDiffusionShader, 'reactionDiffusion',
+      ['uniform', 'texture', 'texture', 'storage']);
 
-  const rdBuf = device.createBuffer({
-    size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
-  const rdData = new Float32Array(8); // [time, rdAmount, simRes, feedRate, killRate, rdDyeAmount, rdForceAmount, rdScale]
+    rdBuf = device.createBuffer({
+      size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    rdData = new Float32Array(12); // [time, rdAmount, simRes, feedRate, killRate, rdDyeAmount, rdForceAmount, rdScale, flowCoupling, noiseAmount, noiseFrequency, noiseSpeed]
 
-  // RD Coupling pipeline: uniform, texture(rd), texture(dye), texture(vel), storage(dyeDst), storage(velDst)
-  const rdCouplingBGL = device.createBindGroupLayout({
-    label: 'rdCoupling_bgl',
-    entries: [
-      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-      { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
-      { binding: 5, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
-    ],
-  });
-  const rdCouplingModule = device.createShaderModule({ code: rdCouplingShader, label: 'rdCoupling' });
-  checkShader(rdCouplingModule, 'rdCoupling');
-  const rdCouplingPipeline = device.createComputePipeline({
-    label: 'rdCoupling',
-    layout: device.createPipelineLayout({ bindGroupLayouts: [rdCouplingBGL] }),
-    compute: { module: rdCouplingModule, entryPoint: 'main' },
-  });
+    // RD Coupling pipeline: uniform, texture(rd), texture(dye), texture(vel), storage(dyeDst), storage(velDst)
+    rdCouplingBGL = device.createBindGroupLayout({
+      label: 'rdCoupling_bgl',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+        { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+        { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+        { binding: 5, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+      ],
+    });
+    const rdCouplingModule = device.createShaderModule({ code: rdCouplingShader, label: 'rdCoupling' });
+    checkShader(rdCouplingModule, 'rdCoupling');
+    rdCouplingPipeline = device.createComputePipeline({
+      label: 'rdCoupling',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [rdCouplingBGL] }),
+      compute: { module: rdCouplingModule, entryPoint: 'main' },
+    });
+  }
 
   // ─── Temperature/Buoyancy pipelines ─────────────────────────────────────
   // Temperature advect: custom BGL (uniform, texture(vel), texture(temp), sampler, storage(tempDst))
@@ -2241,6 +3352,17 @@ async function main() {
     layout: batchSplatLayout,
     compute: { module: tempSplatModule, entryPoint: 'main' },
   });
+
+  let rdSplatPipe = null;
+  if (ENABLE_REACTION_DIFFUSION) {
+    const rdSplatModule = device.createShaderModule({ code: rdSplatShader, label: 'rdSplat' });
+    checkShader(rdSplatModule, 'rdSplat');
+    rdSplatPipe = device.createComputePipeline({
+      label: 'rdSplat',
+      layout: batchSplatLayout,
+      compute: { module: rdSplatModule, entryPoint: 'main' },
+    });
+  }
 
   // ─── Display render pipeline ────────────────────────────────────────────
   const displayBGL = device.createBindGroupLayout({
@@ -2654,17 +3776,15 @@ async function main() {
   let velFlip = 0;   // 0: velA is current, 1: velB is current
   let dyeFlip = 0;   // 0: dyeA is current, 1: dyeB is current
   let pressFlip = 0; // 0: pressA is current, 1: pressB is current
-  let rdFlip = 0;    // 0: rdA is current, 1: rdB is current
   let tempFlip = 0;   // 0: tempA is current, 1: tempB is current
 
   const velTexs = [velA, velB];
   const dyeTexs = [dyeA, dyeB];
   const pressTexs = [pressA, pressB];
-  const rdTexs = [rdA, rdB];
   const tempTexs = [tempA, tempB];
 
   // ─── RD Texture Initialization (A=1, B=0 everywhere, seed B patches) ───
-  {
+  if (ENABLE_REACTION_DIFFUSION) {
     const pixels = new Float32Array(SIM_RES * SIM_RES * 4);
     for (let i = 0; i < SIM_RES * SIM_RES; i++) {
       pixels[i * 4] = 1.0;     // A = 1.0
@@ -2836,14 +3956,18 @@ async function main() {
     [bg(cleanupBGL, [ubuf(cleanupBuf), tview(velB), tview(dyeA), tview(velA), tview(dyeB)]),
      bg(cleanupBGL, [ubuf(cleanupBuf), tview(velB), tview(dyeB), tview(velA), tview(dyeA)])],
   ];
-  // RD step: reads rd[cur], writes rd[1-cur] — ping-pong
-  const rdStepBGs = [
-    bg(rdPipe.layout, [ubuf(rdBuf), tview(rdA), tview(rdB)]),
-    bg(rdPipe.layout, [ubuf(rdBuf), tview(rdB), tview(rdA)]),
-  ];
-  // RD coupling: reads rd[cur] + dye[cur] + vel[cur], writes dye[1-cur] + vel[1-cur]
-  // [rdFlip][velFlip][dyeFlip] — 8 variants
-  const rdCouplingBGs = [
+  // RD is temporarily disabled; keep bind-group slots null to avoid resource creation.
+  const rdStepBGs = ENABLE_REACTION_DIFFUSION ? [
+    [bg(rdPipe.layout, [ubuf(rdBuf), tview(rdA), tview(velA), tview(rdB)]),
+     bg(rdPipe.layout, [ubuf(rdBuf), tview(rdA), tview(velB), tview(rdB)])],
+    [bg(rdPipe.layout, [ubuf(rdBuf), tview(rdB), tview(velA), tview(rdA)]),
+     bg(rdPipe.layout, [ubuf(rdBuf), tview(rdB), tview(velB), tview(rdA)])],
+  ] : null;
+  const rdSplatBGs = ENABLE_REACTION_DIFFUSION ? [
+    bg(batchSplatBGL, [ubuf(paramBuf), tview(rdA), tview(rdB), ubuf(splatBuf), ubuf(splatCountBuf)]),
+    bg(batchSplatBGL, [ubuf(paramBuf), tview(rdB), tview(rdA), ubuf(splatBuf), ubuf(splatCountBuf)]),
+  ] : null;
+  const rdCouplingBGs = ENABLE_REACTION_DIFFUSION ? [
     [[bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdA), tview(dyeA), tview(velA), tview(dyeB), tview(velB)]),
       bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdA), tview(dyeB), tview(velA), tview(dyeA), tview(velB)])],
      [bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdA), tview(dyeA), tview(velB), tview(dyeB), tview(velA)]),
@@ -2852,7 +3976,7 @@ async function main() {
       bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdB), tview(dyeB), tview(velA), tview(dyeA), tview(velB)])],
      [bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdB), tview(dyeA), tview(velB), tview(dyeB), tview(velA)]),
       bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdB), tview(dyeB), tview(velB), tview(dyeA), tview(velA)])]],
-  ];
+  ] : null;
   // ─── Temperature/Buoyancy bind groups ──────────────────────────────────
   // tempSplat: uses batchSplatBGL (uniform, texture, storage-tex, storage-buf, uniform)
   const tempSplatBGs = [
@@ -2892,6 +4016,34 @@ async function main() {
 
   let splatCount = 0;
   function addSplat(x, y, dx, dy, r, g, b, radius) {
+    // Containment at source: clamp splat center and remove outward force near wall.
+    const WALL_R = SIM_SPHERE_RADIUS;
+    const WALL_BAND = 0.04;
+    let ox = x - 0.5;
+    let oy = y - 0.5;
+    let d = Math.hypot(ox, oy);
+    if (d > WALL_R) {
+      const inv = WALL_R / Math.max(d, 1e-6);
+      ox *= inv;
+      oy *= inv;
+      x = 0.5 + ox;
+      y = 0.5 + oy;
+      d = WALL_R;
+    }
+    if (d > WALL_R - WALL_BAND) {
+      const nx = ox / Math.max(d, 1e-6);
+      const ny = oy / Math.max(d, 1e-6);
+      const outward = dx * nx + dy * ny;
+      if (outward > 0) {
+        dx -= nx * outward;
+        dy -= ny * outward;
+      }
+      const wallT = Math.min(1, Math.max(0, (d - (WALL_R - WALL_BAND)) / WALL_BAND));
+      const damp = 1 - wallT * 0.35;
+      dx *= damp;
+      dy *= damp;
+    }
+
     if (splatCount >= MAX_SPLATS) return;
     const off = splatCount * 8;
     splatArrayData[off]     = x;
@@ -2903,6 +4055,892 @@ async function main() {
     splatArrayData[off + 6] = b;
     splatArrayData[off + 7] = radius;
     splatCount++;
+  }
+
+  // ─── Face Tracking + Face Effector ------------------------------------------------
+  const faceTrackingStatusEl = document.getElementById('faceTrackingStatus');
+  const faceTrackingToggleBtn = document.getElementById('faceTrackingToggle');
+  const faceEffectorModeSelect = document.getElementById('faceEffectorMode');
+  const faceDebugModeSelect = document.getElementById('faceDebugMode');
+  const faceDebugCanvas = document.getElementById('faceDebugCanvas');
+  const faceDebugCtx = faceDebugCanvas?.getContext('2d', { alpha: true }) || null;
+
+  const faceTracking = {
+    enabled: false,
+    ready: false,
+    initializing: false,
+    worker: null,
+    stream: null,
+    video: null,
+    frameInFlight: false,
+    frameInFlightSince: 0,
+    frameEveryMs: 1000 / 45,
+    nextFrameAt: 0,
+    frameTimeoutMs: 1200,
+    face: null,
+    rawLandmarks: null,
+    rawLandmarkCount: 0,
+    prevMapped: null,
+    smoothedMouth: 0,
+    prevMouth: 0,
+    lastFaceSeenAt: -1,
+    noFaceGraceMs: 1200,
+    lastMouthBurstTime: -999,
+    droppedFrames: 0,
+    errorStreak: 0,
+    inferenceMs: 0,
+  };
+
+  function setFaceStatus(text, error = false) {
+    if (!faceTrackingStatusEl) return;
+    faceTrackingStatusEl.textContent = text;
+    faceTrackingStatusEl.style.color = error ? '#cc6666' : '#666';
+  }
+
+  function syncFaceDebugCanvasSize() {
+    if (!faceDebugCanvas || !faceDebugCtx) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, Math.floor(window.innerWidth * dpr));
+    const h = Math.max(1, Math.floor(window.innerHeight * dpr));
+    if (faceDebugCanvas.width !== w || faceDebugCanvas.height !== h) {
+      faceDebugCanvas.width = w;
+      faceDebugCanvas.height = h;
+      faceDebugCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+  }
+
+  function simUVToScreen(uvx, uvy) {
+    const rect = canvas.getBoundingClientRect();
+    const aspect = rect.width / Math.max(rect.height, 1e-6);
+    const rawX = (uvx - 0.5) / Math.max(aspect, 1.0) + 0.5;
+    const rawY = (uvy - 0.5) / Math.max(1.0 / Math.max(aspect, 1e-6), 1.0) + 0.5;
+    return [
+      rect.left + rawX * rect.width,
+      rect.top + (1.0 - rawY) * rect.height,
+    ];
+  }
+
+  function buildLocalMeshEdges(face, sampleIdx) {
+    const maxDist = face.radius * 0.35;
+    const edgeSet = new Set();
+    for (let i = 0; i < sampleIdx.length; i++) {
+      const ai = sampleIdx[i];
+      if (ai >= face.count) continue;
+      const ax = face.mapped[ai * 2];
+      const ay = face.mapped[ai * 2 + 1];
+      let best1 = -1, best2 = -1;
+      let d1 = 1e9, d2 = 1e9;
+      for (let j = 0; j < sampleIdx.length; j++) {
+        if (i === j) continue;
+        const bi = sampleIdx[j];
+        if (bi >= face.count) continue;
+        const bx = face.mapped[bi * 2];
+        const by = face.mapped[bi * 2 + 1];
+        const d = Math.hypot(bx - ax, by - ay);
+        if (d > maxDist) continue;
+        if (d < d1) {
+          d2 = d1; best2 = best1;
+          d1 = d; best1 = bi;
+        } else if (d < d2) {
+          d2 = d; best2 = bi;
+        }
+      }
+      if (best1 >= 0) {
+        const a = Math.min(ai, best1);
+        const b = Math.max(ai, best1);
+        edgeSet.add(`${a}:${b}`);
+      }
+      if (best2 >= 0) {
+        const a = Math.min(ai, best2);
+        const b = Math.max(ai, best2);
+        edgeSet.add(`${a}:${b}`);
+      }
+    }
+    return edgeSet;
+  }
+
+  function drawFaceDebugOverlay(nowMs) {
+    const debugMode = Math.round(state.faceDebugMode || 0);
+    if (!faceDebugCanvas || !faceDebugCtx) return;
+    if (debugMode <= 0) {
+      faceDebugCanvas.style.display = 'none';
+      return;
+    }
+
+    syncFaceDebugCanvasSize();
+    faceDebugCanvas.style.display = 'block';
+
+    const ctx2d = faceDebugCtx;
+    const vw = faceDebugCanvas.width / (window.devicePixelRatio || 1);
+    const vh = faceDebugCanvas.height / (window.devicePixelRatio || 1);
+    ctx2d.clearRect(0, 0, vw, vh);
+
+    // Show simulation boundary for alignment checks.
+    const [cx, cy] = simUVToScreen(0.5, 0.5);
+    const [ex, ey] = simUVToScreen(0.5 + SIM_SPHERE_RADIUS, 0.5);
+    const boundaryR = Math.hypot(ex - cx, ey - cy);
+    ctx2d.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx2d.lineWidth = 1;
+    ctx2d.beginPath();
+    ctx2d.arc(cx, cy, boundaryR, 0, Math.PI * 2);
+    ctx2d.stroke();
+
+    // Optional webcam preview pane for confidence checking.
+    if (debugMode >= 2 && faceTracking.video) {
+      const boxW = Math.min(260, vw * 0.28);
+      const boxH = boxW * 0.75;
+      const boxX = 18;
+      const boxY = 18;
+
+      ctx2d.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx2d.fillRect(boxX - 3, boxY - 3, boxW + 6, boxH + 6);
+
+      ctx2d.save();
+      ctx2d.translate(boxX + boxW, boxY);
+      ctx2d.scale(-1, 1);
+      ctx2d.drawImage(faceTracking.video, 0, 0, boxW, boxH);
+      ctx2d.restore();
+
+      if (faceTracking.rawLandmarks && faceTracking.rawLandmarkCount > 0) {
+        ctx2d.fillStyle = 'rgba(32,255,160,0.72)';
+        const lm = faceTracking.rawLandmarks;
+        const count = faceTracking.rawLandmarkCount;
+        for (let i = 0; i < count; i += 2) {
+          const off = i * 3;
+          const x = boxX + (1.0 - lm[off]) * boxW;
+          const y = boxY + lm[off + 1] * boxH;
+          ctx2d.fillRect(x - 1, y - 1, 2, 2);
+        }
+      }
+
+      ctx2d.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx2d.font = '11px system-ui, sans-serif';
+      ctx2d.fillText(`Face Debug (${faceTracking.inferenceMs.toFixed(1)}ms)`, boxX + 6, boxY + boxH + 16);
+    }
+
+    const face = faceTracking.face;
+    if (!face) {
+      const age = faceTracking.lastFaceSeenAt > 0 ? nowMs - faceTracking.lastFaceSeenAt : Infinity;
+      ctx2d.fillStyle = age < faceTracking.noFaceGraceMs ? 'rgba(255,220,120,0.9)' : 'rgba(255,80,80,0.9)';
+      ctx2d.font = '12px system-ui, sans-serif';
+      ctx2d.fillText(age < faceTracking.noFaceGraceMs ? 'Tracking hold...' : 'Searching for face...', 18, vh - 22);
+      return;
+    }
+
+    const sample = [];
+    for (let i = 0; i < FACE_DENSE_INDICES.length; i += 2) sample.push(FACE_DENSE_INDICES[i]);
+    const localEdges = buildLocalMeshEdges(face, sample);
+
+    // Dynamic local mesh network.
+    ctx2d.strokeStyle = 'rgba(90, 220, 255, 0.42)';
+    ctx2d.lineWidth = 1;
+    ctx2d.beginPath();
+    for (const key of localEdges) {
+      const sep = key.indexOf(':');
+      const a = parseInt(key.slice(0, sep), 10);
+      const b = parseInt(key.slice(sep + 1), 10);
+      if (a >= face.count || b >= face.count) continue;
+      const [ax, ay] = simUVToScreen(face.mapped[a * 2], face.mapped[a * 2 + 1]);
+      const [bx, by] = simUVToScreen(face.mapped[b * 2], face.mapped[b * 2 + 1]);
+      ctx2d.moveTo(ax, ay);
+      ctx2d.lineTo(bx, by);
+    }
+    ctx2d.stroke();
+
+    // Structural loops for a clear, readable mesh.
+    ctx2d.strokeStyle = 'rgba(255, 190, 70, 0.72)';
+    ctx2d.lineWidth = 1.3;
+    for (const path of FACE_DEBUG_PATHS) {
+      let started = false;
+      let firstX = 0, firstY = 0;
+      ctx2d.beginPath();
+      for (const idx of path.points) {
+        if (idx >= face.count) continue;
+        const [sx, sy] = simUVToScreen(face.mapped[idx * 2], face.mapped[idx * 2 + 1]);
+        if (!started) {
+          ctx2d.moveTo(sx, sy);
+          firstX = sx;
+          firstY = sy;
+          started = true;
+        } else {
+          ctx2d.lineTo(sx, sy);
+        }
+      }
+      if (started && path.closed) ctx2d.lineTo(firstX, firstY);
+      ctx2d.stroke();
+    }
+
+    // Key points.
+    ctx2d.fillStyle = 'rgba(255,255,255,0.88)';
+    for (let i = 0; i < FACE_DENSE_INDICES.length; i += 2) {
+      const idx = FACE_DENSE_INDICES[i];
+      if (idx >= face.count) continue;
+      const [sx, sy] = simUVToScreen(face.mapped[idx * 2], face.mapped[idx * 2 + 1]);
+      ctx2d.fillRect(sx - 1, sy - 1, 2, 2);
+    }
+
+    // Mouth center highlight.
+    const [mx, my] = simUVToScreen(face.mouthCenterX, face.mouthCenterY);
+    ctx2d.strokeStyle = `rgba(255, 80, 80, ${0.45 + face.mouthOpen * 0.5})`;
+    ctx2d.lineWidth = 2;
+    ctx2d.beginPath();
+    ctx2d.arc(mx, my, 8 + face.mouthOpen * 10, 0, Math.PI * 2);
+    ctx2d.stroke();
+  }
+
+  if (faceDebugCanvas) {
+    syncFaceDebugCanvasSize();
+    window.addEventListener('resize', syncFaceDebugCanvasSize);
+  }
+
+  function clampFacePointToCircle(x, y, margin = 0.005) {
+    const dx = x - 0.5;
+    const dy = y - 0.5;
+    const r = Math.hypot(dx, dy);
+    const lim = Math.max(0.02, SIM_SPHERE_RADIUS - margin);
+    if (r <= lim) return [x, y];
+    const s = lim / Math.max(r, 1e-6);
+    return [0.5 + dx * s, 0.5 + dy * s];
+  }
+
+  function getRawLandmark(landmarks, count, idx) {
+    if (idx < 0 || idx >= count) return [0.5, 0.5, 0];
+    const off = idx * 3;
+    return [landmarks[off], landmarks[off + 1], landmarks[off + 2]];
+  }
+
+  function mapFaceLandmarksToSim(rawLandmarks) {
+    const count = Math.floor(rawLandmarks.length / 3);
+    if (count < 200) return null;
+
+    const nose = getRawLandmark(rawLandmarks, count, 1);
+    const mouthTop = getRawLandmark(rawLandmarks, count, 13);
+    const mouthBot = getRawLandmark(rawLandmarks, count, 14);
+    const cheekL = getRawLandmark(rawLandmarks, count, 234);
+    const cheekR = getRawLandmark(rawLandmarks, count, 454);
+    const brow = getRawLandmark(rawLandmarks, count, 10);
+    const chin = getRawLandmark(rawLandmarks, count, 152);
+
+    const centerCamX = (nose[0] + mouthTop[0] + mouthBot[0]) / 3;
+    const centerCamY = (nose[1] + mouthTop[1] + mouthBot[1]) / 3;
+    const faceW = Math.hypot(cheekR[0] - cheekL[0], cheekR[1] - cheekL[1]);
+    const faceH = Math.hypot(chin[0] - brow[0], chin[1] - brow[1]);
+    const spread = Math.max(faceW, faceH, 0.08);
+
+    const targetRadius = Math.max(0.1, Math.min(SIM_SPHERE_RADIUS - 0.045, 0.085 + spread * 0.86));
+    let offsetX = (centerCamX - 0.5) * 0.52;
+    let offsetY = -(centerCamY - 0.5) * 0.52;
+    const offsetR = Math.hypot(offsetX, offsetY);
+    const offsetLimit = Math.max(0, SIM_SPHERE_RADIUS - targetRadius - 0.01);
+    if (offsetR > offsetLimit) {
+      const s = offsetLimit / Math.max(offsetR, 1e-6);
+      offsetX *= s;
+      offsetY *= s;
+    }
+    const centerX = 0.5 + offsetX;
+    const centerY = 0.5 + offsetY;
+
+    let maxLocalR = 0;
+    for (let i = 0; i < count; i++) {
+      const off = i * 3;
+      const lx = rawLandmarks[off] - centerCamX;
+      const ly = rawLandmarks[off + 1] - centerCamY;
+      maxLocalR = Math.max(maxLocalR, Math.hypot(lx, ly));
+    }
+    const scale = targetRadius / Math.max(maxLocalR, 1e-6);
+
+    const mapped = new Float32Array(count * 2);
+    for (let i = 0; i < count; i++) {
+      const off = i * 3;
+      const lx = rawLandmarks[off] - centerCamX;
+      const ly = rawLandmarks[off + 1] - centerCamY;
+      const simX = centerX + lx * scale;
+      const simY = centerY - ly * scale;
+      const [cx, cy] = clampFacePointToCircle(simX, simY, 0.006);
+      mapped[i * 2] = cx;
+      mapped[i * 2 + 1] = cy;
+    }
+
+    const mouthW = Math.hypot(
+      getRawLandmark(rawLandmarks, count, 291)[0] - getRawLandmark(rawLandmarks, count, 61)[0],
+      getRawLandmark(rawLandmarks, count, 291)[1] - getRawLandmark(rawLandmarks, count, 61)[1]
+    );
+    const mouthGap = Math.hypot(mouthBot[0] - mouthTop[0], mouthBot[1] - mouthTop[1]);
+    const mouthRatio = mouthGap / Math.max(mouthW, 1e-6);
+    const mouthOpen = Math.max(0, Math.min(1, (mouthRatio - 0.04) / 0.22));
+
+    const mouthTopMappedX = mapped[13 * 2];
+    const mouthTopMappedY = mapped[13 * 2 + 1];
+    const mouthBotMappedX = mapped[14 * 2];
+    const mouthBotMappedY = mapped[14 * 2 + 1];
+
+    return {
+      count,
+      mapped,
+      centerX,
+      centerY,
+      radius: targetRadius,
+      mouthOpen,
+      mouthCenterX: (mouthTopMappedX + mouthBotMappedX) * 0.5,
+      mouthCenterY: (mouthTopMappedY + mouthBotMappedY) * 0.5,
+    };
+  }
+
+  function facePoint(face, idx) {
+    if (!face || idx < 0 || idx >= face.count) return null;
+    const off = idx * 2;
+    return [face.mapped[off], face.mapped[off + 1]];
+  }
+
+  function direction(ax, ay, bx, by) {
+    const dx = bx - ax;
+    const dy = by - ay;
+    const l = Math.hypot(dx, dy);
+    if (l < 1e-6) return [0, 0];
+    return [dx / l, dy / l];
+  }
+
+  function injectFaceNoiseMask(face, modeTime, mouthOpen) {
+    // Sparse mesh-mask perturbation: mostly velocity (not dense dye dots).
+    const stride = 5;
+    for (let i = 0; i < FACE_DENSE_INDICES.length; i += stride) {
+      const idx = FACE_DENSE_INDICES[i];
+      const pt = facePoint(face, idx);
+      if (!pt) continue;
+      const [nx, ny] = direction(face.centerX, face.centerY, pt[0], pt[1]);
+      const phase = Math.sin(modeTime * 9.0 + i * 0.47);
+      const sign = phase >= 0 ? 1 : -1;
+      const force = state.splatForce * (0.035 + mouthOpen * 0.06) * sign;
+      const dyeGain = sign > 0 ? (0.05 + mouthOpen * 0.08) : 0.0;
+      const col = palette(modeTime * 0.05 + i * 0.03, 3);
+      addSplat(
+        pt[0], pt[1],
+        nx * force, ny * force,
+        col[0] * dyeGain, col[1] * dyeGain, col[2] * dyeGain,
+        state.splatRadius * (1.4 + mouthOpen * 1.2)
+      );
+    }
+  }
+
+  function applyFaceModeProfile(mode, syncFn = null) {
+    const prof = FACE_MODE_PROFILES[mode];
+    if (!prof) return;
+    for (const [k, v] of Object.entries(prof)) {
+      state[k] = v;
+    }
+    if (syncFn) syncFn();
+  }
+
+  async function startFaceTracking() {
+    if (faceTracking.initializing || faceTracking.enabled) return;
+    faceTracking.initializing = true;
+    setFaceStatus('Starting webcam + face tracker...');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: 'user',
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          frameRate: { ideal: 60, max: 120 },
+        },
+      });
+
+      const video = document.createElement('video');
+      video.autoplay = true;
+      video.muted = true;
+      video.playsInline = true;
+      video.srcObject = stream;
+      await video.play();
+
+      const worker = new Worker(new URL('./face-tracker-worker.js', import.meta.url), { type: 'module' });
+      faceTracking.worker = worker;
+      faceTracking.stream = stream;
+      faceTracking.video = video;
+      faceTracking.enabled = true;
+      faceTracking.ready = false;
+      faceTracking.frameInFlight = false;
+      faceTracking.frameInFlightSince = 0;
+      faceTracking.droppedFrames = 0;
+      faceTracking.errorStreak = 0;
+      faceTracking.lastFaceSeenAt = -1;
+      faceTracking.rawLandmarks = null;
+      faceTracking.rawLandmarkCount = 0;
+
+      worker.onmessage = (ev) => {
+        const msg = ev.data || {};
+        if (msg.type === 'init-ok') {
+          faceTracking.ready = true;
+          const delegate = msg.delegate || 'cpu';
+          setFaceStatus(`Face tracking active (${delegate}, worker thread)`);
+          return;
+        }
+        if (msg.type === 'delegate-fallback') {
+          const delegate = msg.delegate || 'cpu';
+          setFaceStatus(`Face tracking active (${delegate}, recovered)`);
+          return;
+        }
+        if (msg.type === 'init-error') {
+          setFaceStatus(`Face tracker failed: ${msg.error || 'unknown error'}`, true);
+          stopFaceTracking();
+          return;
+        }
+        if (msg.type === 'result') {
+          faceTracking.frameInFlight = false;
+          faceTracking.frameInFlightSince = 0;
+          faceTracking.inferenceMs = msg.inferenceMs || 0;
+          if (faceTracking.inferenceMs > 0) {
+            const target = Math.max(1000 / 30, Math.min(1000 / 55, faceTracking.inferenceMs * 1.2));
+            faceTracking.frameEveryMs = faceTracking.frameEveryMs * 0.82 + target * 0.18;
+          }
+          if (msg.error) {
+            faceTracking.errorStreak++;
+            if (faceTracking.errorStreak % 3 === 0) {
+              console.warn('Face tracker inference warning:', msg.error);
+            }
+          } else {
+            faceTracking.errorStreak = 0;
+          }
+          if (!msg.landmarks) {
+            faceTracking.rawLandmarks = null;
+            faceTracking.rawLandmarkCount = 0;
+            const now = performance.now();
+            if (faceTracking.lastFaceSeenAt < 0 || (now - faceTracking.lastFaceSeenAt) > faceTracking.noFaceGraceMs) {
+              faceTracking.face = null;
+              if (faceTracking.prevMapped) faceTracking.prevMapped.fill(NaN);
+            }
+            if (faceTracking.ready) {
+              const ageMs = faceTracking.lastFaceSeenAt < 0 ? 9999 : performance.now() - faceTracking.lastFaceSeenAt;
+              if (ageMs <= faceTracking.noFaceGraceMs) {
+                setFaceStatus(`Face tracking active (${faceTracking.inferenceMs.toFixed(1)} ms, holding lock)`);
+              } else {
+                setFaceStatus(`Face tracking active (${faceTracking.inferenceMs.toFixed(1)} ms, searching)`);
+              }
+            }
+            return;
+          }
+          const landmarks = new Float32Array(msg.landmarks);
+          faceTracking.rawLandmarks = landmarks;
+          faceTracking.rawLandmarkCount = landmarks.length / 3;
+          const mappedFace = mapFaceLandmarksToSim(landmarks);
+          if (!mappedFace) {
+            faceTracking.face = null;
+            if (faceTracking.prevMapped) faceTracking.prevMapped.fill(NaN);
+            return;
+          }
+          faceTracking.lastFaceSeenAt = performance.now();
+          faceTracking.smoothedMouth = faceTracking.smoothedMouth * 0.72 + mappedFace.mouthOpen * 0.28;
+          mappedFace.mouthOpen = faceTracking.smoothedMouth;
+          faceTracking.face = mappedFace;
+          setFaceStatus(`Face tracking active (${faceTracking.inferenceMs.toFixed(1)} ms, mouth ${(mappedFace.mouthOpen * 100).toFixed(0)}%)`);
+        }
+      };
+
+      worker.onerror = (err) => {
+        console.error('Face tracker worker error:', err?.message || err);
+        setFaceStatus('Face tracker worker crashed, restarting...', true);
+        stopFaceTracking();
+        const shouldAutoRestart = (state.faceEffectorMode > 0 || state.faceDebugMode > 0);
+        if (shouldAutoRestart) {
+          setTimeout(() => {
+            if (state.faceEffectorMode > 0 || state.faceDebugMode > 0) {
+              startFaceTracking();
+            }
+          }, 350);
+        }
+      };
+
+      worker.postMessage({
+        type: 'init',
+        libURL: FACE_TRACKER_LIB_URL,
+        wasmURL: FACE_TRACKER_WASM_URL,
+        modelURL: FACE_TRACKER_MODEL_URL,
+      });
+
+      if (faceTrackingToggleBtn) {
+        faceTrackingToggleBtn.textContent = 'Stop Webcam Face Tracking';
+        faceTrackingToggleBtn.classList.add('active');
+      }
+    } catch (err) {
+      console.error('Face tracking start failed:', err);
+      setFaceStatus(`Face tracking unavailable: ${err?.message || err}`, true);
+      stopFaceTracking();
+    } finally {
+      faceTracking.initializing = false;
+    }
+  }
+
+  function stopFaceTracking() {
+    faceTracking.enabled = false;
+    faceTracking.ready = false;
+    faceTracking.frameInFlight = false;
+    faceTracking.frameInFlightSince = 0;
+    faceTracking.face = null;
+    faceTracking.rawLandmarks = null;
+    faceTracking.rawLandmarkCount = 0;
+    faceTracking.prevMapped = null;
+    faceTracking.smoothedMouth = 0;
+    faceTracking.prevMouth = 0;
+    faceTracking.lastFaceSeenAt = -1;
+    faceTracking.lastMouthBurstTime = -999;
+    faceTracking.errorStreak = 0;
+    if (faceTracking.worker) {
+      try { faceTracking.worker.postMessage({ type: 'dispose' }); } catch {}
+      try { faceTracking.worker.terminate(); } catch {}
+    }
+    if (faceTracking.stream) {
+      for (const track of faceTracking.stream.getTracks()) track.stop();
+    }
+    if (faceTracking.video) {
+      try { faceTracking.video.pause(); } catch {}
+      faceTracking.video.srcObject = null;
+    }
+    faceTracking.worker = null;
+    faceTracking.stream = null;
+    faceTracking.video = null;
+    if (faceTrackingToggleBtn) {
+      faceTrackingToggleBtn.textContent = 'Start Webcam Face Tracking';
+      faceTrackingToggleBtn.classList.remove('active');
+    }
+    setFaceStatus('Face tracking idle');
+  }
+
+  function pumpFaceTracker(nowMs) {
+    if (!faceTracking.enabled || !faceTracking.ready) return;
+    if (faceTracking.frameInFlight) {
+      if (faceTracking.frameInFlightSince > 0 && (nowMs - faceTracking.frameInFlightSince) > faceTracking.frameTimeoutMs) {
+        faceTracking.frameInFlight = false;
+        faceTracking.frameInFlightSince = 0;
+        faceTracking.droppedFrames++;
+        console.warn('Face tracker frame timed out; recovering frame pump.');
+      } else {
+        return;
+      }
+    }
+    if (nowMs < faceTracking.nextFrameAt) return;
+    const v = faceTracking.video;
+    if (!v || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+
+    faceTracking.frameInFlight = true;
+    faceTracking.frameInFlightSince = nowMs;
+    faceTracking.nextFrameAt = nowMs + faceTracking.frameEveryMs;
+    createImageBitmap(v)
+      .then((bitmap) => {
+        if (!faceTracking.enabled || !faceTracking.worker) {
+          bitmap.close();
+          faceTracking.frameInFlight = false;
+          faceTracking.frameInFlightSince = 0;
+          return;
+        }
+        faceTracking.worker.postMessage({
+          type: 'process',
+          frame: bitmap,
+          timestampMs: nowMs,
+        }, [bitmap]);
+      })
+      .catch((err) => {
+        faceTracking.frameInFlight = false;
+        faceTracking.frameInFlightSince = 0;
+        faceTracking.droppedFrames++;
+        if (faceTracking.droppedFrames % 30 === 0) {
+          console.warn('Face tracker frame copy failed:', err?.message || err);
+        }
+      });
+  }
+
+  function applyFaceEffectors(dt, modeTime) {
+    const mode = Math.round(state.faceEffectorMode || 0);
+    if (mode <= 0) return;
+    const face = faceTracking.face;
+    if (!face) return;
+
+    if (!faceTracking.prevMapped || faceTracking.prevMapped.length !== face.count * 2) {
+      faceTracking.prevMapped = new Float32Array(face.count * 2);
+      faceTracking.prevMapped.fill(NaN);
+    }
+
+    const mouth = face.mouthOpen;
+    const mouthDelta = mouth - faceTracking.prevMouth;
+    const mouthBurst = mouth > 0.52 && mouthDelta > 0.06 && (modeTime - faceTracking.lastMouthBurstTime) > 0.11;
+    if (mouthBurst) faceTracking.lastMouthBurstTime = modeTime;
+
+    const meshPulse = 0.5 + 0.5 * Math.sin(modeTime * 8.0);
+    const getPoint = (idx) => facePoint(face, idx);
+    const mouthCenter = [face.mouthCenterX, face.mouthCenterY];
+
+    if (mode === 1) {
+      for (let i = 0; i < FACE_IDX.contour.length; i += 3) {
+        const idx = FACE_IDX.contour[i];
+        const pt = getPoint(idx);
+        if (!pt) continue;
+        const [nx, ny] = direction(face.centerX, face.centerY, pt[0], pt[1]);
+        const force = state.splatForce * (0.08 + mouth * 0.2);
+        const col = palette(modeTime * 0.1 + i * 0.03, 4);
+        addSplat(pt[0], pt[1], nx * force, ny * force, col[0] * 0.08, col[1] * 0.08, col[2] * 0.08, state.splatRadius * (2.8 + mouth * 1.4));
+      }
+      if (mouthBurst) {
+        for (let i = 0; i < FACE_IDX.lips.length; i += 2) {
+          const idx = FACE_IDX.lips[i];
+          const pt = getPoint(idx);
+          if (!pt) continue;
+          const [nx, ny] = direction(mouthCenter[0], mouthCenter[1], pt[0], pt[1]);
+          const f = state.splatForce * 0.33;
+          addSplat(pt[0], pt[1], nx * f, ny * f, 0.0, 0.0, 0.0, state.splatRadius * 3.4);
+        }
+      }
+    } else if (mode === 2) {
+      injectFaceNoiseMask(face, modeTime, mouth);
+      if (mouthBurst) {
+        for (let i = 0; i < FACE_IDX.lips.length; i += 3) {
+          const idx = FACE_IDX.lips[i];
+          const pt = getPoint(idx);
+          if (!pt) continue;
+          const [nx, ny] = direction(mouthCenter[0], mouthCenter[1], pt[0], pt[1]);
+          const f = state.splatForce * 0.18;
+          addSplat(pt[0], pt[1], nx * f, ny * f, 0, 0, 0, state.splatRadius * 2.6);
+        }
+      }
+    } else if (mode === 3) {
+      if (mouth > 0.2) {
+        for (let i = 0; i < FACE_IDX.lips.length; i += 2) {
+          const idx = FACE_IDX.lips[i];
+          const pt = getPoint(idx);
+          if (!pt) continue;
+          const [nx, ny] = direction(mouthCenter[0], mouthCenter[1], pt[0], pt[1]);
+          const f = state.splatForce * (0.08 + mouth * 0.35);
+          const col = palette(modeTime * 0.18 + i * 0.04, 1);
+          addSplat(pt[0], pt[1], nx * f, ny * f, col[0] * 0.07, col[1] * 0.07, col[2] * 0.07, state.splatRadius * (2.5 + mouth * 2.8));
+        }
+      }
+      if (mouthBurst) {
+        for (let k = 0; k < 12; k++) {
+          const a = (k / 12) * Math.PI * 2;
+          const px = mouthCenter[0] + Math.cos(a) * face.radius * 0.22;
+          const py = mouthCenter[1] + Math.sin(a) * face.radius * 0.22;
+          addSplat(px, py, Math.cos(a) * state.splatForce * 0.26, Math.sin(a) * state.splatForce * 0.26, 0, 0, 0, state.splatRadius * 3.2);
+        }
+      }
+    } else if (mode === 4) {
+      for (let i = 0; i < FACE_IDX.jaw.length; i += 2) {
+        const idx = FACE_IDX.jaw[i];
+        const pt = getPoint(idx);
+        if (!pt) continue;
+        const [nx, ny] = direction(face.centerX, face.centerY, pt[0], pt[1]);
+        const tx = -ny;
+        const ty = nx;
+        const f = state.splatForce * (0.11 + mouth * 0.2);
+        addSplat(pt[0], pt[1], tx * f, ty * f, 0, 0, 0, state.splatRadius * 2.4);
+      }
+      if (mouthBurst) {
+        const chin = getPoint(152);
+        if (chin) {
+          addSplat(chin[0], chin[1], 0, -state.splatForce * 0.34, 0.06, 0.05, 0.04, state.splatRadius * 3.1);
+        }
+      }
+    } else if (mode === 5) {
+      for (const idx of FACE_IDX.leftBrow) {
+        const pt = getPoint(idx);
+        if (!pt) continue;
+        const f = state.splatForce * (0.08 + mouth * 0.12);
+        addSplat(pt[0], pt[1], f, f * 0.2, 0.02, 0.03, 0.06, state.splatRadius * 2.2);
+      }
+      for (const idx of FACE_IDX.rightBrow) {
+        const pt = getPoint(idx);
+        if (!pt) continue;
+        const f = state.splatForce * (0.08 + mouth * 0.12);
+        addSplat(pt[0], pt[1], -f, f * 0.2, 0.02, 0.03, 0.06, state.splatRadius * 2.2);
+      }
+      if (mouthBurst) {
+        const nose = getPoint(1);
+        if (nose) addSplat(nose[0], nose[1], 0, -state.splatForce * 0.26, 0, 0, 0, state.splatRadius * 2.8);
+      }
+    } else if (mode === 6) {
+      const leftCheek = getPoint(123);
+      const rightCheek = getPoint(352);
+      if (leftCheek) {
+        const f = state.splatForce * (0.06 + meshPulse * 0.15 + mouth * 0.12);
+        addSplat(leftCheek[0], leftCheek[1], f, 0, 0.06, 0.05, 0.02, state.splatRadius * 3.0);
+      }
+      if (rightCheek) {
+        const f = state.splatForce * (0.06 + (1.0 - meshPulse) * 0.15 + mouth * 0.12);
+        addSplat(rightCheek[0], rightCheek[1], -f, 0, 0.02, 0.03, 0.06, state.splatRadius * 3.0);
+      }
+      if (mouthBurst && leftCheek && rightCheek) {
+        const midX = (leftCheek[0] + rightCheek[0]) * 0.5;
+        const midY = (leftCheek[1] + rightCheek[1]) * 0.5;
+        addSplat(midX, midY, 0, state.splatForce * 0.24, 0, 0, 0, state.splatRadius * 3.2);
+      }
+    } else if (mode === 7) {
+      // "Fluid Texture Mesh": velocity-only mesh advection, so existing fluid texture gets
+      // pulled across the tracked face mesh rather than painted as point dots.
+      for (let i = 0; i < FACE_DENSE_INDICES.length; i += 4) {
+        const idx = FACE_DENSE_INDICES[i];
+        if (idx >= face.count) continue;
+        const off = idx * 2;
+        const x = face.mapped[off];
+        const y = face.mapped[off + 1];
+        const px = faceTracking.prevMapped[off];
+        const py = faceTracking.prevMapped[off + 1];
+        if (Number.isFinite(px) && Number.isFinite(py)) {
+          const vx = (x - px) / Math.max(dt, 1e-5);
+          const vy = (y - py) / Math.max(dt, 1e-5);
+          const forceScale = state.splatForce * (0.03 + mouth * 0.06);
+          addSplat(x, y, vx * forceScale, vy * forceScale, 0, 0, 0, state.splatRadius * 2.0);
+        }
+      }
+      if (mouthBurst) {
+        for (let i = 0; i < FACE_IDX.lips.length; i += 2) {
+          const idx = FACE_IDX.lips[i];
+          const pt = getPoint(idx);
+          if (!pt) continue;
+          const [nx, ny] = direction(mouthCenter[0], mouthCenter[1], pt[0], pt[1]);
+          addSplat(pt[0], pt[1], nx * state.splatForce * 0.22, ny * state.splatForce * 0.22, 0, 0, 0, state.splatRadius * 3.0);
+        }
+      }
+    }
+
+    for (let i = 0; i < face.count; i++) {
+      const off = i * 2;
+      faceTracking.prevMapped[off] = face.mapped[off];
+      faceTracking.prevMapped[off + 1] = face.mapped[off + 1];
+    }
+    faceTracking.prevMouth = mouth;
+  }
+
+  // ─── Burst Emitters (edge/center impulse system) ────────────────────────
+  const burstEmitters = [];
+  let burstEmitterStamp = '';
+  let burstRotPhase = 0;
+
+  function ensureBurstEmitters(count, behavior) {
+    const wanted = Math.max(0, Math.round(count));
+    const stamp = `${wanted}:${behavior}`;
+    if (stamp === burstEmitterStamp && burstEmitters.length === wanted) return;
+    burstEmitterStamp = stamp;
+    burstRotPhase = 0;
+    burstEmitters.length = 0;
+    for (let i = 0; i < wanted; i++) {
+      burstEmitters.push({
+        angle: (i / Math.max(1, wanted)) * Math.PI * 2,
+        timer: Math.random() * 0.4,
+        active: 0,
+        shotTimer: 0,
+        drift: (Math.random() * 2 - 1) || 1,
+      });
+    }
+  }
+
+  function emitBurstAtAngle(angle, fromCenter, outward, power = 1, width = 0) {
+    const spread = Math.max(0, Math.min(1, width));
+    const lobeCount = fromCenter ? (1 + Math.round(spread * 2.0)) : (1 + Math.round(spread * 3.0));
+    const edgeInset = 0.045 + spread * 0.028;
+    const edgeRadius = Math.max(0.02, SIM_SPHERE_RADIUS - edgeInset);
+    const dirSign = outward ? 1 : -1;
+
+    for (let l = 0; l < lobeCount && splatCount < MAX_SPLATS; l++) {
+      const lane = lobeCount <= 1 ? 0 : (l / (lobeCount - 1) * 2 - 1);
+      const arcSpread = fromCenter ? 0.2 : 0.34;
+      const jitterAngle = (Math.random() * 2 - 1) * (0.015 + spread * 0.06);
+      const shotAngle = angle + lane * spread * arcSpread + jitterAngle;
+      const radialJitter = (Math.random() * 2 - 1) * spread * 0.014;
+      const srcR = fromCenter
+        ? (0.015 + spread * 0.06 + Math.abs(lane) * 0.02)
+        : Math.max(0.015, edgeRadius + radialJitter);
+      const sx = 0.5 + Math.cos(shotAngle) * srcR;
+      const sy = 0.5 + Math.sin(shotAngle) * srcR;
+      const dirX = Math.cos(shotAngle) * dirSign;
+      const dirY = Math.sin(shotAngle) * dirSign;
+      const jitter = 1 + (Math.random() * 2 - 1) * state.burstForceRandomness;
+      const force = state.splatForce * (0.22 + state.burstForce * 2.6) * (0.92 + spread * 0.35) * jitter * power;
+      const col = palette(time * 0.09 + shotAngle * 0.17, 4);
+      const radius = state.splatRadius * (1.6 + state.burstForce * 1.8) * (0.9 + power * 0.45) * (1.0 + spread * 2.6);
+      addSplat(sx, sy, dirX * force, dirY * force, col[0], col[1], col[2], radius);
+    }
+  }
+
+  function armBurstEmitter(e, duration) {
+    e.active = duration;
+    e.shotTimer = 0;
+  }
+
+  function runBurstEmitter(e, dt, duration, cadence, angleJitter, fromCenter, outward, width, angleOffset = 0) {
+    if (e.active <= 0) return;
+    e.active = Math.max(0, e.active - dt);
+    e.shotTimer -= dt;
+    while (e.shotTimer <= 0 && splatCount < MAX_SPLATS) {
+      const burstT = 1 - (Math.max(0, e.active) / Math.max(duration, 1e-5));
+      const envelope = 0.7 + Math.sin(Math.min(1, Math.max(0, burstT)) * Math.PI) * 0.55;
+      const jitterAngle = (Math.random() * 2 - 1) * angleJitter;
+      emitBurstAtAngle(e.angle + angleOffset + jitterAngle, fromCenter, outward, envelope, width);
+      e.shotTimer += cadence;
+      if (e.active <= 0) break;
+    }
+  }
+
+  function updateBurstEmitters(dt) {
+    const behavior = Math.max(0, Math.min(4, Math.round(state.burstBehavior)));
+    const count = Math.max(0, Math.round(state.burstCount));
+    if (count === 0 || state.burstForce <= 0.001) return;
+
+    ensureBurstEmitters(count, behavior);
+    const speed = Math.max(0.01, state.burstSpeed);
+    const duration = Math.max(0.01, state.burstDuration);
+    const width = Math.max(0, Math.min(1, Number.isFinite(state.burstWidth) ? state.burstWidth : 0.3));
+    const cadence = Math.max(0.01, 0.09 - speed * 0.07);
+    const interval = Math.max(0.05, 0.95 - speed * 0.78); // slower->sparser, faster->denser
+    burstRotPhase += dt * (0.35 + speed * 3.0);
+
+    // Behavior 0: edge cannons (count controls number of cannons).
+    if (behavior === 0) {
+      for (let i = 0; i < count; i++) {
+        const e = burstEmitters[i];
+        if (e.active <= 0) e.timer -= dt;
+        if (e.active <= 0 && e.timer <= 0) {
+          e.angle = Math.random() * Math.PI * 2;
+          armBurstEmitter(e, duration * (0.75 + Math.random() * 0.45));
+          e.timer = interval * (0.85 + Math.random() * 0.45);
+        }
+        runBurstEmitter(e, dt, duration, cadence, 0.03, false, false, width);
+      }
+      return;
+    }
+
+    // Behavior 1: radial symmetry from edge toward center.
+    // Behavior 2: radial symmetry from center outward.
+    // Behavior 4: rotating radial ring from edge toward center.
+    if (behavior === 1 || behavior === 2 || behavior === 4) {
+      const outward = behavior === 2;
+      const fromCenter = behavior === 2;
+      const rotate = behavior === 4 ? burstRotPhase : 0;
+      const gate = burstEmitters[0];
+      const allIdle = burstEmitters.every(e => e.active <= 0);
+      if (allIdle) gate.timer -= dt;
+      if (allIdle && gate.timer <= 0) {
+        const step = (Math.PI * 2) / count;
+        for (let i = 0; i < count; i++) {
+          const e = burstEmitters[i];
+          e.angle = rotate + i * step;
+          armBurstEmitter(e, duration);
+        }
+        gate.timer = interval * (0.9 + Math.random() * 0.3);
+      }
+      for (let i = 0; i < count; i++) {
+        runBurstEmitter(burstEmitters[i], dt, duration, cadence, behavior === 4 ? 0.03 : 0.015, fromCenter, outward, width);
+      }
+      return;
+    }
+
+    // Behavior 3: edge barrage — independent emitters that sweep around.
+    for (const e of burstEmitters) {
+      if (e.active <= 0) e.timer -= dt;
+      if (e.active <= 0 && e.timer <= 0) {
+        e.angle = Math.random() * Math.PI * 2;
+        armBurstEmitter(e, duration * (0.65 + Math.random() * 0.8));
+        e.timer = interval * (0.45 + Math.random() * 0.9);
+      }
+      e.angle += dt * (0.2 + speed * 1.2) * e.drift;
+      runBurstEmitter(e, dt, duration, cadence, 0.12, false, false, width);
+    }
   }
 
   // ─── Rebuild particle system (called when count changes) ───────────────
@@ -2992,114 +5030,14 @@ async function main() {
     return [simX, simY];
   }
 
-  // ─── Recording Controller ─────────────────────────────────────────────
-  const recording = { active: false, points: [], startTime: 0, recordings: [], cHeld: false, fingerprint: null };
-  state.useRecordings = false;
-
-  function analyzeRecordings(recs) {
-    if (!recs.length) return null;
-    const speeds = [], turnRates = [], radii = [];
-    for (const rec of recs) {
-      const pts = rec.points;
-      for (let i = 1; i < pts.length; i++) {
-        const dx = pts[i].x - pts[i - 1].x;
-        const dy = pts[i].y - pts[i - 1].y;
-        const dt = pts[i].t - pts[i - 1].t;
-        if (dt < 0.001) continue;
-        speeds.push(Math.sqrt(dx * dx + dy * dy) / dt);
-        radii.push(Math.sqrt((pts[i].x - 0.5) ** 2 + (pts[i].y - 0.5) ** 2));
-        if (i >= 2) {
-          const pdx = pts[i - 1].x - pts[i - 2].x;
-          const pdy = pts[i - 1].y - pts[i - 2].y;
-          const a1 = Math.atan2(pdy, pdx);
-          const a2 = Math.atan2(dy, dx);
-          let da = a2 - a1;
-          if (da > Math.PI) da -= 2 * Math.PI;
-          if (da < -Math.PI) da += 2 * Math.PI;
-          turnRates.push(Math.abs(da / dt));
-        }
-      }
-    }
-    if (!speeds.length) return null;
-    const sorted = a => [...a].sort((x, y) => x - y);
-    const median = a => { const s = sorted(a); return s[Math.floor(s.length / 2)]; };
-    const mean = a => a.reduce((s, v) => s + v, 0) / a.length;
-    const stddev = a => { const m = mean(a); return Math.sqrt(a.reduce((s, v) => s + (v - m) ** 2, 0) / a.length); };
-    const fp = {
-      avgSpeed: median(speeds),
-      speedVar: stddev(speeds) / (median(speeds) || 1),
-      avgTurnRate: turnRates.length ? median(turnRates) : 0,
-      turnRateVar: turnRates.length ? stddev(turnRates) / (median(turnRates) || 1) : 0,
-      avgRadius: median(radii),
-    };
-    console.log('Recording fingerprint:', fp);
-    return fp;
-  }
-
-  function seedStateFromFingerprint(fp) {
-    if (!fp) return;
-    // Map fingerprint to procedural params (normalized 0-1)
-    state.drawBotSpeed = Math.min(1, fp.avgSpeed / 1.5);        // ~1.5 units/s = fast
-    state.drawBotChaos = Math.min(1, fp.turnRateVar / 3.0);     // high variance = chaotic
-    state.drawBotDrift = Math.min(1, fp.avgRadius / 0.35);      // 0.35 = sphere edge
-    state.drawBotTurnRate = Math.min(1, fp.avgTurnRate / 15.0);  // ~15 rad/s = sharp turns
-    state.drawBotSpeedVar = Math.min(1, fp.speedVar / 2.0);     // coefficient of variation
-    console.log('Seeded bot params from recordings:', {
-      speed: state.drawBotSpeed.toFixed(2),
-      chaos: state.drawBotChaos.toFixed(2),
-      drift: state.drawBotDrift.toFixed(2),
-      turnRate: state.drawBotTurnRate.toFixed(2),
-      speedVar: state.drawBotSpeedVar.toFixed(2),
-    });
-  }
-
-  // Load existing recordings on startup
-  fetch('/api/recordings').then(r => r.ok ? r.json() : []).then(recs => {
-    recording.recordings = Array.isArray(recs) ? recs : [];
-    console.log(`Recordings: loaded ${recording.recordings.length} gestures`);
-    if (recording.recordings.length > 0) {
-      recording.fingerprint = analyzeRecordings(recording.recordings);
-    }
-  }).catch(() => {});
-
-  function finishRecording() {
-    if (!recording.active) return;
-    recording.active = false;
-    const overlay = document.getElementById('recordingOverlay');
-    if (overlay) overlay.style.display = 'none';
-    if (recording.points.length >= 5) {
-      const rec = { name: `gesture-${Date.now()}`, points: [...recording.points] };
-      recording.recordings.push(rec);
-      fetch('/api/recordings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(rec),
-      }).catch(() => {});
-      console.log(`Recording saved: ${rec.name} (${rec.points.length} points, ${recording.recordings.length} total)`);
-      recording.fingerprint = analyzeRecordings(recording.recordings);
-    } else {
-      console.log(`Recording discarded (${recording.points.length} points, need >= 5)`);
-    }
-    recording.points = [];
-  }
-
   canvas.addEventListener('pointerdown', e => {
     pointer.down = true;
     const [sx, sy] = screenToSimUV(e.clientX, e.clientY);
     pointer.x = sx;
     pointer.y = sy;
-    // Start recording if C is held
-    if (recording.cHeld && !recording.active) {
-      recording.active = true;
-      recording.startTime = performance.now();
-      recording.points = [{ t: 0, x: sx, y: sy }];
-      const overlay = document.getElementById('recordingOverlay');
-      if (overlay) overlay.style.display = 'block';
-    }
   });
   canvas.addEventListener('pointerup', () => {
     pointer.down = false;
-    if (recording.active) finishRecording();
   });
   canvas.addEventListener('pointermove', e => {
     const [nx, ny] = screenToSimUV(e.clientX, e.clientY);
@@ -3108,11 +5046,6 @@ async function main() {
     pointer.x = nx;
     pointer.y = ny;
     pointer.moved = true;
-    // Capture recording points
-    if (recording.active) {
-      const t = (performance.now() - recording.startTime) / 1000;
-      recording.points.push({ t, x: nx, y: ny });
-    }
   });
 
   // ─── Scientific Colormaps (Inferno, Magma, Plasma, Viridis) ─────────
@@ -3196,460 +5129,31 @@ async function main() {
     _palOut[2] = col[2] * 2.0;
     return _palOut;
   }
-
-  // ─── Auto-injectors ────────────────────────────────────────────────────
-  const injectors = [
-    { phase: 0.0, radius: 0.25, speed: 0.7, colorOffset: 0.0, cmIndex: 4 },
-    { phase: 1.57, radius: 0.18, speed: -0.9, colorOffset: 0.08, cmIndex: 4 },
-    { phase: 3.14, radius: 0.3, speed: 0.5, colorOffset: 0.15, cmIndex: 4 },
-    { phase: 4.71, radius: 0.22, speed: -0.6, colorOffset: 0.22, cmIndex: 4 },
-  ];
-
   let time = 0;
-  let lastSplatTime = -1.0;
-
-  // ─── Draw Bots ──────────────────────────────────────────────────────────
-  function simplexNoise(t) {
-    const i = Math.floor(t);
-    const f = t - i;
-    const smooth = f * f * (3 - 2 * f);
-    const a = Math.sin(i * 127.1 + i * 311.7) * 43758.5453;
-    const b = Math.sin((i+1) * 127.1 + (i+1) * 311.7) * 43758.5453;
-    return (a - Math.floor(a)) * (1 - smooth) + (b - Math.floor(b)) * smooth;
-  }
-
-  const drawBots = [];
-  let lastBotCount = 0;
-
-  // Sacred geometry ratios for per-bot periodic steering
-  const GOLDEN = (1 + Math.sqrt(5)) / 2;
-  const SACRED_FREQS = [
-    1.0,                    // circle
-    GOLDEN,                 // golden spiral
-    2.0,                    // figure-8 / lemniscate
-    3.0,                    // trefoil
-    GOLDEN * GOLDEN,        // nested golden
-    Math.PI,                // irrational — never repeats
-    Math.sqrt(2),           // diagonal harmony
-    5 / 3,                  // pentatonic ratio
-  ];
-
-  function initDrawBots(count) {
-    drawBots.length = 0;
-    for (let i = 0; i < count; i++) {
-      const startX = 0.3 + Math.random() * 0.4;
-      const startY = 0.3 + Math.random() * 0.4;
-      drawBots.push({
-        x: startX, y: startY,
-        _prevX: startX, _prevY: startY,
-        vx: 0, vy: 0,
-        angle: Math.random() * Math.PI * 2,
-        turnRate: 0,
-        colorPhase: i * 0.25,
-        noiseT: Math.random() * 100,
-        // Per-bot sacred geometry params
-        baseFreq: SACRED_FREQS[i % SACRED_FREQS.length] * (0.3 + Math.random() * 0.4),
-        secondFreq: SACRED_FREQS[(i + 3) % SACRED_FREQS.length] * (0.4 + Math.random() * 0.3),
-        speedPhase: Math.random() * Math.PI * 2,
-        orbitRadius: 0.08 + Math.random() * 0.22,  // Per-bot orbit scale
-        symmetry: 3 + (i % 4),                      // 3-6 fold symmetry
-        // Blend mode fields
-        _mode: 'autonomous', _modeTimer: Math.random() * 3.0,
-        // Recording playback fields
-        _rec: null, _recIdx: 0, _recT: 0,
-        _recRotation: 0, _recScale: 1, _recOffX: 0, _recOffY: 0,
-        _recSpeed: 1, _recMirrorX: false, _recMirrorY: false, _recPause: 0,
-        _recCentroidX: 0, _recCentroidY: 0,
-      });
-    }
-  }
-
-  // ─── Recording Playback ───────────────────────────────────────────────
-  function pickRecordingForBot(bot) {
-    const recs = recording.recordings;
-    if (!recs.length) { bot._rec = null; return; }
-    const rec = recs[Math.floor(Math.random() * recs.length)];
-    bot._rec = rec;
-    bot._recIdx = 0;
-    bot._recT = 0;
-    bot._recRotation = Math.random() * Math.PI * 2;
-    bot._recScale = 0.6 + Math.random() * 0.8;
-    bot._recSpeed = 0.7 + Math.random() * 0.6;
-    bot._recMirrorX = Math.random() < 0.5;
-    bot._recMirrorY = Math.random() < 0.5;
-    bot._recPause = 0;
-    // Compute gesture centroid
-    let cx = 0, cy = 0;
-    for (const p of rec.points) { cx += p.x; cy += p.y; }
-    cx /= rec.points.length;
-    cy /= rec.points.length;
-    bot._recCentroidX = cx;
-    bot._recCentroidY = cy;
-    // Offset so gesture starts at bot's current position
-    bot._recOffX = bot.x - cx;
-    bot._recOffY = bot.y - cy;
-  }
-
-  function transformRecPoint(bot, px, py) {
-    // Relative to gesture centroid
-    let rx = px - bot._recCentroidX;
-    let ry = py - bot._recCentroidY;
-    // Mirror
-    if (bot._recMirrorX) rx = -rx;
-    if (bot._recMirrorY) ry = -ry;
-    // Scale
-    rx *= bot._recScale;
-    ry *= bot._recScale;
-    // Rotate
-    const cos = Math.cos(bot._recRotation);
-    const sin = Math.sin(bot._recRotation);
-    const rotX = rx * cos - ry * sin;
-    const rotY = rx * sin + ry * cos;
-    // Offset to bot position
-    return [rotX + bot._recCentroidX + bot._recOffX, rotY + bot._recCentroidY + bot._recOffY];
-  }
-
-  function updateDrawBotFromRecording(bot, dt) {
-    if (!bot._rec) { pickRecordingForBot(bot); if (!bot._rec) return; }
-    const rec = bot._rec;
-    const pts = rec.points;
-
-    // Pause between gestures
-    if (bot._recPause > 0) {
-      bot._recPause -= dt;
-      bot.vx = 0; bot.vy = 0;
-      return;
-    }
-
-    bot._recT += dt * bot._recSpeed;
-    // Find the two points to interpolate between
-    while (bot._recIdx < pts.length - 1 && pts[bot._recIdx + 1].t <= bot._recT) {
-      bot._recIdx++;
-    }
-
-    if (bot._recIdx >= pts.length - 1) {
-      // Gesture finished — switch to autonomous for a while
-      bot._mode = 'autonomous';
-      bot._modeTimer = (1 - state.drawBotRecMix) * 6.0 + Math.random() * 2.0;
-      bot._rec = null;
-      return;
-    }
-
-    const p0 = pts[bot._recIdx];
-    const p1 = pts[bot._recIdx + 1];
-    const segDt = p1.t - p0.t;
-    const frac = segDt > 0 ? (bot._recT - p0.t) / segDt : 0;
-
-    const rawX = p0.x + (p1.x - p0.x) * frac;
-    const rawY = p0.y + (p1.y - p0.y) * frac;
-    const [tx, ty] = transformRecPoint(bot, rawX, rawY);
-
-    // Clamp to sphere boundary
-    const SPHERE_R = 0.35;
-    const dx = tx - 0.5, dy = ty - 0.5;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    let finalX = tx, finalY = ty;
-    if (dist > SPHERE_R) {
-      finalX = 0.5 + dx / dist * SPHERE_R * 0.95;
-      finalY = 0.5 + dy / dist * SPHERE_R * 0.95;
-    }
-
-    bot.vx = (finalX - bot.x) / Math.max(dt, 0.001);
-    bot.vy = (finalY - bot.y) / Math.max(dt, 0.001);
-    bot.x = finalX;
-    bot.y = finalY;
-  }
-
-  function updateBotAutonomous(bot, dt, speed, chaos, drift, turnRate, speedVar) {
-    const SPHERE_R = 0.35;
-    bot.noiseT += dt;
-    const t = bot.noiseT * speed;
-    const turnScale = 0.5 + turnRate * 3.0;
-
-    // Sacred geometry: multi-frequency sinusoidal creates spirograph-like patterns
-    const periodicSteer = (Math.sin(t * bot.baseFreq) * 1.5
-                        + Math.sin(t * bot.secondFreq) * 0.8
-                        + Math.sin(t * bot.baseFreq * bot.symmetry) * 0.3) * turnScale;
-
-    // Noise steering for chaos
-    const noiseSteer = (simplexNoise(bot.noiseT * (0.5 + chaos * 4)) * 2 - 1) * (1 + chaos * 10) * turnScale;
-
-    // Blend: chaos=0 → pure sacred geometry, chaos=1 → pure noise
-    const targetTurn = periodicSteer * (1 - chaos) + noiseSteer * chaos;
-    bot.turnRate += (targetTurn - bot.turnRate) * (0.02 + chaos * 0.3);
-    bot.angle += bot.turnRate * dt * speed;
-
-    // Speed varies organically over time
-    const sv = 1.0 + Math.sin(bot.noiseT * 0.7 + bot.speedPhase) * speedVar * 0.6;
-    const spd = speed * 0.3 * sv;
-    bot.vx = Math.cos(bot.angle) * spd;
-    bot.vy = Math.sin(bot.angle) * spd;
-
-    // Drift toward/away from center
-    const toCenterX = 0.5 - bot.x;
-    const toCenterY = 0.5 - bot.y;
-    const distFromCenter = Math.sqrt(toCenterX * toCenterX + toCenterY * toCenterY);
-    const centerPull = drift < 0.5
-      ? 0.02 + distFromCenter * 0.1
-      : 0.005 + distFromCenter * 0.03;
-    bot.vx += toCenterX * centerPull;
-    bot.vy += toCenterY * centerPull;
-
-    // Hard boundary: reflect off sphere edge
-    const newX = bot.x + bot.vx * dt;
-    const newY = bot.y + bot.vy * dt;
-    const newDist = Math.sqrt((newX - 0.5) ** 2 + (newY - 0.5) ** 2);
-    if (newDist > SPHERE_R) {
-      bot.angle = Math.atan2(0.5 - bot.y, 0.5 - bot.x) + (Math.random() - 0.5) * 1.0;
-      bot.vx *= -0.3;
-      bot.vy *= -0.3;
-    }
-    bot.x += bot.vx * dt;
-    bot.y += bot.vy * dt;
-    const d = Math.sqrt((bot.x - 0.5) ** 2 + (bot.y - 0.5) ** 2);
-    if (d > SPHERE_R) {
-      bot.x = 0.5 + (bot.x - 0.5) / d * SPHERE_R * 0.95;
-      bot.y = 0.5 + (bot.y - 0.5) / d * SPHERE_R * 0.95;
-    }
-  }
-
-  function updateDrawBots(dt, time) {
-    const count = Math.round(state.drawBotCount);
-    if (count !== lastBotCount) {
-      initDrawBots(count);
-      lastBotCount = count;
-    }
-    if (count === 0) return;
-
-    // More bots → slightly slower so they don't overwhelm
-    const botCountScale = 1 / Math.max(1, count);
-    const speed = (0.1 + state.drawBotSpeed * 2.9) * (0.5 + botCountScale * 0.5);
-    const chaos = state.drawBotChaos;
-    const drift = state.drawBotDrift;
-    const turnRate = state.drawBotTurnRate;
-    const speedVar = state.drawBotSpeedVar;
-    const hasRecordings = state.useRecordings && recording.recordings.length > 0;
-    const recMix = hasRecordings ? state.drawBotRecMix : 0;
-
-    for (const bot of drawBots) {
-      if (recMix > 0 && bot._mode === 'recording') {
-        updateDrawBotFromRecording(bot, dt);
-      } else {
-        updateBotAutonomous(bot, dt, speed, chaos, drift, turnRate, speedVar);
-        if (recMix > 0) {
-          bot._modeTimer -= dt;
-          if (bot._modeTimer <= 0) {
-            bot._mode = 'recording';
-            bot._rec = null;
-          }
-        }
-      }
-    }
-  }
-
-  // ─── Blobs — large Brownian-motion agents ────────────────────────────────
-  const blobs = [];
-  let lastBlobCount = 0;
-
-  function initBlobs(count) {
-    blobs.length = 0;
-    for (let i = 0; i < count; i++) {
-      const sx = 0.3 + Math.random() * 0.4;
-      const sy = 0.3 + Math.random() * 0.4;
-      blobs.push({
-        x: sx, y: sy, _prevX: sx, _prevY: sy,
-        vx: 0, vy: 0,
-        colorPhase: i * 0.4,
-        wanderAngle: Math.random() * Math.PI * 2,
-      });
-    }
-  }
-
-  const SPHERE_R_AGENTS = 0.30;
-
-  function clampToSphere(agent) {
-    const dx = agent.x - 0.5, dy = agent.y - 0.5;
-    const d = Math.sqrt(dx * dx + dy * dy);
-    if (d > SPHERE_R_AGENTS) {
-      // Reflect velocity off boundary
-      const nx = dx / d, ny = dy / d;
-      const outward = agent.vx * nx + agent.vy * ny;
-      if (outward > 0) {
-        agent.vx -= 2 * outward * nx;
-        agent.vy -= 2 * outward * ny;
-      }
-      agent.x = 0.5 + dx / d * SPHERE_R_AGENTS * 0.95;
-      agent.y = 0.5 + dy / d * SPHERE_R_AGENTS * 0.95;
-    }
-  }
-
-  function updateBlobs(dt) {
-    const count = Math.round(state.blobCount);
-    if (count !== lastBlobCount) { initBlobs(count); lastBlobCount = count; }
-    if (count === 0) return;
-
-    const speed = state.blobSpeed;
-    const wander = state.blobWander;
-
-    for (const blob of blobs) {
-      // Brownian: smooth random walk (Ornstein-Uhlenbeck style)
-      blob.wanderAngle += (Math.random() - 0.5) * wander * 6 * dt;
-      const force = speed * 0.2;
-      blob.vx += Math.cos(blob.wanderAngle) * force * dt;
-      blob.vy += Math.sin(blob.wanderAngle) * force * dt;
-      // Damping
-      blob.vx *= 0.97;
-      blob.vy *= 0.97;
-      // Drift toward center
-      const toCx = 0.5 - blob.x, toCy = 0.5 - blob.y;
-      const dist = Math.sqrt(toCx * toCx + toCy * toCy);
-      const pull = 0.01 + dist * 0.06;
-      blob.vx += toCx * pull * dt;
-      blob.vy += toCy * pull * dt;
-      blob.x += blob.vx;
-      blob.y += blob.vy;
-      clampToSphere(blob);
-    }
-  }
-
-  // ─── Chemotaxis proxy grid (32x32) ─────────────────────────────────────
-  const CHEMO_RES = 32;
-  const dyeProxyGrid = new Float32Array(CHEMO_RES * CHEMO_RES);
-
-  // ─── Flockers — Reynolds boids + blob interaction ──────────────────────
-  const flockers = [];
-  let lastFlockCount = 0;
-
-  function initFlockers(count) {
-    flockers.length = 0;
-    for (let i = 0; i < count; i++) {
-      // Start in a ring around center with random angle
-      const angle = (i / count) * Math.PI * 2 + Math.random() * 0.3;
-      const r = 0.08 + Math.random() * 0.12;
-      const sx = 0.5 + Math.cos(angle) * r;
-      const sy = 0.5 + Math.sin(angle) * r;
-      flockers.push({
-        x: sx, y: sy, _prevX: sx, _prevY: sy,
-        vx: 0, vy: 0,
-        colorPhase: i * 0.12,
-        // Per-flocker orbit params for baseline circular motion
-        orbitSpeed: 0.3 + Math.random() * 0.4,
-        orbitDir: Math.random() < 0.5 ? 1 : -1,
-      });
-    }
-  }
-
-  function updateFlockers(dt) {
-    const count = Math.round(state.flockCount);
-    if (count !== lastFlockCount) { initFlockers(count); lastFlockCount = count; }
-    if (count === 0) return;
-
-    const sep = state.flockSeparation;
-    const ali = state.flockAlignment;
-    const coh = state.flockCohesion;
-    const blobReact = state.flockBlobReact;
-    const speed = state.flockSpeed;
-    const maxSpd = (0.002 + speed * 0.008);
-    const FLOCK_R = 0.28; // keep flockers inside visible area
-
-    for (const f of flockers) {
-      // Start with desired velocity = 0
-      let dvx = 0, dvy = 0;
-
-      // Baseline: gentle orbit around center
-      const toCx = f.x - 0.5, toCy = f.y - 0.5;
-      const distC = Math.sqrt(toCx * toCx + toCy * toCy) + 0.001;
-      // Tangential orbit velocity
-      const orbSpd = f.orbitSpeed * speed * 0.01;
-      dvx += -toCy / distC * orbSpd * f.orbitDir;
-      dvy += toCx / distC * orbSpd * f.orbitDir;
-
-      // Pull toward preferred orbit radius (keeps them from center and edges)
-      const preferredR = 0.1 + Math.random() * 0.1; // orbit at 10-20% from center
-      const rDiff = distC - preferredR;
-      dvx -= toCx / distC * rDiff * 0.008;
-      dvy -= toCy / distC * rDiff * 0.01;
-
-      // Flocking: separation, alignment, cohesion
-      let sx = 0, sy = 0, sepN = 0;
-      let ax = 0, ay = 0, cx = 0, cy = 0, n = 0;
-      for (const other of flockers) {
-        if (other === f) continue;
-        const dx = other.x - f.x, dy = other.y - f.y;
-        const d2 = dx * dx + dy * dy;
-        if (d2 > 0.04) continue; // perception radius ~0.2
-        const d = Math.sqrt(d2) + 0.0001;
-        n++;
-        if (d < 0.03) { sx -= dx / d; sy -= dy / d; sepN++; }
-        ax += other.vx; ay += other.vy;
-        cx += other.x; cy += other.y;
-      }
-      if (sepN > 0) { sx /= sepN; sy /= sepN; }
-      if (n > 0) {
-        ax /= n; ay /= n;
-        cx = cx / n - f.x; cy = cy / n - f.y;
-        dvx += sx * sep * 0.003 + (ax - f.vx) * ali * 0.1 + cx * coh * 0.005;
-        dvy += sy * sep * 0.003 + (ay - f.vy) * ali * 0.1 + cy * coh * 0.005;
-      }
-
-      // Blob + draw bot interaction
-      const reactTargets = [...blobs, ...drawBots];
-      for (const t of reactTargets) {
-        const dx = t.x - f.x, dy = t.y - f.y;
-        const d = Math.sqrt(dx * dx + dy * dy) + 0.001;
-        if (d > 0.2) continue;
-        const force = blobReact * 0.001 / (d + 0.02);
-        dvx += dx / d * force;
-        dvy += dy / d * force;
-      }
-
-      // Chemotaxis: steer toward higher dye proxy values
-      const chemo = state.flockChemotaxis;
-      if (chemo > 0.01) {
-        const gx = Math.floor(f.x * CHEMO_RES), gy = Math.floor(f.y * CHEMO_RES);
-        const eps = 1;
-        if (gx > eps && gx < CHEMO_RES - eps - 1 && gy > eps && gy < CHEMO_RES - eps - 1) {
-          const cR = dyeProxyGrid[gy * CHEMO_RES + gx + 1];
-          const cL = dyeProxyGrid[gy * CHEMO_RES + gx - 1];
-          const cU = dyeProxyGrid[(gy + 1) * CHEMO_RES + gx];
-          const cD = dyeProxyGrid[(gy - 1) * CHEMO_RES + gx];
-          dvx += (cR - cL) * chemo * 0.005;
-          dvy += (cU - cD) * chemo * 0.005;
-        }
-      }
-
-      // Random jitter
-      dvx += (Math.random() - 0.5) * 0.001;
-      dvy += (Math.random() - 0.5) * 0.001;
-
-      // Smooth velocity update (heavy damping for stability)
-      f.vx = f.vx * 0.85 + dvx * 0.15;
-      f.vy = f.vy * 0.85 + dvy * 0.15;
-
-      // Speed limit
-      const spd = Math.sqrt(f.vx * f.vx + f.vy * f.vy);
-      if (spd > maxSpd) { f.vx *= maxSpd / spd; f.vy *= maxSpd / spd; }
-
-      f.x += f.vx;
-      f.y += f.vy;
-
-      // Hard boundary — push back smoothly, no jitter
-      const dEdge = Math.sqrt((f.x - 0.5) ** 2 + (f.y - 0.5) ** 2);
-      if (dEdge > FLOCK_R) {
-        const nx = (f.x - 0.5) / dEdge, ny = (f.y - 0.5) / dEdge;
-        f.x = 0.5 + nx * FLOCK_R;
-        f.y = 0.5 + ny * FLOCK_R;
-        // Kill outward velocity component
-        const outward = f.vx * nx + f.vy * ny;
-        if (outward > 0) { f.vx -= outward * nx * 1.5; f.vy -= outward * ny * 1.5; }
-      }
-    }
-  }
+  let masterStepAccumulator = 0;
 
   // ─── Frame loop ─────────────────────────────────────────────────────────
   function frame() {
     if (!frameRunning) return;
     requestAnimationFrame(frame);
+    const nowMs = performance.now();
+
+    if (canvas.width < 1 || canvas.height < 1) {
+      resize();
+      return;
+    }
+
+    pumpFaceTracker(nowMs);
+    drawFaceDebugOverlay(nowMs);
+
+    // Master speed throttles full simulation ticks without changing solver dt.
+    // 1.0 = run every frame; 0.5 = run ~every other frame; 0.0 = paused.
+    const masterSpeed = Math.max(0, Math.min(1, Number.isFinite(state.masterSpeed) ? state.masterSpeed : 1.0));
+    masterStepAccumulator += masterSpeed;
+    if (masterStepAccumulator < 1.0) {
+      return;
+    }
+    masterStepAccumulator -= 1.0;
 
     // Cap GPU queue depth: skip frame if GPU is >2 frames behind
     if (gpuFramesPending > 2) {
@@ -3662,9 +5166,6 @@ async function main() {
     time += dt;
 
     updateAutoMorph();
-    updateDrawBots(dt, time);
-    updateBlobs(dt);
-    updateFlockers(dt);
 
     // Mood lighting: shift colors with slow sinusoidal cycle
     let moodBaseColor = state.baseColor;
@@ -3730,140 +5231,15 @@ async function main() {
     displayUBData[17] = okTipCol[1];
     displayUBData[18] = okTipCol[2];
     displayUBData[19] = state.roughness;
-    displayUBData[20] = state.depthAmount;
-    displayUBData[21] = state.depthSpeed;
+    displayUBData[20] = 0; // depth removed
+    displayUBData[21] = 0;
     displayUBData[22] = 0; // pad
     displayUBData[23] = 0; // pad
     device.queue.writeBuffer(displayUB, 0, displayUBData);
 
-    // Decay + update chemotaxis proxy grid
-    for (let i = 0; i < CHEMO_RES * CHEMO_RES; i++) dyeProxyGrid[i] *= 0.95;
-
     // Collect splats into pre-allocated buffer
     splatCount = 0;
-
-    // Dye ramp: fade in over first 3 seconds (starting at t=1) to prevent initial blowout
-    const dyeRamp = Math.min(1.0, (time - 1.0) / 3.0);
-
-    // Auto-injectors (scaled by injectorIntensity; 0 = off)
-    const injI = state.injectorIntensity;
-    const injCount = Math.round(state.injectorCount);
-    if (injI > 0.01 && injCount > 0) {
-      // Build up to 8 injectors by duplicating base 4 with offset phases
-      const allInjectors = [];
-      for (let i = 0; i < Math.min(injCount, injectors.length); i++) {
-        allInjectors.push(injectors[i]);
-      }
-      for (let i = injectors.length; i < injCount; i++) {
-        const base = injectors[i % injectors.length];
-        allInjectors.push({
-          phase: base.phase + Math.PI * 0.5,
-          radius: base.radius * 0.85,
-          speed: base.speed * 1.2,
-          colorOffset: base.colorOffset + 0.3,
-          cmIndex: base.cmIndex,
-        });
-      }
-      // More injectors → slightly slower so they don't overwhelm
-      const injCountScale = 1 / Math.max(1, injCount);
-      const injSplatRadius = state.splatRadius * 2.0 * (0.5 + state.injectorSize * 3.0);
-      const spdMul = (0.2 + state.injectorSpeed * 3.6) * (0.5 + injCountScale * 0.5);
-      for (const inj of allInjectors) {
-        if (time < 1.0) { continue; }
-        const spd = inj.speed * spdMul;
-        const angle = time * spd + inj.phase;
-        const cx = 0.5 + Math.cos(angle) * inj.radius;
-        const cy = 0.5 + Math.sin(angle) * inj.radius;
-        const vx = -Math.sin(angle) * spd * inj.radius * 0.5;
-        const vy = Math.cos(angle) * spd * inj.radius * 0.5;
-        const col = palette(time * 0.12 + inj.colorOffset, inj.cmIndex);
-        addSplat(cx, cy,
-          vx * state.splatForce * 0.1 * injI,
-          vy * state.splatForce * 0.1 * injI,
-          col[0] * dyeRamp * injI, col[1] * dyeRamp * injI, col[2] * dyeRamp * injI,
-          injSplatRadius);
-      }
-
-      // Random splat burst every 3-5 seconds (controlled by burstCount)
-      const bc = Math.round(state.burstCount);
-      if (bc > 0 && time - lastSplatTime > 2.0 + Math.random() * 1.5) {
-        lastSplatTime = time;
-        const count = Math.max(1, bc - 1) + Math.floor(Math.random() * (bc + 1));
-        for (let i = 0; i < count; i++) {
-          const col = palette(Math.random(), 4);
-          const angle = Math.random() * Math.PI * 2;
-          const force = (500 + Math.random() * 1000) * injI;
-          addSplat(
-            0.15 + Math.random() * 0.7,
-            0.15 + Math.random() * 0.7,
-            Math.cos(angle) * force,
-            Math.sin(angle) * force,
-            col[0] * dyeRamp * injI, col[1] * dyeRamp * injI, col[2] * dyeRamp * injI,
-            state.splatRadius * (2.0 + Math.random() * 3));
-        }
-      }
-    }
-
-    // Draw bot splats — gentle like injectors, not like mouse drags
-    for (const bot of drawBots) {
-      const dx = bot.x - bot._prevX;
-      const dy = bot.y - bot._prevY;
-      bot._prevX = bot.x;
-      bot._prevY = bot.y;
-
-      const speed = Math.sqrt(dx * dx + dy * dy);
-      if (speed < 0.0001) continue;
-
-      const col = palette(time * 0.15 + bot.colorPhase, 4);
-      // Gentle but visible force — not mouse-slam, not invisible either
-      const botForce = 0.4;
-      const botDyeStr = 1.0;
-      const botRadius = state.splatRadius * (1.0 + state.drawBotSize * 3.0);
-      addSplat(
-        bot.x, bot.y,
-        dx * state.splatForce * botForce,
-        dy * state.splatForce * botForce,
-        col[0] * dyeRamp * botDyeStr, col[1] * dyeRamp * botDyeStr, col[2] * dyeRamp * botDyeStr,
-        botRadius
-      );
-    }
-
-    // Blob splats — big, slow, gentle
-    for (const blob of blobs) {
-      const dx = blob.x - blob._prevX;
-      const dy = blob.y - blob._prevY;
-      blob._prevX = blob.x;
-      blob._prevY = blob.y;
-      if (Math.sqrt(dx * dx + dy * dy) < 0.00005) continue;
-      const col = palette(time * 0.08 + blob.colorPhase, 4);
-      const radius = state.splatRadius * (2.0 + state.blobSize * 5.0);
-      addSplat(blob.x, blob.y,
-        dx * state.splatForce * 0.3, dy * state.splatForce * 0.3,
-        col[0] * dyeRamp * 0.8, col[1] * dyeRamp * 0.8, col[2] * dyeRamp * 0.8,
-        radius);
-    }
-
-    // Flocker splats — rotate subset each frame to stay under MAX_SPLATS
-    {
-      const maxFlockSplats = Math.min(flockers.length, 30);
-      const startIdx = Math.floor(time * 60) % Math.max(1, flockers.length);
-      let splatted = 0;
-      for (let i = 0; i < flockers.length && splatted < maxFlockSplats; i++) {
-        const f = flockers[(startIdx + i) % flockers.length];
-        const dx = f.x - f._prevX;
-        const dy = f.y - f._prevY;
-        f._prevX = f.x;
-        f._prevY = f.y;
-        if (Math.sqrt(dx * dx + dy * dy) < 0.00005) continue;
-        const col = palette(time * 0.2 + f.colorPhase, 4);
-        const radius = state.splatRadius * (1.0 + state.flockSize * 4.0);
-        addSplat(f.x, f.y,
-          dx * state.splatForce * 0.5, dy * state.splatForce * 0.5,
-          col[0] * dyeRamp * 1.2, col[1] * dyeRamp * 1.2, col[2] * dyeRamp * 1.2,
-          radius);
-        splatted++;
-      }
-    }
+    updateBurstEmitters(dt);
 
     // Mouse splat — clamp to sphere (tighter than visual edge to keep splat radius inside)
     const INTERACT_R = 0.35;
@@ -3882,16 +5258,8 @@ async function main() {
         col[0] * str, col[1] * str, col[2] * str,
         state.splatRadius * sz * (1.0 + speed * 20));
     }
+    applyFaceEffectors(dt, time);
     if (pointer.moved) { pointer.moved = false; }
-
-    // Update chemotaxis proxy grid from splats
-    for (let i = 0; i < splatCount; i++) {
-      const sx = splatArrayData[i * 8], sy = splatArrayData[i * 8 + 1];
-      const gx = Math.floor(sx * CHEMO_RES), gy = Math.floor(sy * CHEMO_RES);
-      if (gx >= 0 && gx < CHEMO_RES && gy >= 0 && gy < CHEMO_RES) {
-        dyeProxyGrid[gy * CHEMO_RES + gx] = Math.min(dyeProxyGrid[gy * CHEMO_RES + gx] + 1.0, 10.0);
-      }
-    }
 
     // ── Upload batch splat data + write simulation params ──
     splatCountUData[0] = splatCount;
@@ -4021,15 +5389,22 @@ async function main() {
       velFlip ^= 1;
     }
 
-    // ── Curl Noise (field-wide velocity perturbation) ──
+    // ── Noise Field (type-selectable curl perturbation) ──
     if (state.noiseAmount > 0.01) {
       noiseData[0] = time;
-      // Cubic curve so slider gives fine control at low values
+      // Keep low-end control but avoid over-damping the effect.
       const na = state.noiseAmount;
-      noiseData[1] = na * na * na;
+      noiseData[1] = na * na;
       noiseData[2] = SIM_RES;
       noiseData[3] = state.noiseFrequency;
       noiseData[4] = state.noiseSpeed;
+      noiseData[5] = Math.round(state.noiseType || 0);
+      noiseData[6] = Math.round(state.noiseBehavior || 0);
+      noiseData[7] = Math.round(state.noiseMapping || 0);
+      noiseData[8] = state.noiseWarp;
+      noiseData[9] = state.noiseSharpness;
+      noiseData[10] = state.noiseAnisotropy;
+      noiseData[11] = state.noiseBlend;
       device.queue.writeBuffer(noiseBuf, 0, noiseData);
       const p = enc.beginComputePass();
       p.setPipeline(curlNoisePipe.pipeline);
@@ -4063,39 +5438,7 @@ async function main() {
       dyeFlip ^= 1;
     }
 
-    // ── Reaction-Diffusion (Gray-Scott, gated by rdAmount) ──
-    if (state.rdAmount > 0.01) {
-      rdData[0] = time;
-      rdData[1] = state.rdAmount;
-      rdData[2] = SIM_RES;
-      rdData[3] = state.rdFeedRate;
-      rdData[4] = state.rdKillRate;
-      rdData[5] = state.rdDyeAmount;
-      rdData[6] = state.rdForceAmount;
-      rdData[7] = state.rdScale;
-      device.queue.writeBuffer(rdBuf, 0, rdData);
-
-      // Run multiple RD iterations per frame for speed
-      for (let i = 0; i < 4; i++) {
-        const p = enc.beginComputePass();
-        p.setPipeline(rdPipe.pipeline);
-        p.setBindGroup(0, rdStepBGs[rdFlip]);
-        p.dispatchWorkgroups(dispatch, dispatch);
-        p.end();
-        rdFlip ^= 1;
-      }
-
-      // Coupling: inject dye + velocity from RD field
-      if (state.rdDyeAmount > 0.01 || state.rdForceAmount > 0.01) {
-        const p = enc.beginComputePass();
-        p.setPipeline(rdCouplingPipeline);
-        p.setBindGroup(0, rdCouplingBGs[rdFlip][velFlip][dyeFlip]);
-        p.dispatchWorkgroups(dispatch, dispatch);
-        p.end();
-        dyeFlip ^= 1;
-        velFlip ^= 1;
-      }
-    }
+    // Reaction-diffusion runtime pass is intentionally disabled.
 
     // ── Sphere Cleanup (hard-zero vel+dye outside sphere) ──
     {
@@ -4141,7 +5484,15 @@ async function main() {
     } else if (bloomResources) {
       destroyBloomResources();
     }
-    const canvasView = ctx.getCurrentTexture().createView();
+    let canvasView;
+    try {
+      canvasView = ctx.getCurrentTexture().createView();
+    } catch (err) {
+      console.error('GPU: failed to acquire current texture view:', err?.message || err);
+      resize();
+      gpuFramesPending--;
+      return;
+    }
     const renderTarget = bloomActive ? bloomResources.sceneView : canvasView;
 
     // ── Pass 11: Display Render (fluid base) ──
@@ -4272,8 +5623,24 @@ async function main() {
     //   rp.setBindGroup(0, glassShellBG);
     //   rp.draw(3); rp.end(); }
 
-    device.queue.submit([enc.finish()]);
-    device.queue.onSubmittedWorkDone().then(() => { gpuFramesPending--; });
+    try {
+      device.queue.submit([enc.finish()]);
+    } catch (err) {
+      gpuFramesPending--;
+      console.error('GPU submit failed:', err?.message || err);
+      frameRunning = false;
+      if (errorDiv) {
+        errorDiv.style.display = 'block';
+        errorDiv.textContent = `GPU submit failed: ${err?.message || err}`;
+      }
+      return;
+    }
+    device.queue.onSubmittedWorkDone()
+      .then(() => { gpuFramesPending--; })
+      .catch(err => {
+        gpuFramesPending--;
+        console.error('GPU work completion failed:', err?.message || err);
+      });
   }
 
   // ─── Wire Settings UI ──────────────────────────────────────────────────
@@ -4325,6 +5692,7 @@ async function main() {
   function wireSlider(id, stateKey, fmt) {
     const slider = document.getElementById(id);
     const valSpan = document.getElementById(id + 'Val');
+    if (!slider) return;
     slider.value = state[stateKey];
     if (valSpan) valSpan.textContent = fmt ? fmt(state[stateKey]) : state[stateKey];
     let lastTextUpdate = 0;
@@ -4344,6 +5712,16 @@ async function main() {
         valSpan.textContent = fmt ? fmt(state[stateKey]) : state[stateKey];
       });
     }
+  }
+
+  function wireSelect(id, stateKey, onChange) {
+    const sel = document.getElementById(id);
+    if (!sel) return;
+    sel.value = String(Math.round(state[stateKey] ?? 0));
+    sel.addEventListener('change', () => {
+      state[stateKey] = parseFloat(sel.value);
+      if (onChange) onChange(state[stateKey]);
+    });
   }
 
   wireSlider('particleSize', 'particleSize');
@@ -4377,6 +5755,53 @@ async function main() {
   wireColor('glitterTip', 'glitterTip');
   wireSlider('colorBlend', 'colorBlend', v => v.toFixed(2));
 
+  const NOISE_TYPE_PROFILES = [
+    // Each noise type ships with a curated preset so mode changes are immediately visible.
+    { amount: 0.20, behavior: 0, mapping: 0, warp: 0.20, sharpness: 0.20, anisotropy: 0.10, blend: 0.20, frequency: 0.50, speed: 0.45 }, // Classic Curl
+    { amount: 0.28, behavior: 0, mapping: 0, warp: 0.95, sharpness: 0.35, anisotropy: 0.30, blend: 0.40, frequency: 0.48, speed: 0.52 }, // Domain-Warped
+    { amount: 0.24, behavior: 2, mapping: 0, warp: 0.40, sharpness: 1.00, anisotropy: 0.35, blend: 0.35, frequency: 0.56, speed: 0.46 }, // Ridged
+    { amount: 0.30, behavior: 0, mapping: 0, warp: 0.35, sharpness: 0.55, anisotropy: 0.20, blend: 1.00, frequency: 0.62, speed: 0.42 }, // Voronoi
+    { amount: 0.26, behavior: 1, mapping: 0, warp: 0.55, sharpness: 0.35, anisotropy: 0.95, blend: 0.35, frequency: 0.52, speed: 0.58 }, // Flow
+    { amount: 0.23, behavior: 3, mapping: 0, warp: 0.25, sharpness: 0.75, anisotropy: 1.00, blend: 0.50, frequency: 0.60, speed: 0.52 }, // Gabor-like
+    { amount: 0.32, behavior: 0, mapping: 0, warp: 0.80, sharpness: 0.70, anisotropy: 0.65, blend: 0.75, frequency: 0.55, speed: 0.55 }, // Hybrid
+    { amount: 0.42, behavior: 0, mapping: 1, warp: 0.88, sharpness: 0.62, anisotropy: 0.95, blend: 0.58, frequency: 0.53, speed: 0.60 }, // Jupiter
+  ];
+
+  function formatNoiseBehavior(v) {
+    const n = Math.round(v);
+    if (n <= 0) return '0 None';
+    if (n === 1) return '1 Mirror';
+    return `${n} ${n}-Fold`;
+  }
+
+  function applyNoiseTypeProfile(type, syncUI = false) {
+    const p = NOISE_TYPE_PROFILES[Math.max(0, Math.min(NOISE_TYPE_PROFILES.length - 1, Math.round(type)))];
+    if (!p) return;
+    state.noiseAmount = p.amount;
+    state.noiseBehavior = p.behavior;
+    state.noiseMapping = p.mapping;
+    state.noiseWarp = p.warp;
+    state.noiseSharpness = p.sharpness;
+    state.noiseAnisotropy = p.anisotropy;
+    state.noiseBlend = p.blend;
+    state.noiseFrequency = p.frequency;
+    state.noiseSpeed = p.speed;
+    if (syncUI) {
+      syncSlider('noiseAmount', 'noiseAmount');
+      syncSlider('noiseBehavior', 'noiseBehavior', formatNoiseBehavior);
+      {
+        const noiseMappingSel = document.getElementById('noiseMapping');
+        if (noiseMappingSel) noiseMappingSel.value = String(Math.round(state.noiseMapping || 0));
+      }
+      syncSlider('noiseWarp', 'noiseWarp');
+      syncSlider('noiseSharpness', 'noiseSharpness');
+      syncSlider('noiseAnisotropy', 'noiseAnisotropy');
+      syncSlider('noiseBlend', 'noiseBlend');
+      syncSlider('noiseFrequency', 'noiseFrequency');
+      syncSlider('noiseSpeed', 'noiseSpeed');
+    }
+  }
+
   wireSlider('sheenStrength', 'sheenStrength');
   wireSlider('metallic', 'metallic');
   wireSlider('roughness', 'roughness');
@@ -4386,14 +5811,39 @@ async function main() {
   // wireSlider('causticIntensity', 'causticIntensity'); // glass marble
   wireSlider('clickSize', 'clickSize');
   wireSlider('clickStrength', 'clickStrength');
-  wireSlider('injectorIntensity', 'injectorIntensity');
-  wireSlider('noiseAmount', 'noiseAmount');
+  wireSelect('burstBehavior', 'burstBehavior');
+  wireSlider('burstCount', 'burstCount', v => Math.round(v));
+  wireSlider('burstForce', 'burstForce');
+  wireSlider('burstForceRandomness', 'burstForceRandomness');
+  wireSlider('burstSpeed', 'burstSpeed');
+  wireSlider('burstDuration', 'burstDuration');
+  wireSlider('burstWidth', 'burstWidth');
+  wireSlider('noiseAmount', 'noiseAmount', v => v.toFixed(2));
+  wireSelect('noiseType', 'noiseType', v => applyNoiseTypeProfile(v, true));
+  wireSelect('noiseMapping', 'noiseMapping');
+  wireSelect('faceEffectorMode', 'faceEffectorMode', v => {
+    const mode = Math.max(0, Math.min(7, Math.round(v)));
+    state.faceEffectorMode = mode;
+    applyFaceModeProfile(mode, syncAllUI);
+    if (faceEffectorModeSelect) faceEffectorModeSelect.value = String(mode);
+    if (mode > 0 && !faceTracking.enabled) {
+      startFaceTracking();
+    }
+  });
+  wireSelect('faceDebugMode', 'faceDebugMode', v => {
+    state.faceDebugMode = Math.max(0, Math.min(2, Math.round(v)));
+    if (state.faceDebugMode > 0 && !faceTracking.enabled) {
+      startFaceTracking();
+    }
+  });
+  wireSlider('noiseBehavior', 'noiseBehavior', formatNoiseBehavior);
   wireSlider('noiseFrequency', 'noiseFrequency');
   wireSlider('noiseSpeed', 'noiseSpeed');
-  wireSlider('injectorSize', 'injectorSize');
-  wireSlider('injectorCount', 'injectorCount', v => Math.round(v));
-  wireSlider('injectorSpeed', 'injectorSpeed');
-  wireSlider('burstCount', 'burstCount', v => Math.round(v));
+  wireSlider('noiseWarp', 'noiseWarp');
+  wireSlider('noiseSharpness', 'noiseSharpness');
+  wireSlider('noiseAnisotropy', 'noiseAnisotropy');
+  wireSlider('noiseBlend', 'noiseBlend');
+  applyNoiseTypeProfile(state.noiseType, true);
   wireSlider('curlStrength', 'curlStrength', v => Math.round(v));
   wireSlider('splatForce', 'splatForce', v => Math.round(v));
   wireSlider('velDissipation', 'velDissipation', v => v.toFixed(3));
@@ -4401,43 +5851,15 @@ async function main() {
   wireSlider('pressureIters', 'pressureIters', v => Math.round(v));
   wireSlider('pressureDecay', 'pressureDecay', v => v.toFixed(2));
   wireSlider('simSpeed', 'simSpeed');
-  wireSlider('drawBotCount', 'drawBotCount', v => Math.round(v));
-  wireSlider('drawBotSpeed', 'drawBotSpeed');
-  wireSlider('drawBotSize', 'drawBotSize');
-  wireSlider('drawBotTurnRate', 'drawBotTurnRate');
-  wireSlider('drawBotSpeedVar', 'drawBotSpeedVar');
-  wireSlider('drawBotRecMix', 'drawBotRecMix');
-  wireSlider('drawBotChaos', 'drawBotChaos');
-  wireSlider('drawBotDrift', 'drawBotDrift');
-  wireSlider('blobCount', 'blobCount', v => Math.round(v));
-  wireSlider('blobSpeed', 'blobSpeed');
-  wireSlider('blobSize', 'blobSize');
-  wireSlider('blobWander', 'blobWander');
-  wireSlider('flockCount', 'flockCount', v => Math.round(v));
-  wireSlider('flockSpeed', 'flockSpeed');
-  wireSlider('flockSize', 'flockSize');
-  wireSlider('flockSeparation', 'flockSeparation');
-  wireSlider('flockAlignment', 'flockAlignment');
-  wireSlider('flockCohesion', 'flockCohesion');
-  wireSlider('flockBlobReact', 'flockBlobReact');
+  wireSlider('masterSpeed', 'masterSpeed', v => v.toFixed(2));
   wireSlider('noiseDyeIntensity', 'noiseDyeIntensity');
   wireSlider('dyeNoiseAmount', 'dyeNoiseAmount');
-  // RD
-  wireSlider('rdAmount', 'rdAmount');
-  wireSlider('rdFeedRate', 'rdFeedRate', v => v.toFixed(3));
-  wireSlider('rdKillRate', 'rdKillRate', v => v.toFixed(3));
-  wireSlider('rdDyeAmount', 'rdDyeAmount');
-  wireSlider('rdForceAmount', 'rdForceAmount');
-  wireSlider('rdScale', 'rdScale');
   // Temp
   wireSlider('tempAmount', 'tempAmount');
   wireSlider('tempBuoyancy', 'tempBuoyancy');
   wireSlider('tempDissipation', 'tempDissipation', v => v.toFixed(3));
   wireSlider('tempDyeTint', 'tempDyeTint');
-  // Chemotaxis / Depth / Mood / Palette
-  wireSlider('flockChemotaxis', 'flockChemotaxis');
-  wireSlider('depthAmount', 'depthAmount');
-  wireSlider('depthSpeed', 'depthSpeed');
+  // Mood / Palette
   wireSlider('moodAmount', 'moodAmount');
   wireSlider('moodSpeed', 'moodSpeed');
   // Palette slider with special handling
@@ -4455,6 +5877,19 @@ async function main() {
   wireSlider('bloomIntensity', 'bloomIntensity', v => v.toFixed(2));
   wireSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
   wireSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
+  if (faceTrackingToggleBtn) {
+    faceTrackingToggleBtn.addEventListener('click', () => {
+      if (faceTracking.enabled || faceTracking.initializing) {
+        stopFaceTracking();
+      } else {
+        startFaceTracking();
+      }
+    });
+  }
+  setFaceStatus('Face tracking idle');
+  window.addEventListener('beforeunload', () => {
+    if (faceTracking.enabled) stopFaceTracking();
+  });
 
   // ─── Sync UI from state (for randomize) ─────────────────────────────
   function syncSlider(id, stateKey, fmt) {
@@ -4478,57 +5913,54 @@ async function main() {
     syncSlider('roughness', 'roughness');
     syncSlider('clickSize', 'clickSize');
     syncSlider('clickStrength', 'clickStrength');
-    syncSlider('injectorIntensity', 'injectorIntensity');
-    syncSlider('noiseAmount', 'noiseAmount');
+    {
+      const burstBehaviorSel = document.getElementById('burstBehavior');
+      if (burstBehaviorSel) burstBehaviorSel.value = String(Math.round(state.burstBehavior || 0));
+    }
+    syncSlider('burstCount', 'burstCount', v => Math.round(v));
+    syncSlider('burstForce', 'burstForce');
+    syncSlider('burstForceRandomness', 'burstForceRandomness');
+    syncSlider('burstSpeed', 'burstSpeed');
+    syncSlider('burstDuration', 'burstDuration');
+    syncSlider('burstWidth', 'burstWidth');
+    syncSlider('noiseAmount', 'noiseAmount', v => v.toFixed(2));
+    syncSlider('noiseBehavior', 'noiseBehavior', formatNoiseBehavior);
     syncSlider('noiseFrequency', 'noiseFrequency');
     syncSlider('noiseSpeed', 'noiseSpeed');
-    syncSlider('injectorSize', 'injectorSize');
-    syncSlider('injectorCount', 'injectorCount', v => Math.round(v));
-    syncSlider('injectorSpeed', 'injectorSpeed');
-    syncSlider('burstCount', 'burstCount', v => Math.round(v));
+    syncSlider('noiseWarp', 'noiseWarp');
+    syncSlider('noiseSharpness', 'noiseSharpness');
+    syncSlider('noiseAnisotropy', 'noiseAnisotropy');
+    syncSlider('noiseBlend', 'noiseBlend');
+    {
+      const noiseTypeSel = document.getElementById('noiseType');
+      if (noiseTypeSel) noiseTypeSel.value = String(Math.round(state.noiseType || 0));
+    }
+    {
+      const noiseMappingSel = document.getElementById('noiseMapping');
+      if (noiseMappingSel) noiseMappingSel.value = String(Math.round(state.noiseMapping || 0));
+    }
+    {
+      const faceModeSel = document.getElementById('faceEffectorMode');
+      if (faceModeSel) faceModeSel.value = String(Math.round(state.faceEffectorMode || 0));
+    }
+    {
+      const faceDebugSel = document.getElementById('faceDebugMode');
+      if (faceDebugSel) faceDebugSel.value = String(Math.round(state.faceDebugMode || 0));
+    }
     syncSlider('curlStrength', 'curlStrength', v => Math.round(v));
     syncSlider('splatForce', 'splatForce', v => Math.round(v));
     syncSlider('velDissipation', 'velDissipation', v => v.toFixed(3));
     syncSlider('dyeDissipation', 'dyeDissipation', v => v.toFixed(3));
     syncSlider('pressureIters', 'pressureIters', v => Math.round(v));
     syncSlider('pressureDecay', 'pressureDecay', v => v.toFixed(2));
-    syncSlider('drawBotCount', 'drawBotCount', v => Math.round(v));
-    syncSlider('drawBotSpeed', 'drawBotSpeed');
-    syncSlider('drawBotSize', 'drawBotSize');
-    syncSlider('drawBotTurnRate', 'drawBotTurnRate');
-    syncSlider('drawBotSpeedVar', 'drawBotSpeedVar');
-    syncSlider('drawBotRecMix', 'drawBotRecMix');
-    syncSlider('drawBotChaos', 'drawBotChaos');
-    syncSlider('drawBotDrift', 'drawBotDrift');
-    syncSlider('blobCount', 'blobCount', v => Math.round(v));
-    syncSlider('blobSpeed', 'blobSpeed');
-    syncSlider('blobSize', 'blobSize');
-    syncSlider('blobWander', 'blobWander');
-    syncSlider('flockCount', 'flockCount', v => Math.round(v));
-    syncSlider('flockSpeed', 'flockSpeed');
-    syncSlider('flockSize', 'flockSize');
-    syncSlider('flockSeparation', 'flockSeparation');
-    syncSlider('flockAlignment', 'flockAlignment');
-    syncSlider('flockCohesion', 'flockCohesion');
-    syncSlider('flockBlobReact', 'flockBlobReact');
     syncSlider('noiseDyeIntensity', 'noiseDyeIntensity');
     syncSlider('dyeNoiseAmount', 'dyeNoiseAmount');
-    // RD
-    syncSlider('rdAmount', 'rdAmount');
-    syncSlider('rdFeedRate', 'rdFeedRate', v => v.toFixed(3));
-    syncSlider('rdKillRate', 'rdKillRate', v => v.toFixed(3));
-    syncSlider('rdDyeAmount', 'rdDyeAmount');
-    syncSlider('rdForceAmount', 'rdForceAmount');
-    syncSlider('rdScale', 'rdScale');
     // Temp
     syncSlider('tempAmount', 'tempAmount');
     syncSlider('tempBuoyancy', 'tempBuoyancy');
     syncSlider('tempDissipation', 'tempDissipation', v => v.toFixed(3));
     syncSlider('tempDyeTint', 'tempDyeTint');
-    // Chemotaxis / Depth / Mood
-    syncSlider('flockChemotaxis', 'flockChemotaxis');
-    syncSlider('depthAmount', 'depthAmount');
-    syncSlider('depthSpeed', 'depthSpeed');
+    // Mood
     syncSlider('moodAmount', 'moodAmount');
     syncSlider('moodSpeed', 'moodSpeed');
     // Palette
@@ -4546,6 +5978,7 @@ async function main() {
     syncColor('glitterTip', 'glitterTip');
     syncColor('sheenColor', 'sheenColor');
     syncSlider('simSpeed', 'simSpeed');
+    syncSlider('masterSpeed', 'masterSpeed', v => v.toFixed(2));
     syncSlider('bloomIntensity', 'bloomIntensity', v => v.toFixed(2));
     syncSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
     syncSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
@@ -4581,14 +6014,24 @@ async function main() {
     // Interaction
     state.clickSize = snapTo(randRange(0, 1), 0.01);
     state.clickStrength = snapTo(randRange(0, 1), 0.01);
-    // Injectors
-    state.injectorIntensity = snapTo(randRange(0, 1), 0.01);
-    state.injectorSize = snapTo(randRange(0, 1), 0.01);
-    state.injectorCount = Math.round(randRange(0, 8));
-    state.injectorSpeed = snapTo(randRange(0, 1), 0.01);
+    // Burst emitters
+    state.burstBehavior = Math.round(randRange(0, 4));
     state.burstCount = Math.round(randRange(0, 8));
+    state.burstForce = snapTo(randRange(0, 4), 0.01);
+    state.burstForceRandomness = snapTo(randRange(0, 1), 0.01);
+    state.burstSpeed = snapTo(randRange(0, 1.2), 0.01);
+    state.burstDuration = snapTo(randRange(0, 2), 0.01);
+    state.burstWidth = snapTo(randRange(0, 1), 0.01);
     // Noise
     state.noiseAmount = snapTo(randRange(0, 1), 0.01);
+    state.noiseType = Math.round(randRange(0, 7));
+    applyNoiseTypeProfile(state.noiseType);
+    state.noiseMapping = Math.random() < 0.35 ? 1 : 0;
+    state.noiseBehavior = Math.random() < 0.45 ? 0 : (Math.random() < 0.7 ? 1 : Math.round(randRange(2, 8)));
+    state.noiseWarp = snapTo(randRange(0, 1), 0.01);
+    state.noiseSharpness = snapTo(randRange(0, 1), 0.01);
+    state.noiseAnisotropy = snapTo(randRange(0, 1), 0.01);
+    state.noiseBlend = snapTo(randRange(0, 1), 0.01);
     state.noiseFrequency = snapTo(randRange(0, 1), 0.01);
     state.noiseSpeed = snapTo(randRange(0, 1), 0.01);
     // Fluid sim
@@ -4598,47 +6041,15 @@ async function main() {
     state.dyeDissipation = snapTo(randRange(0.98, 1.0), 0.001);
     state.pressureIters = Math.round(randRange(10, 60));
     state.pressureDecay = snapTo(randRange(0, 1), 0.01);
-    // Draw bots
-    state.drawBotCount = Math.round(Math.random() * 8);
-    state.drawBotSpeed = Math.random();
-    state.drawBotSize = 0.01 + Math.random() * 4.99;
-    state.drawBotTurnRate = Math.random();
-    state.drawBotSpeedVar = Math.random();
-    state.drawBotRecMix = Math.random();
-    state.drawBotChaos = Math.random();
-    state.drawBotDrift = Math.random();
-    // Blobs
-    state.blobCount = Math.round(Math.random() * 4);
-    state.blobSpeed = Math.random();
-    state.blobSize = Math.random();
-    state.blobWander = Math.random();
-    // Flockers
-    state.flockCount = Math.round(Math.pow(Math.random(), 0.5) * 50);
-    state.flockSpeed = Math.random();
-    state.flockSize = Math.random();
-    state.flockSeparation = Math.random();
-    state.flockAlignment = Math.random();
-    state.flockCohesion = Math.random();
-    state.flockBlobReact = Math.random() * 2 - 1;
     // Dye noise
     state.noiseDyeIntensity = Math.random();
     state.dyeNoiseAmount = Math.random() * 0.15;
-    // RD
-    state.rdAmount = Math.random();
-    state.rdFeedRate = 0.01 + Math.random() * 0.07;
-    state.rdKillRate = 0.04 + Math.random() * 0.03;
-    state.rdDyeAmount = Math.random();
-    state.rdForceAmount = Math.random();
-    state.rdScale = Math.random();
     // Temp
     state.tempAmount = Math.random();
     state.tempBuoyancy = Math.random();
     state.tempDissipation = 0.95 + Math.random() * 0.05;
     state.tempDyeTint = Math.random();
-    // Chemotaxis / Depth / Mood
-    state.flockChemotaxis = Math.random();
-    state.depthAmount = Math.random();
-    state.depthSpeed = Math.random();
+    // Mood
     state.moodAmount = Math.random();
     state.moodSpeed = Math.random();
     state.paletteIndex = Math.floor(Math.random() * 51) - 1; // -1 to 49
@@ -4657,54 +6068,33 @@ async function main() {
     roughness: { min: 0, max: 1, step: 0.01 },
     clickSize: { min: 0, max: 1, step: 0.01 },
     clickStrength: { min: 0, max: 1, step: 0.01 },
-    injectorIntensity: { min: 0, max: 1, step: 0.01 },
-    injectorSize: { min: 0.5, max: 1, step: 0.01 },
-    injectorCount: { min: 0, max: 8, step: 1 },
-    injectorSpeed: { min: 0, max: 1, step: 0.01 },
+    burstBehavior: { min: 0, max: 4, step: 1 },
     burstCount: { min: 0, max: 8, step: 1 },
+    burstForce: { min: 0, max: 4, step: 0.01 },
+    burstForceRandomness: { min: 0, max: 1, step: 0.01 },
+    burstSpeed: { min: 0, max: 1.2, step: 0.01 },
+    burstDuration: { min: 0, max: 2, step: 0.01 },
+    burstWidth: { min: 0, max: 1, step: 0.01 },
     noiseAmount: { min: 0, max: 1, step: 0.01 },
+    noiseMapping: { min: 0, max: 1, step: 1 },
     noiseFrequency: { min: 0, max: 1, step: 0.01 },
     noiseSpeed: { min: 0, max: 1, step: 0.01 },
+    noiseWarp: { min: 0, max: 1, step: 0.01 },
+    noiseSharpness: { min: 0, max: 1, step: 0.01 },
+    noiseAnisotropy: { min: 0, max: 1, step: 0.01 },
+    noiseBlend: { min: 0, max: 1, step: 0.01 },
     curlStrength: { min: 0, max: 50, step: 1 },
     splatForce: { min: 1000, max: 20000, step: 100 },
     velDissipation: { min: 0.99, max: 1.0, step: 0.001 },
     dyeDissipation: { min: 0.98, max: 1.0, step: 0.001 },
     pressureIters: { min: 10, max: 60, step: 1 },
     pressureDecay: { min: 0, max: 1, step: 0.01 },
-    drawBotCount: { min: 0, max: 8, step: 1 },
-    drawBotSpeed: { min: 0, max: 1, step: 0.01 },
-    drawBotSize: { min: 0.01, max: 5, step: 0.01 },
-    drawBotTurnRate: { min: 0, max: 1, step: 0.01 },
-    drawBotSpeedVar: { min: 0, max: 1, step: 0.01 },
-    drawBotRecMix: { min: 0, max: 1, step: 0.01 },
-    drawBotChaos: { min: 0, max: 1, step: 0.01 },
-    drawBotDrift: { min: 0, max: 1, step: 0.01 },
-    blobCount: { min: 0, max: 4, step: 1 },
-    blobSpeed: { min: 0, max: 1, step: 0.01 },
-    blobSize: { min: 0, max: 1, step: 0.01 },
-    blobWander: { min: 0, max: 1, step: 0.01 },
-    flockCount: { min: 0, max: 50, step: 1 },
-    flockSpeed: { min: 0, max: 1, step: 0.01 },
-    flockSize: { min: 0, max: 1, step: 0.01 },
-    flockSeparation: { min: 0, max: 1, step: 0.01 },
-    flockAlignment: { min: 0, max: 1, step: 0.01 },
-    flockCohesion: { min: 0, max: 1, step: 0.01 },
-    flockBlobReact: { min: -1, max: 1, step: 0.01 },
     noiseDyeIntensity: { min: 0, max: 1, step: 0.01 },
     dyeNoiseAmount: { min: 0, max: 0.15, step: 0.001 },
-    rdAmount: { min: 0, max: 1, step: 0.01 },
-    rdFeedRate: { min: 0.01, max: 0.08, step: 0.001 },
-    rdKillRate: { min: 0.04, max: 0.07, step: 0.001 },
-    rdDyeAmount: { min: 0, max: 1, step: 0.01 },
-    rdForceAmount: { min: 0, max: 1, step: 0.01 },
-    rdScale: { min: 0, max: 1, step: 0.01 },
     tempAmount: { min: 0, max: 1, step: 0.01 },
     tempBuoyancy: { min: 0, max: 1, step: 0.01 },
     tempDissipation: { min: 0.95, max: 1.0, step: 0.001 },
     tempDyeTint: { min: 0, max: 1, step: 0.01 },
-    flockChemotaxis: { min: 0, max: 1, step: 0.01 },
-    depthAmount: { min: 0, max: 1, step: 0.01 },
-    depthSpeed: { min: 0, max: 1, step: 0.01 },
     moodAmount: { min: 0, max: 1, step: 0.01 },
     moodSpeed: { min: 0, max: 1, step: 0.01 },
     paletteIndex: { min: -1, max: 49, step: 1 },
@@ -4920,61 +6310,10 @@ async function main() {
     if (presetNameEl) presetNameEl.textContent = bo.examples[currentPresetIdx].name;
   });
 
-  // ─── Recording UI ────────────────────────────────────────────────────
-  const useRecBtn = document.getElementById('useRecordingsBtn');
-  const clearRecBtn = document.getElementById('clearRecordingsBtn');
-
-  useRecBtn.addEventListener('click', () => {
-    if (!state.useRecordings && recording.recordings.length === 0) {
-      alert('No recordings yet. Hold C and draw to record gestures.');
-      return;
-    }
-    state.useRecordings = !state.useRecordings;
-    useRecBtn.classList.toggle('active', state.useRecordings);
-    if (state.useRecordings) {
-      // Seed procedural params from recording fingerprint + reset bot modes
-      if (recording.fingerprint) seedStateFromFingerprint(recording.fingerprint);
-      for (const bot of drawBots) {
-        bot._rec = null; bot._recPause = 0;
-        bot._mode = 'autonomous'; bot._modeTimer = Math.random() * 2.0;
-      }
-      syncAllUI();
-    }
-    console.log(`Use Recordings: ${state.useRecordings} (${recording.recordings.length} gestures)`);
-  });
-
-  clearRecBtn.addEventListener('click', async () => {
-    if (recording.recordings.length === 0) { alert('No recordings to clear.'); return; }
-    if (!confirm(`Clear all ${recording.recordings.length} recordings?`)) return;
-    recording.recordings = [];
-    state.useRecordings = false;
-    useRecBtn.classList.remove('active');
-    await fetch('/api/recordings', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ all: true }),
-    });
-    console.log('All recordings cleared');
-  });
-
   // Keyboard handler
   document.addEventListener('keydown', (e) => {
     const tag = document.activeElement?.tagName;
     if (tag === 'INPUT' || tag === 'SELECT') return;
-
-    // Hold C to record
-    if ((e.key === 'c' || e.key === 'C') && !e.repeat) {
-      recording.cHeld = true;
-      // If pointer is already down, start recording immediately
-      if (pointer.down && !recording.active) {
-        recording.active = true;
-        recording.startTime = performance.now();
-        recording.points = [{ t: 0, x: pointer.x, y: pointer.y }];
-        const overlay = document.getElementById('recordingOverlay');
-        if (overlay) overlay.style.display = 'block';
-      }
-      return;
-    }
 
     if (e.key === 'r' || e.key === 'R') {
       toggleRateMode();
@@ -5002,16 +6341,24 @@ async function main() {
     }
   });
 
-  document.addEventListener('keyup', (e) => {
-    if (e.key === 'c' || e.key === 'C') {
-      recording.cHeld = false;
-      if (recording.active) finishRecording();
-    }
-  });
-
   loadStatus.textContent = 'Starting simulation...';
+  // Ensure we have a non-zero drawable size before first frame submission.
+  resize();
+  if (canvas.width < 2 || canvas.height < 2) {
+    loadStatus.textContent = 'Waiting for drawable surface...';
+    for (let i = 0; i < 120 && (canvas.width < 2 || canvas.height < 2); i++) {
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      resize();
+    }
+    if (canvas.width < 2 || canvas.height < 2) {
+      console.warn(`Init: drawable surface still tiny (${canvas.width}x${canvas.height}); continuing with clamped size.`);
+    }
+  }
   console.log(`Fluid simulation starting... (${(performance.now() - t0).toFixed(0)}ms)`);
   document.getElementById('loading').style.display = 'none';
+  if (state.faceEffectorMode > 0 || state.faceDebugMode > 0) {
+    startFaceTracking();
+  }
   requestAnimationFrame(frame);
 
   // Trigger deferred BO retrain now that WebGPU is fully initialized

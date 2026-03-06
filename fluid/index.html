@@ -145,6 +145,7 @@
 </head>
 <body>
   <canvas id="canvas"></canvas>
+  <canvas id="faceDebugCanvas" style="position:fixed; inset:0; pointer-events:none; z-index:35; display:none;"></canvas>
   <div id="error"></div>
   <div id="loading" style="position:fixed; inset:0; display:flex; align-items:center;
     justify-content:center; z-index:50; pointer-events:none;">
@@ -177,13 +178,13 @@
         <button id="loadExample">Load Example</button>
         <button id="deleteExample">Delete Example</button>
       </div>
-      <div class="randomize-row">
-        <button id="useRecordingsBtn">Use Recordings</button>
-        <button id="clearRecordingsBtn">Clear Recordings</button>
+      <div class="setting-group">
+        <label>Sim Dynamics <span class="val" id="simSpeedVal">1.0</span></label>
+        <input type="range" id="simSpeed" min="0" max="3" step="0.01" value="1.0">
       </div>
       <div class="setting-group">
-        <label>Sim Speed <span class="val" id="simSpeedVal">1.0</span></label>
-        <input type="range" id="simSpeed" min="0" max="3" step="0.01" value="1.0">
+        <label>Master Speed <span class="val" id="masterSpeedVal">1.00</span></label>
+        <input type="range" id="masterSpeed" min="0.0" max="1.0" step="0.01" value="1.0">
       </div>
       <div class="setting-group">
         <label>Particles</label>
@@ -280,28 +281,95 @@
         <input type="range" id="clickStrength" min="0.0" max="1.0" step="0.01" value="0.5">
       </div>
       <div class="setting-group">
-        <label>Injector Intensity <span class="val" id="injectorIntensityVal">1.0</span></label>
-        <input type="range" id="injectorIntensity" min="0.0" max="1.0" step="0.01" value="1.0">
+        <label>Burst Behavior</label>
+        <select id="burstBehavior">
+          <option value="0" selected>Edge Cannons</option>
+          <option value="1">Radial Inward (Edge)</option>
+          <option value="2">Radial Outward (Center)</option>
+          <option value="3">Sweep Barrage (Edge)</option>
+          <option value="4">Rotating Ring (Edge)</option>
+        </select>
       </div>
       <div class="setting-group">
-        <label>Injector Size <span class="val" id="injectorSizeVal">0.5</span></label>
-        <input type="range" id="injectorSize" min="0.0" max="1.0" step="0.01" value="0.5">
+        <label>Burst Count <span class="val" id="burstCountVal">0</span></label>
+        <input type="range" id="burstCount" min="0" max="8" step="1" value="0">
       </div>
       <div class="setting-group">
-        <label>Injector Count <span class="val" id="injectorCountVal">4</span></label>
-        <input type="range" id="injectorCount" min="0" max="8" step="1" value="4">
+        <label>Burst Force <span class="val" id="burstForceVal">1.0</span></label>
+        <input type="range" id="burstForce" min="0.0" max="4.0" step="0.01" value="1.0">
       </div>
       <div class="setting-group">
-        <label>Injector Speed <span class="val" id="injectorSpeedVal">0.5</span></label>
-        <input type="range" id="injectorSpeed" min="0.0" max="1.0" step="0.01" value="0.5">
+        <label>Burst Force Random <span class="val" id="burstForceRandomnessVal">0.25</span></label>
+        <input type="range" id="burstForceRandomness" min="0.0" max="1.0" step="0.01" value="0.25">
       </div>
       <div class="setting-group">
-        <label>Burst Count <span class="val" id="burstCountVal">3</span></label>
-        <input type="range" id="burstCount" min="0" max="8" step="1" value="3">
+        <label>Burst Speed <span class="val" id="burstSpeedVal">0.4</span></label>
+        <input type="range" id="burstSpeed" min="0.0" max="1.2" step="0.01" value="0.4">
       </div>
       <div class="setting-group">
-        <label>Noise Amount <span class="val" id="noiseAmountVal">0.0</span></label>
-        <input type="range" id="noiseAmount" min="0.0" max="1.0" step="0.01" value="0.0">
+        <label>Burst Duration <span class="val" id="burstDurationVal">0.25</span></label>
+        <input type="range" id="burstDuration" min="0.0" max="2.0" step="0.01" value="0.25">
+      </div>
+      <div class="setting-group">
+        <label>Burst Width <span class="val" id="burstWidthVal">0.30</span></label>
+        <input type="range" id="burstWidth" min="0.0" max="1.0" step="0.01" value="0.30">
+      </div>
+
+      <div style="margin:12px 0 6px; color:#777; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Face Effector</div>
+      <div class="setting-group">
+        <label>Face Mode</label>
+        <select id="faceEffectorMode">
+          <option value="0" selected>Off</option>
+          <option value="1">Vertex Burst Jets</option>
+          <option value="2">Mesh Noise Mask</option>
+          <option value="3">Mouth Shockwave</option>
+          <option value="4">Jawline Vortex</option>
+          <option value="5">Brow Shear Fans</option>
+          <option value="6">Cheek Pulse Emitters</option>
+          <option value="7">Fluid Texture Mesh</option>
+        </select>
+      </div>
+      <div class="setting-group">
+        <button id="faceTrackingToggle" style="width:100%;">Start Webcam Face Tracking</button>
+      </div>
+      <div class="setting-group">
+        <label>Face Debug</label>
+        <select id="faceDebugMode">
+          <option value="0" selected>Off</option>
+          <option value="1">Mesh Overlay</option>
+          <option value="2">Camera + Mesh</option>
+        </select>
+      </div>
+      <div id="faceTrackingStatus" style="color:#666; font-size:10px; line-height:1.35; margin:0 0 8px 0;">Face tracking idle</div>
+
+      <div style="margin:12px 0 6px; color:#777; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Noise Field</div>
+      <div class="setting-group">
+        <label>Noise Strength <span class="val" id="noiseAmountVal">0.18</span></label>
+        <input type="range" id="noiseAmount" min="0.0" max="1.0" step="0.01" value="0.18">
+      </div>
+      <div class="setting-group">
+        <label>Noise Type</label>
+        <select id="noiseType">
+          <option value="0" selected>Classic Curl</option>
+          <option value="1">Domain-Warped Curl</option>
+          <option value="2">Ridged Fractal</option>
+          <option value="3">Voronoi Cellular</option>
+          <option value="4">Flow Rotated</option>
+          <option value="5">Gabor-Like Streaks</option>
+          <option value="6">Hybrid Fractal</option>
+          <option value="7">Jupiter Bands</option>
+        </select>
+      </div>
+      <div class="setting-group">
+        <label>Noise Mapping</label>
+        <select id="noiseMapping">
+          <option value="0" selected>Normal (Cartesian)</option>
+          <option value="1">Radial Outflow</option>
+        </select>
+      </div>
+      <div class="setting-group">
+        <label>Noise Symmetry <span class="val" id="noiseBehaviorVal">0 None</span></label>
+        <input type="range" id="noiseBehavior" min="0" max="8" step="1" value="0">
       </div>
       <div class="setting-group">
         <label>Noise Frequency <span class="val" id="noiseFrequencyVal">0.5</span></label>
@@ -312,9 +380,34 @@
         <input type="range" id="noiseSpeed" min="0.0" max="1.0" step="0.01" value="0.5">
       </div>
       <div class="setting-group">
+        <label>Domain Warp <span class="val" id="noiseWarpVal">0.35</span></label>
+        <input type="range" id="noiseWarp" min="0.0" max="1.0" step="0.01" value="0.35">
+      </div>
+      <div class="setting-group">
+        <label>Fine Detail <span class="val" id="noiseSharpnessVal">0.5</span></label>
+        <input type="range" id="noiseSharpness" min="0.0" max="1.0" step="0.01" value="0.5">
+      </div>
+      <div class="setting-group">
+        <label>Jet Bands <span class="val" id="noiseAnisotropyVal">0.5</span></label>
+        <input type="range" id="noiseAnisotropy" min="0.0" max="1.0" step="0.01" value="0.5">
+      </div>
+      <div class="setting-group">
+        <label>Cellular Breakup <span class="val" id="noiseBlendVal">0.5</span></label>
+        <input type="range" id="noiseBlend" min="0.0" max="1.0" step="0.01" value="0.5">
+      </div>
+      <div class="setting-group">
         <label>Curl Strength <span class="val" id="curlStrengthVal">15</span></label>
         <input type="range" id="curlStrength" min="0" max="50" step="1" value="15">
       </div>
+      <div class="setting-group">
+        <label>Noise Dye Intensity <span class="val" id="noiseDyeIntensityVal">0.0</span></label>
+        <input type="range" id="noiseDyeIntensity" min="0.0" max="1.0" step="0.01" value="0.0">
+      </div>
+      <div class="setting-group">
+        <label>Dye Noise <span class="val" id="dyeNoiseAmountVal">0.0</span></label>
+        <input type="range" id="dyeNoiseAmount" min="0.0" max="0.15" step="0.001" value="0.0">
+      </div>
+
       <div class="setting-group">
         <label>Splat Force <span class="val" id="splatForceVal">6000</span></label>
         <input type="range" id="splatForce" min="1000" max="20000" step="100" value="6000">
@@ -335,118 +428,6 @@
         <label>Pressure Decay <span class="val" id="pressureDecayVal">0.8</span></label>
         <input type="range" id="pressureDecay" min="0.0" max="1.0" step="0.01" value="0.8">
       </div>
-      <div class="setting-group">
-        <label>Draw Bot Count <span class="val" id="drawBotCountVal">0</span></label>
-        <input type="range" id="drawBotCount" min="0" max="8" step="1" value="0">
-      </div>
-      <div class="setting-group">
-        <label>Draw Bot Speed <span class="val" id="drawBotSpeedVal">0.5</span></label>
-        <input type="range" id="drawBotSpeed" min="0.0" max="1.0" step="0.01" value="0.5">
-      </div>
-      <div class="setting-group">
-        <label>Draw Bot Size <span class="val" id="drawBotSizeVal">3.0</span></label>
-        <input type="range" id="drawBotSize" min="0.01" max="5.0" step="0.01" value="3.0">
-      </div>
-      <div class="setting-group">
-        <label>Draw Bot Turn Rate <span class="val" id="drawBotTurnRateVal">0.5</span></label>
-        <input type="range" id="drawBotTurnRate" min="0.0" max="1.0" step="0.01" value="0.5">
-      </div>
-      <div class="setting-group">
-        <label>Draw Bot Speed Var <span class="val" id="drawBotSpeedVarVal">0.5</span></label>
-        <input type="range" id="drawBotSpeedVar" min="0.0" max="1.0" step="0.01" value="0.5">
-      </div>
-      <div class="setting-group">
-        <label>Draw Bot Rec Mix <span class="val" id="drawBotRecMixVal">0.5</span></label>
-        <input type="range" id="drawBotRecMix" min="0.0" max="1.0" step="0.01" value="0.5">
-      </div>
-      <div class="setting-group">
-        <label>Draw Bot Chaos <span class="val" id="drawBotChaosVal">0.3</span></label>
-        <input type="range" id="drawBotChaos" min="0.0" max="1.0" step="0.01" value="0.3">
-      </div>
-      <div class="setting-group">
-        <label>Draw Bot Drift <span class="val" id="drawBotDriftVal">0.5</span></label>
-        <input type="range" id="drawBotDrift" min="0.0" max="1.0" step="0.01" value="0.5">
-      </div>
-      <!-- Blobs -->
-      <div class="setting-group">
-        <label>Blob Count <span class="val" id="blobCountVal">0</span></label>
-        <input type="range" id="blobCount" min="0" max="4" step="1" value="0">
-      </div>
-      <div class="setting-group">
-        <label>Blob Speed <span class="val" id="blobSpeedVal">0.3</span></label>
-        <input type="range" id="blobSpeed" min="0.0" max="1.0" step="0.01" value="0.3">
-      </div>
-      <div class="setting-group">
-        <label>Blob Size <span class="val" id="blobSizeVal">0.7</span></label>
-        <input type="range" id="blobSize" min="0.0" max="1.0" step="0.01" value="0.7">
-      </div>
-      <div class="setting-group">
-        <label>Blob Wander <span class="val" id="blobWanderVal">0.5</span></label>
-        <input type="range" id="blobWander" min="0.0" max="1.0" step="0.01" value="0.5">
-      </div>
-      <!-- Flockers -->
-      <div class="setting-group">
-        <label>Flock Count <span class="val" id="flockCountVal">0</span></label>
-        <input type="range" id="flockCount" min="0" max="50" step="1" value="0">
-      </div>
-      <div class="setting-group">
-        <label>Flock Speed <span class="val" id="flockSpeedVal">0.5</span></label>
-        <input type="range" id="flockSpeed" min="0.0" max="1.0" step="0.01" value="0.5">
-      </div>
-      <div class="setting-group">
-        <label>Flock Size <span class="val" id="flockSizeVal">0.3</span></label>
-        <input type="range" id="flockSize" min="0.0" max="1.0" step="0.01" value="0.3">
-      </div>
-      <div class="setting-group">
-        <label>Flock Separation <span class="val" id="flockSeparationVal">0.6</span></label>
-        <input type="range" id="flockSeparation" min="0.0" max="1.0" step="0.01" value="0.6">
-      </div>
-      <div class="setting-group">
-        <label>Flock Alignment <span class="val" id="flockAlignmentVal">0.4</span></label>
-        <input type="range" id="flockAlignment" min="0.0" max="1.0" step="0.01" value="0.4">
-      </div>
-      <div class="setting-group">
-        <label>Flock Cohesion <span class="val" id="flockCohesionVal">0.5</span></label>
-        <input type="range" id="flockCohesion" min="0.0" max="1.0" step="0.01" value="0.5">
-      </div>
-      <div class="setting-group">
-        <label>Flock↔Blob React <span class="val" id="flockBlobReactVal">0.3</span></label>
-        <input type="range" id="flockBlobReact" min="-1.0" max="1.0" step="0.01" value="0.3">
-      </div>
-      <!-- Dye Noise -->
-      <div class="setting-group">
-        <label>Noise Dye Intensity <span class="val" id="noiseDyeIntensityVal">0.0</span></label>
-        <input type="range" id="noiseDyeIntensity" min="0.0" max="1.0" step="0.01" value="0.0">
-      </div>
-      <div class="setting-group">
-        <label>Dye Noise <span class="val" id="dyeNoiseAmountVal">0.0</span></label>
-        <input type="range" id="dyeNoiseAmount" min="0.0" max="0.15" step="0.001" value="0.0">
-      </div>
-      <!-- Reaction-Diffusion -->
-      <div class="setting-group">
-        <label>RD Amount <span class="val" id="rdAmountVal">0.00</span></label>
-        <input type="range" id="rdAmount" min="0.0" max="1.0" step="0.01" value="0.0">
-      </div>
-      <div class="setting-group">
-        <label>RD Feed Rate <span class="val" id="rdFeedRateVal">0.04</span></label>
-        <input type="range" id="rdFeedRate" min="0.01" max="0.08" step="0.001" value="0.04">
-      </div>
-      <div class="setting-group">
-        <label>RD Kill Rate <span class="val" id="rdKillRateVal">0.06</span></label>
-        <input type="range" id="rdKillRate" min="0.04" max="0.07" step="0.001" value="0.06">
-      </div>
-      <div class="setting-group">
-        <label>RD Dye Amount <span class="val" id="rdDyeAmountVal">0.00</span></label>
-        <input type="range" id="rdDyeAmount" min="0.0" max="1.0" step="0.01" value="0.0">
-      </div>
-      <div class="setting-group">
-        <label>RD Force <span class="val" id="rdForceAmountVal">0.00</span></label>
-        <input type="range" id="rdForceAmount" min="0.0" max="1.0" step="0.01" value="0.0">
-      </div>
-      <div class="setting-group">
-        <label>RD Scale <span class="val" id="rdScaleVal">0.50</span></label>
-        <input type="range" id="rdScale" min="0.0" max="1.0" step="0.01" value="0.5">
-      </div>
       <!-- Temperature/Buoyancy -->
       <div class="setting-group">
         <label>Temp Amount <span class="val" id="tempAmountVal">0.00</span></label>
@@ -463,20 +444,6 @@
       <div class="setting-group">
         <label>Temp Dye Tint <span class="val" id="tempDyeTintVal">0.00</span></label>
         <input type="range" id="tempDyeTint" min="0.0" max="1.0" step="0.01" value="0.0">
-      </div>
-      <!-- Chemotaxis -->
-      <div class="setting-group">
-        <label>Flock Chemotaxis <span class="val" id="flockChemotaxisVal">0.00</span></label>
-        <input type="range" id="flockChemotaxis" min="0.0" max="1.0" step="0.01" value="0.0">
-      </div>
-      <!-- Depth/Parallax -->
-      <div class="setting-group">
-        <label>Depth Amount <span class="val" id="depthAmountVal">0.00</span></label>
-        <input type="range" id="depthAmount" min="0.0" max="1.0" step="0.01" value="0.0">
-      </div>
-      <div class="setting-group">
-        <label>Depth Speed <span class="val" id="depthSpeedVal">0.30</span></label>
-        <input type="range" id="depthSpeed" min="0.0" max="1.0" step="0.01" value="0.3">
       </div>
       <!-- Mood Lighting -->
       <div class="setting-group">
@@ -529,16 +496,6 @@
       window.addEventListener('unhandledrejection', e => send('error', [`Unhandled rejection: ${e.reason}`]));
     })();
   </script>
-  <div id="recordingOverlay" style="display:none; position:fixed; top:20px; left:50%;
-    transform:translateX(-50%); z-index:102; text-align:center; pointer-events:none;
-    font-family:system-ui,-apple-system,sans-serif;">
-    <span style="display:inline-block; width:12px; height:12px; border-radius:50%;
-      background:#f44; animation:recPulse 1s infinite;"></span>
-    <span id="recordingText" style="color:#f44; font-size:14px; font-weight:600; margin-left:8px;">RECORDING</span>
-    <span id="recordingCount" style="color:#aaa; font-size:12px; margin-left:8px;"></span>
-    <style>@keyframes recPulse { 0%,100%{opacity:1} 50%{opacity:0.3} }</style>
-  </div>
-
   <div id="boOverlay" style="display:none; position:fixed; bottom:20px; left:50%;
     transform:translateX(-50%); z-index:101; text-align:center; pointer-events:none;">
     <div style="display:flex; gap:32px; justify-content:center; align-items:center;">

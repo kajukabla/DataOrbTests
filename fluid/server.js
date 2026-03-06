@@ -6,10 +6,10 @@ const { exec } = require('node:child_process');
 const PORT = 8081;
 const ROOT = __dirname;
 const DATA_DIR = path.join(__dirname, 'data');
+const AUTO_OPEN_BROWSER = process.env.FLUID_AUTO_OPEN_BROWSER === '1';
 const RUNS_DIR = path.join(DATA_DIR, 'runs');
 const RATINGS_FILE = path.join(DATA_DIR, 'ratings.json');
 const EXAMPLES_FILE = path.join(DATA_DIR, 'examples.json');
-const RECORDINGS_FILE = path.join(DATA_DIR, 'recordings.json');
 
 const MIME = {
   '.html': 'text/html',
@@ -49,8 +49,10 @@ function jsonResponse(res, status, data) {
 }
 
 const server = http.createServer(async (req, res) => {
+  const reqPath = (req.url || '/').split('?')[0] || '/';
+
   // CORS preflight for /api/*
-  if (req.method === 'OPTIONS' && req.url.startsWith('/api/')) {
+  if (req.method === 'OPTIONS' && reqPath.startsWith('/api/')) {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
@@ -61,7 +63,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ─── Ratings API ─────────────────────────────────────────────
-  if (req.url === '/api/ratings') {
+  if (reqPath === '/api/ratings') {
     if (req.method === 'GET') {
       try {
         const data = fs.readFileSync(RATINGS_FILE, 'utf-8');
@@ -90,7 +92,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ─── Runs API ────────────────────────────────────────────────
-  if (req.url === '/api/runs' && req.method === 'GET') {
+  if (reqPath === '/api/runs' && req.method === 'GET') {
     try {
       fs.mkdirSync(RUNS_DIR, { recursive: true });
       const files = fs.readdirSync(RUNS_DIR)
@@ -103,7 +105,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.url === '/api/runs/save' && req.method === 'POST') {
+  if (reqPath === '/api/runs/save' && req.method === 'POST') {
     const body = await readBody(req);
     const name = sanitizeRunName(body?.name);
     if (!name) { jsonResponse(res, 400, { error: 'Invalid run name' }); return; }
@@ -118,7 +120,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.url === '/api/runs/load' && req.method === 'POST') {
+  if (reqPath === '/api/runs/load' && req.method === 'POST') {
     const body = await readBody(req);
     const name = sanitizeRunName(body?.name);
     if (!name) { jsonResponse(res, 400, { error: 'Invalid run name' }); return; }
@@ -134,7 +136,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.url === '/api/runs/delete' && req.method === 'DELETE') {
+  if (reqPath === '/api/runs/delete' && req.method === 'DELETE') {
     const body = await readBody(req);
     const name = sanitizeRunName(body?.name);
     if (!name) { jsonResponse(res, 400, { error: 'Invalid run name' }); return; }
@@ -144,7 +146,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ─── Examples API ──────────────────────────────────────────────
-  if (req.url === '/api/examples') {
+  if (reqPath === '/api/examples') {
     if (req.method === 'GET') {
       try {
         const data = fs.readFileSync(EXAMPLES_FILE, 'utf-8');
@@ -182,53 +184,8 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // ─── Recordings API ───────────────────────────────────────────
-  if (req.url === '/api/recordings') {
-    if (req.method === 'GET') {
-      try {
-        const data = fs.readFileSync(RECORDINGS_FILE, 'utf-8');
-        jsonResponse(res, 200, JSON.parse(data));
-      } catch {
-        jsonResponse(res, 200, []);
-      }
-      return;
-    }
-    if (req.method === 'POST') {
-      const body = await readBody(req);
-      if (!body?.points || !Array.isArray(body.points) || body.points.length < 5) {
-        jsonResponse(res, 400, { error: 'Need at least 5 points' });
-        return;
-      }
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-      let recordings = [];
-      try { recordings = JSON.parse(fs.readFileSync(RECORDINGS_FILE, 'utf-8')); } catch {}
-      const name = body.name || `gesture-${Date.now()}`;
-      recordings.push({ name, timestamp: Date.now(), points: body.points });
-      fs.writeFileSync(RECORDINGS_FILE, JSON.stringify(recordings));
-      jsonResponse(res, 200, { ok: true });
-      return;
-    }
-    if (req.method === 'DELETE') {
-      const body = await readBody(req);
-      if (body?.all) {
-        try { fs.unlinkSync(RECORDINGS_FILE); } catch {}
-        jsonResponse(res, 200, { ok: true });
-        return;
-      }
-      const name = body?.name;
-      if (!name) { jsonResponse(res, 400, { error: 'Specify name or {all:true}' }); return; }
-      try {
-        let recordings = JSON.parse(fs.readFileSync(RECORDINGS_FILE, 'utf-8'));
-        recordings = recordings.filter(r => r.name !== name);
-        fs.writeFileSync(RECORDINGS_FILE, JSON.stringify(recordings));
-      } catch {}
-      jsonResponse(res, 200, { ok: true });
-      return;
-    }
-  }
-
   // ─── Log relay ───────────────────────────────────────────────
-  if (req.method === 'POST' && req.url === '/log') {
+  if (req.method === 'POST' && reqPath === '/log') {
     let body = '';
     req.on('data', chunk => { body += chunk; });
     req.on('end', () => {
@@ -247,7 +204,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'OPTIONS' && req.url === '/log') {
+  if (req.method === 'OPTIONS' && reqPath === '/log') {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'POST',
@@ -257,7 +214,13 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const url = req.url === '/' ? '/index.html' : req.url.split('?')[0];
+  if (reqPath === '/favicon.ico') {
+    res.writeHead(204, { 'Cache-Control': 'no-store' });
+    res.end();
+    return;
+  }
+
+  const url = reqPath === '/' ? '/index.html' : reqPath;
   const filePath = path.join(ROOT, url);
   const ext = path.extname(filePath);
 
@@ -280,5 +243,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   const url = `http://localhost:${PORT}`;
   console.log(`Server running at ${url}`);
-  exec(`open ${url}`);
+  if (AUTO_OPEN_BROWSER) {
+    exec(`open ${url}`);
+  }
 });
