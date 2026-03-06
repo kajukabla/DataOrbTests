@@ -141,6 +141,42 @@
       border-color: #c90;
       color: #fc0;
     }
+    #presetBrowser {
+      position: fixed;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 100;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      font-family: system-ui, -apple-system, sans-serif;
+      color: #aaa;
+      font-size: 13px;
+      opacity: 1;
+      transition: opacity 0.4s;
+    }
+    #presetBrowser.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    #presetBrowser button {
+      background: none;
+      border: 1px solid #555;
+      color: #aaa;
+      padding: 2px 8px;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+    #presetBrowser button:hover {
+      background: rgba(255,255,255,0.09);
+      border-color: #777;
+      color: #ddd;
+    }
+    #presetName {
+      min-width: 120px;
+      text-align: center;
+    }
   </style>
 </head>
 <body>
@@ -313,8 +349,8 @@
       <div class="setting-group">
         <label>Face Dye</label>
         <select id="faceEffectorMode">
-          <option value="0" selected>Off</option>
-          <option value="1">Face Dye Mode</option>
+          <option value="0">Off</option>
+          <option value="1" selected>Face Dye Mode</option>
         </select>
       </div>
       <div class="setting-group">
@@ -364,8 +400,8 @@
 
       <div style="margin:12px 0 6px; color:#777; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Noise Field</div>
       <div class="setting-group">
-        <label>Noise Strength <span class="val" id="noiseAmountVal">0.18</span></label>
-        <input type="range" id="noiseAmount" min="0.0" max="1.0" step="0.01" value="0.18">
+        <label>Noise Strength <span class="val" id="noiseAmountVal">0.00</span></label>
+        <input type="range" id="noiseAmount" min="0.0" max="1.0" step="0.01" value="0.00">
       </div>
       <div class="setting-group">
         <label>Noise Type</label>
@@ -528,10 +564,10 @@
     <div id="boPhase" style="color:#666; font-size:10px; font-family:system-ui,-apple-system,sans-serif;"></div>
   </div>
 
-  <div id="presetBrowser" style="position:fixed; top:10px; left:50%; transform:translateX(-50%); z-index:100; display:flex; gap:12px; align-items:center; font-family:system-ui; color:#aaa; font-size:13px;">
-    <button id="presetPrev" style="background:none; border:1px solid #555; color:#aaa; padding:2px 8px; cursor:pointer; border-radius:4px;">&#9664;</button>
-    <span id="presetName" style="min-width:120px; text-align:center;">&mdash;</span>
-    <button id="presetNext" style="background:none; border:1px solid #555; color:#aaa; padding:2px 8px; cursor:pointer; border-radius:4px;">&#9654;</button>
+  <div id="presetBrowser">
+    <button id="presetPrev">&#9664;</button>
+    <span id="presetName">&mdash;</span>
+    <button id="presetNext">&#9654;</button>
   </div>
 
   <script type="module" src="main.js"></script>

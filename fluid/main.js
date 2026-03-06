@@ -8,6 +8,19 @@ const PARTICLE_WG = 256;
 // Slightly inset from 0.37 to prevent post-process/filter edge ridges.
 const SIM_SPHERE_RADIUS = 0.3665;
 const VISIBLE_SPHERE_RADIUS = SIM_SPHERE_RADIUS;
+// Screen projection scale for the sphere (1.0 = current size, lower = larger on-screen).
+// Targets roughly a 1cm edge buffer on a typical desktop viewport without altering simulation math.
+const VIEW_EDGE_BUFFER_PX = 38;
+const VIEWPORT_REF_HEIGHT = (typeof window !== 'undefined' && Number.isFinite(window.innerHeight) && window.innerHeight > 0)
+  ? window.innerHeight
+  : 1080;
+const SIM_VIEW_SCALE = Math.max(
+  0.7,
+  Math.min(
+    1.0,
+    SIM_SPHERE_RADIUS / Math.max(0.05, 0.5 - (VIEW_EDGE_BUFFER_PX / VIEWPORT_REF_HEIGHT))
+  )
+);
 // Decoupled source force scales (formerly influenced by global splatForce).
 const MOUSE_SPLAT_FORCE_BASE = 6000;
 const BURST_SPLAT_FORCE_BASE = 6000;
@@ -31,7 +44,7 @@ const state = {
   roughness: 0.4,
   clickSize: 0.5,
   clickStrength: 0.5,
-  noiseAmount: 0.18,
+  noiseAmount: 0.0,
   noiseFrequency: 0.5,
   noiseSpeed: 0.5,
   noiseType: 0,         // 0..7 (dropdown, includes Jupiter)
@@ -77,7 +90,7 @@ const state = {
   // Palette
   paletteIndex: -1,
   // Face effector
-  faceEffectorMode: 0,
+  faceEffectorMode: 1,
   faceDyeContribution: 1.1,
   faceDyeFill: 1.8,
   faceEdgeBoost: 0.9,
@@ -1717,8 +1730,8 @@ fn main(
 
   let rawClip = vec2f(part.posX, part.posY) * 2.0 - 1.0;
   let clipPos = vec2f(
-    rawClip.x / max(aspect, 1.0),
-    rawClip.y / max(1.0 / aspect, 1.0)
+    rawClip.x / (max(aspect, 1.0) * ${SIM_VIEW_SCALE}),
+    rawClip.y / (max(1.0 / aspect, 1.0) * ${SIM_VIEW_SCALE})
   );
 
   out.pos = vec4f(clipPos + qp * clipSize, 0.0, 1.0);
@@ -1754,8 +1767,8 @@ fn main(in: FSIn) -> @location(0) vec4f {
   let rawUV = vec2f(in.fragPos.x, screenSize.y - in.fragPos.y) / screenSize;
   // Convert to simulation UV (1:1 square)
   let uv = vec2f(
-    (rawUV.x - 0.5) * max(aspect, 1.0) + 0.5,
-    (rawUV.y - 0.5) * max(1.0 / aspect, 1.0) + 0.5
+    (rawUV.x - 0.5) * max(aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5,
+    (rawUV.y - 0.5) * max(1.0 / aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5
   );
   let centered = uv - vec2f(0.5, 0.5);
   let sphereDist = length(centered);
@@ -1910,8 +1923,8 @@ fn frag(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   var color = scene + bloom * intensity;
   let aspect = texSize.x / texSize.y;
   let simUV = vec2f(
-    (uv.x - 0.5) * max(aspect, 1.0) + 0.5,
-    (uv.y - 0.5) * max(1.0 / aspect, 1.0) + 0.5
+    (uv.x - 0.5) * max(aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5,
+    (uv.y - 0.5) * max(1.0 / aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5
   );
   let dist = length(simUV - vec2f(0.5, 0.5));
   if (dist > SCREEN_RADIUS) { color = vec3f(0.0); }
@@ -1968,8 +1981,8 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // Aspect-correct UV so simulation renders as centered 1:1 square
   let aspect = screenSize.x / screenSize.y;
   let uv = vec2f(
-    (rawUV.x - 0.5) * max(aspect, 1.0) + 0.5,
-    (rawUV.y - 0.5) * max(1.0 / aspect, 1.0) + 0.5
+    (rawUV.x - 0.5) * max(aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5,
+    (rawUV.y - 0.5) * max(1.0 / aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5
   );
 
   // Sphere mask in simulation UV space (already 1:1)
@@ -3896,8 +3909,8 @@ async function main() {
   function simUVToScreen(uvx, uvy) {
     const rect = canvas.getBoundingClientRect();
     const aspect = rect.width / Math.max(rect.height, 1e-6);
-    const rawX = (uvx - 0.5) / Math.max(aspect, 1.0) + 0.5;
-    const rawY = (uvy - 0.5) / Math.max(1.0 / Math.max(aspect, 1e-6), 1.0) + 0.5;
+    const rawX = (uvx - 0.5) / (Math.max(aspect, 1.0) * SIM_VIEW_SCALE) + 0.5;
+    const rawY = (uvy - 0.5) / (Math.max(1.0 / Math.max(aspect, 1e-6), 1.0) * SIM_VIEW_SCALE) + 0.5;
     return [
       rect.left + rawX * rect.width,
       rect.top + (1.0 - rawY) * rect.height,
@@ -4808,9 +4821,7 @@ async function main() {
     const eyeLeftOpen = Math.max(0, Math.min(1, (face.eyeLeftOpen ?? 0.5) * (1 - blinkL * 0.9)));
     const eyeRightOpen = Math.max(0, Math.min(1, (face.eyeRightOpen ?? 0.5) * (1 - blinkR * 0.9)));
     const mouth = Math.max(face.mouthOpen, jaw * 0.95);
-    const mouthDelta = mouth - faceTracking.prevMouth;
-    const mouthBurst = mouth > 0.52 && mouthDelta > 0.06 && (modeTime - faceTracking.lastMouthBurstTime) > 0.11;
-    if (mouthBurst) faceTracking.lastMouthBurstTime = modeTime;
+    const mouthDrive = Math.max(0, Math.min(1, mouth * 0.72 + pucker * 0.18 + funnel * 0.15));
     const poseMotion = Math.max(0, Math.min(1.25, faceTracking.matrixMotion * 1.85 + Math.hypot(faceTracking.centerVelX, faceTracking.centerVelY) * 6.5));
     const getPoint = (idx) => facePoint(face, idx);
     const mouthCenter = [face.mouthCenterX, face.mouthCenterY];
@@ -4819,22 +4830,172 @@ async function main() {
     const fillCol = [...palette(modeTime * (0.026 + smile * 0.018), 2)];
     const edgeCol = [...palette(modeTime * 0.072 + browLift * 0.08, 5)];
     const mouthCol = [...palette(modeTime * 0.11 + mouth * 0.22 + cheekPuff * 0.06, 1)];
-    const contourStep = detailScale > 0.72 ? 2 : (detailScale > 0.46 ? 3 : 4);
-    const holeStep = detailScale > 0.68 ? 1 : 2;
     const fillTs = detailScale > 0.72
       ? [0.18, 0.34, 0.5, 0.66, 0.82]
       : (detailScale > 0.46 ? [0.24, 0.44, 0.64, 0.82] : [0.34, 0.58, 0.82]);
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    const smooth01 = (v) => {
+      const t = clamp01(v);
+      return t * t * (3 - 2 * t);
+    };
+    const roll = Number.isFinite(face.roll) ? face.roll : (faceTracking.poseRoll || 0);
+    const cosR = Math.cos(roll);
+    const sinR = Math.sin(roll);
+    const toFaceLocal = (x, y, cx, cy) => {
+      const dx = x - cx;
+      const dy = y - cy;
+      return [dx * cosR + dy * sinR, -dx * sinR + dy * cosR];
+    };
+    const buildFeatureEllipse = (indices, sx = 1.0, sy = 1.0, inflate = 0.0) => {
+      let cx = 0;
+      let cy = 0;
+      let n = 0;
+      for (let i = 0; i < indices.length; i++) {
+        const pt = getPoint(indices[i]);
+        if (!pt) continue;
+        cx += pt[0];
+        cy += pt[1];
+        n++;
+      }
+      if (n < 2) return null;
+      cx /= n;
+      cy /= n;
+      let maxX = 0;
+      let maxY = 0;
+      for (let i = 0; i < indices.length; i++) {
+        const pt = getPoint(indices[i]);
+        if (!pt) continue;
+        const [lx, ly] = toFaceLocal(pt[0], pt[1], cx, cy);
+        maxX = Math.max(maxX, Math.abs(lx));
+        maxY = Math.max(maxY, Math.abs(ly));
+      }
+      return {
+        cx,
+        cy,
+        rx: Math.max(0.0035, maxX * sx + inflate),
+        ry: Math.max(0.0035, maxY * sy + inflate),
+      };
+    };
+    const sampleClosedLoop = (indices, sampleCount) => {
+      const pts = [];
+      for (let i = 0; i < indices.length; i++) {
+        const pt = getPoint(indices[i]);
+        if (pt) pts.push(pt);
+      }
+      if (pts.length < 2) return [];
+      const count = Math.max(3, Math.round(sampleCount));
+      const segLens = new Float32Array(pts.length);
+      let totalLen = 0;
+      for (let i = 0; i < pts.length; i++) {
+        const a = pts[i];
+        const b = pts[(i + 1) % pts.length];
+        const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+        segLens[i] = len;
+        totalLen += len;
+      }
+      if (totalLen < 1e-6) {
+        return pts.map((p) => [p[0], p[1]]);
+      }
+      const out = new Array(count);
+      let seg = 0;
+      let segStart = 0;
+      let segLen = segLens[0];
+      for (let i = 0; i < count; i++) {
+        const target = (i / count) * totalLen;
+        while (seg < pts.length - 1 && target > segStart + segLen) {
+          segStart += segLen;
+          seg++;
+          segLen = segLens[seg];
+        }
+        const a = pts[seg];
+        const b = pts[(seg + 1) % pts.length];
+        const t = Math.max(0, Math.min(1, (target - segStart) / Math.max(segLen, 1e-6)));
+        out[i] = [
+          a[0] + (b[0] - a[0]) * t,
+          a[1] + (b[1] - a[1]) * t,
+        ];
+      }
+      return out;
+    };
+    const ellipseQ = (feature, x, y) => {
+      if (!feature) return 99;
+      const [lx, ly] = toFaceLocal(x, y, feature.cx, feature.cy);
+      return Math.hypot(lx / Math.max(feature.rx, 1e-5), ly / Math.max(feature.ry, 1e-5));
+    };
+    const eyeInflate = (0.0028 + (1.0 - detailScale) * 0.0022) * stampSize;
+    const mouthInflate = (0.0035 + (1.0 - detailScale) * 0.0032) * stampSize;
+    const leftEyeFeature = buildFeatureEllipse(
+      FACE_IDX.leftEye,
+      1.4 + eyeLeftOpen * 0.25,
+      1.25 + eyeLeftOpen * 0.55,
+      eyeInflate
+    );
+    const rightEyeFeature = buildFeatureEllipse(
+      FACE_IDX.rightEye,
+      1.4 + eyeRightOpen * 0.25,
+      1.25 + eyeRightOpen * 0.55,
+      eyeInflate
+    );
+    const mouthFeature = buildFeatureEllipse(
+      FACE_IDX.mouthHole,
+      1.35 + smile * 0.12,
+      1.2 + mouthDrive * 0.85,
+      mouthInflate
+    );
+    const contourSamples = sampleClosedLoop(FACE_IDX.contour, detailScale > 0.72 ? 48 : (detailScale > 0.46 ? 36 : 26));
+    const leftEyeSamples = sampleClosedLoop(FACE_IDX.leftEye, detailScale > 0.68 ? 20 : 14);
+    const rightEyeSamples = sampleClosedLoop(FACE_IDX.rightEye, detailScale > 0.68 ? 20 : 14);
+    const mouthHoleSamples = sampleClosedLoop(FACE_IDX.mouthHole, detailScale > 0.68 ? 26 : 18);
+    const lipSamples = sampleClosedLoop(FACE_IDX.lips, detailScale > 0.72 ? 34 : 24);
+    const holeFeather = 0.1 + (1.0 - detailScale) * 0.14;
+    const eyeOpenGateL = Math.pow(smooth01((eyeLeftOpen - 0.12) / 0.42), 1.35);
+    const eyeOpenGateR = Math.pow(smooth01((eyeRightOpen - 0.12) / 0.42), 1.35);
+    const eyeHoleL = holeCarve * eyeOpenGateL;
+    const eyeHoleR = holeCarve * eyeOpenGateR;
+    const mouthHole = holeCarve * (0.3 + mouthDrive * 1.32);
+    const holeMaskAt = (x, y) => {
+      if (holeCarve <= 0.001) return 1.0;
+      const cutFrom = (feature, weight) => {
+        if (!feature || weight <= 0.001) return 0;
+        const q = ellipseQ(feature, x, y);
+        const inner = 1.0 - holeFeather;
+        const t = smooth01((q - inner) / Math.max(holeFeather, 1e-5));
+        return (1.0 - t) * weight;
+      };
+      const cut = Math.max(
+        cutFrom(leftEyeFeature, eyeHoleL),
+        cutFrom(rightEyeFeature, eyeHoleR),
+        cutFrom(mouthFeature, mouthHole)
+      );
+      return clamp01(1.0 - Math.min(1.0, cut * 1.16));
+    };
+    const carveReserve = 34;
+    const activeBudget = Math.max(0, MAX_SPLATS - carveReserve);
+    const anchorBudget = Math.max(1, Math.min(2, activeBudget));
+    const fillBudget = Math.max(16, Math.floor(activeBudget * 0.58));
+    const edgeBudget = Math.max(8, Math.floor(activeBudget * 0.16));
+    const rimBudget = Math.max(8, activeBudget - anchorBudget - fillBudget - edgeBudget);
+    const anchorStageCap = Math.min(MAX_SPLATS, splatCount + anchorBudget);
+    const fillStageCap = Math.min(MAX_SPLATS, anchorStageCap + fillBudget);
+    const edgeStageCap = Math.min(MAX_SPLATS, fillStageCap + edgeBudget);
+    const rimStageCap = Math.min(MAX_SPLATS, edgeStageCap + rimBudget);
+    const pickLoopIndex = (sampleLen, i, count) => {
+      if (sampleLen <= 0 || count <= 0) return -1;
+      return Math.floor((i * sampleLen) / count) % sampleLen;
+    };
 
     // Stable anchor so face-dye remains visible even if expression-driven regions fluctuate.
     const anchorGain = 0.05 + contribution * 0.03;
-    addFaceSplat(
-      face.centerX, face.centerY,
-      flowX * 0.5, flowY * 0.5,
-      fillCol[0] * anchorGain, fillCol[1] * anchorGain, fillCol[2] * anchorGain,
-      state.splatRadius * (3.6 + stampSize * 1.2)
-    );
+    if (splatCount < anchorStageCap) {
+      addFaceSplat(
+        face.centerX, face.centerY,
+        flowX * 0.5, flowY * 0.5,
+        fillCol[0] * anchorGain, fillCol[1] * anchorGain, fillCol[2] * anchorGain,
+        state.splatRadius * (3.6 + stampSize * 1.2)
+      );
+    }
     const nosePt = getPoint(1);
-    if (nosePt) {
+    if (nosePt && splatCount < anchorStageCap) {
       addFaceSplat(
         nosePt[0], nosePt[1],
         flowX * 0.45, flowY * 0.45,
@@ -4844,32 +5005,42 @@ async function main() {
     }
 
     // 1) Dye-fill the whole facial surface.
-    for (let i = 0; i < FACE_IDX.contour.length; i += contourStep) {
-      const idx = FACE_IDX.contour[i];
-      const pt = getPoint(idx);
-      if (!pt) continue;
+    const fillContourCount = Math.max(6, Math.min(
+      contourSamples.length,
+      Math.floor(Math.max(0, fillStageCap - splatCount) / Math.max(1, fillTs.length))
+    ));
+    for (let i = 0; i < fillContourCount; i++) {
+      if (splatCount >= fillStageCap) break;
+      const idx = pickLoopIndex(contourSamples.length, i, fillContourCount);
+      if (idx < 0) continue;
+      const pt = contourSamples[idx];
       const [rx, ry] = direction(face.centerX, face.centerY, pt[0], pt[1]);
       for (const t of fillTs) {
+        if (splatCount >= fillStageCap) break;
         const x = face.centerX + (pt[0] - face.centerX) * t;
         const y = face.centerY + (pt[1] - face.centerY) * t;
+        const holeMask = holeMaskAt(x, y);
+        if (holeMask <= 0.012) continue;
         const radialFalloff = 1.0 - t * 0.72;
-        const g = 0.05 + radialFalloff * 0.08 + mouth * 0.03 + poseMotion * 0.02;
-        const drift = 0.2 + (1.0 - t) * 0.3;
+        const g = (0.05 + radialFalloff * 0.08 + mouth * 0.03 + poseMotion * 0.02) * holeMask;
+        const drift = (0.2 + (1.0 - t) * 0.3) * (0.7 + holeMask * 0.3);
         addFaceSplat(
           x, y,
           flowX * drift + rx * FACE_SPLAT_FORCE_BASE * 0.0014 * (1.0 - t),
           flowY * drift + ry * FACE_SPLAT_FORCE_BASE * 0.0014 * (1.0 - t),
           fillCol[0] * g, fillCol[1] * g, fillCol[2] * g,
-          state.splatRadius * (2.3 + radialFalloff * 2.1 + smile * 0.3)
+          state.splatRadius * (2.3 + radialFalloff * 2.1 + smile * 0.3) * (0.86 + holeMask * 0.24)
         );
       }
     }
 
     // 2) Add a controlled contour accent so the head boundary reads clearly.
-    for (let i = 0; i < FACE_IDX.contour.length; i += contourStep) {
-      const idx = FACE_IDX.contour[i];
-      const pt = getPoint(idx);
-      if (!pt) continue;
+    const edgePointCount = Math.max(6, Math.min(contourSamples.length, Math.max(0, edgeStageCap - splatCount)));
+    for (let i = 0; i < edgePointCount; i++) {
+      if (splatCount >= edgeStageCap) break;
+      const idx = pickLoopIndex(contourSamples.length, i, edgePointCount);
+      if (idx < 0) continue;
+      const pt = contourSamples[idx];
       const [nx, ny] = direction(face.centerX, face.centerY, pt[0], pt[1]);
       const edgeTint = edgeGain * (0.04 + smile * 0.03 + poseMotion * 0.02);
       const edgeNudge = FACE_SPLAT_FORCE_BASE * 0.0035 * edgeGain;
@@ -4882,54 +5053,140 @@ async function main() {
       );
     }
 
-    // 3) Carve eye + mouth holes by blending these regions toward near-black dye.
-    const carveToDark = (indices, openness, sizeMul = 1.0) => {
-      if (additiveDye) return;
-      if (holeCarve <= 0.001) return;
-      const closed = 1.0 - Math.max(0, Math.min(1, openness));
-      const dark = 0.00005 + (0.0004 + closed * 0.0015) * holeCarve;
-      for (let i = 0; i < indices.length; i += holeStep) {
-        const idx = indices[i];
-        const pt = getPoint(idx);
-        if (!pt) continue;
+    // 3) Draw smoother feature rims (eyes/lips) to avoid hole-punch artifacts.
+    const loopRim = (samples, center, color, gain, radiusMul, flowMix = 0.58, forceMul = 1.0, maxPoints = samples.length) => {
+      if (gain <= 0.0005 || !samples || samples.length < 3) return;
+      const n = samples.length;
+      const pointCount = Math.max(3, Math.min(n, Math.round(maxPoints)));
+      for (let i = 0; i < pointCount; i++) {
+        if (splatCount >= rimStageCap) break;
+        const idx = pickLoopIndex(n, i, pointCount);
+        if (idx < 0) continue;
+        const pt = samples[idx];
+        const prev = samples[(idx - 1 + n) % n];
+        const next = samples[(idx + 1) % n];
+        const tx = next[0] - prev[0];
+        const ty = next[1] - prev[1];
+        const tl = Math.hypot(tx, ty) || 1;
+        const tangentX = tx / tl;
+        const tangentY = ty / tl;
+        const [nx, ny] = direction(center[0], center[1], pt[0], pt[1]);
+        const swirl = Math.sin(modeTime * 1.9 + i * 0.73) * 0.5 + 0.5;
+        const tint = gain * (0.84 + swirl * 0.32);
+        const tangentForce = FACE_SPLAT_FORCE_BASE * (0.0007 + 0.00035 * forceMul);
+        const normalForce = FACE_SPLAT_FORCE_BASE * (0.00045 + 0.00025 * forceMul);
         addFaceSplat(
           pt[0], pt[1],
-          flowX * 0.05, flowY * 0.05,
-          dark, dark, dark,
-          state.splatRadius * (0.6 + sizeMul * (0.35 + closed * 0.25))
+          flowX * flowMix + tangentX * tangentForce + nx * normalForce * 0.45,
+          flowY * flowMix + tangentY * tangentForce + ny * normalForce * 0.45,
+          color[0] * tint, color[1] * tint, color[2] * tint,
+          state.splatRadius * radiusMul
         );
       }
     };
-    carveToDark(FACE_IDX.leftEye, eyeLeftOpen, 1.0);
-    carveToDark(FACE_IDX.rightEye, eyeRightOpen, 1.0);
-    carveToDark(FACE_IDX.mouthHole, 1.0 - Math.max(0, Math.min(1, mouth * (0.9 + pucker * 0.2 + funnel * 0.1))), 1.35);
 
-    // 4) Mouth-open should brighten/fill the mouth region, not shoot jets.
-    const mouthDrive = Math.max(0, Math.min(1, mouth * 0.72 + pucker * 0.18 + funnel * 0.15));
-    if (mouthDrive > 0.06) {
-      const mouthStep = detailScale > 0.68 ? 1 : 2;
-      for (let i = 0; i < FACE_IDX.mouthHole.length; i += mouthStep) {
-        const idx = FACE_IDX.mouthHole[i];
-        const pt = getPoint(idx);
-        if (!pt) continue;
-        const g = 0.04 + mouthDrive * 0.1 * mouthBoost;
-        addFaceSplat(
-          pt[0], pt[1],
-          flowX * 0.62, flowY * 0.62,
-          mouthCol[0] * g, mouthCol[1] * g, mouthCol[2] * g,
-          state.splatRadius * (2.5 + mouthDrive * 2.8 * mouthBoost)
+    const leftEyeCenter = leftEyeFeature ? [leftEyeFeature.cx, leftEyeFeature.cy] : [face.centerX, face.centerY];
+    const rightEyeCenter = rightEyeFeature ? [rightEyeFeature.cx, rightEyeFeature.cy] : [face.centerX, face.centerY];
+    const mouthCenterForRim = mouthFeature ? [mouthFeature.cx, mouthFeature.cy] : mouthCenter;
+    const eyeRimGain = edgeGain * (0.028 + poseMotion * 0.018) * (0.65 + holeCarve * 0.7);
+    const leftEyeRimPts = Math.max(3, Math.floor(rimBudget * 0.22));
+    const rightEyeRimPts = Math.max(3, Math.floor(rimBudget * 0.22));
+    const mouthRimPts = Math.max(4, Math.floor(rimBudget * 0.32));
+    const lipRimPts = Math.max(4, rimBudget - leftEyeRimPts - rightEyeRimPts - mouthRimPts);
+    loopRim(
+      leftEyeSamples,
+      leftEyeCenter,
+      edgeCol,
+      eyeRimGain * eyeOpenGateL,
+      2.05 + stampSize * 0.52 + eyeLeftOpen * 1.05,
+      0.54,
+      0.95,
+      leftEyeRimPts
+    );
+    loopRim(
+      rightEyeSamples,
+      rightEyeCenter,
+      edgeCol,
+      eyeRimGain * eyeOpenGateR,
+      2.05 + stampSize * 0.52 + eyeRightOpen * 1.05,
+      0.54,
+      0.95,
+      rightEyeRimPts
+    );
+
+    // 4) Keep mouth as a soft lip rim injector instead of center bursts.
+    const mouthRimGain = (0.035 + mouthDrive * 0.11 * mouthBoost + smile * 0.025) * (0.68 + holeCarve * 0.75);
+    loopRim(
+      mouthHoleSamples,
+      mouthCenterForRim,
+      mouthCol,
+      mouthRimGain,
+      2.85 + stampSize * 0.7 + mouthDrive * 1.85 * mouthBoost,
+      0.6,
+      1.1,
+      mouthRimPts
+    );
+    loopRim(
+      lipSamples,
+      mouthCenterForRim,
+      mouthCol,
+      mouthRimGain * 0.62,
+      2.55 + stampSize * 0.65 + mouthDrive * 1.35,
+      0.55,
+      0.85,
+      lipRimPts
+    );
+
+    // 5) Explicit subtractive hole carving so eyes/mouth remain visible voids.
+    const fromFaceLocal = (lx, ly, cx, cy) => [cx + lx * cosR - ly * sinR, cy + lx * sinR + ly * cosR];
+    const carveSplat = (x, y, amount, radiusMul) => {
+      if (amount <= 0.0005 || splatCount >= MAX_SPLATS) return;
+      const a = clamp01(amount);
+      const dark = 0.00008 + (1.0 - a) * 0.00006;
+      addSplat(
+        x, y,
+        0, 0,
+        dark, dark, dark,
+        Math.max(1e-5, state.splatRadius * radiusMul * (0.78 + a * 1.18))
+      );
+    };
+    const carveFeatureVoid = (feature, amount, radiusMul, openY = 1.0) => {
+      if (!feature || amount <= 0.001 || splatCount >= MAX_SPLATS) return;
+      const stamps = detailScale > 0.66
+        ? [
+            [0.0, 0.0, 1.0],
+            [0.52, 0.0, 0.88], [-0.52, 0.0, 0.88],
+            [0.0, 0.44, 0.84], [0.0, -0.44, 0.84],
+            [0.36, 0.3, 0.78], [-0.36, 0.3, 0.78],
+            [0.36, -0.3, 0.78], [-0.36, -0.3, 0.78],
+            [0.68, 0.0, 0.62], [-0.68, 0.0, 0.62],
+          ]
+        : [
+            [0.0, 0.0, 1.0],
+            [0.48, 0.0, 0.82], [-0.48, 0.0, 0.82],
+            [0.0, 0.36, 0.78], [0.0, -0.36, 0.78],
+          ];
+      for (let i = 0; i < stamps.length; i++) {
+        if (splatCount >= MAX_SPLATS) break;
+        const s = stamps[i];
+        const lx = s[0] * feature.rx;
+        const ly = s[1] * feature.ry * openY;
+        const [x, y] = fromFaceLocal(lx, ly, feature.cx, feature.cy);
+        carveSplat(
+          x,
+          y,
+          amount * (0.75 + s[2] * 0.5),
+          radiusMul * (0.92 + s[2] * 0.45)
         );
       }
-      if (mouthBurst) {
-        const burstGain = 0.05 + mouthDrive * 0.14 * mouthBoost;
-        addFaceSplat(
-          mouthCenter[0], mouthCenter[1],
-          flowX * 0.75, flowY * 0.75,
-          mouthCol[0] * burstGain, mouthCol[1] * burstGain, mouthCol[2] * burstGain,
-          state.splatRadius * (4.0 + mouthDrive * 3.5 * mouthBoost)
-        );
-      }
-    }
+    };
+
+    const eyeVoidL = holeCarve * eyeOpenGateL;
+    const eyeVoidR = holeCarve * eyeOpenGateR;
+    const mouthVoid = 0.26 + holeCarve * (0.8 + mouthDrive * 0.35);
+    carveFeatureVoid(leftEyeFeature, eyeVoidL, 2.45 + stampSize * 0.85, 0.12 + eyeOpenGateL * 1.08);
+    carveFeatureVoid(rightEyeFeature, eyeVoidR, 2.45 + stampSize * 0.85, 0.12 + eyeOpenGateR * 1.08);
+    carveFeatureVoid(mouthFeature, mouthVoid, 3.1 + stampSize * 1.05, 0.85 + mouthDrive * 0.55);
 
     for (let i = 0; i < face.count; i++) {
       const off = i * 2;
@@ -5238,8 +5495,8 @@ async function main() {
     const rawX = (clientX - rect.left) / rect.width;
     const rawY = 1.0 - (clientY - rect.top) / rect.height;
     const aspect = rect.width / rect.height;
-    const simX = (rawX - 0.5) * Math.max(aspect, 1.0) + 0.5;
-    const simY = (rawY - 0.5) * Math.max(1.0 / aspect, 1.0) + 0.5;
+    const simX = (rawX - 0.5) * Math.max(aspect, 1.0) * SIM_VIEW_SCALE + 0.5;
+    const simY = (rawY - 0.5) * Math.max(1.0 / aspect, 1.0) * SIM_VIEW_SCALE + 0.5;
     return [simX, simY];
   }
 
@@ -6267,6 +6524,9 @@ async function main() {
   wireSlider('noiseAnisotropy', 'noiseAnisotropy', v => formatNoiseControlValue('noiseAnisotropy', v));
   wireSlider('noiseBlend', 'noiseBlend', v => formatNoiseControlValue('noiseBlend', v));
   applyNoiseTypeProfile(state.noiseType, true);
+  // Startup preference: keep selected noise type/profile controls, but begin with Noise Strength off.
+  state.noiseAmount = 0;
+  syncSlider('noiseAmount', 'noiseAmount', v => v.toFixed(2));
   if (typeof bo.setStatePostNormalize === 'function') {
     bo.setStatePostNormalize((targetState) => {
       applyNoiseTypeAssociations(targetState, {
@@ -6755,19 +7015,37 @@ async function main() {
 
   // ─── Preset Browser ─────────────────────────────────────────────────
   let currentPresetIdx = -1;
+  const presetBrowserEl = document.getElementById('presetBrowser');
+  const presetPrevBtn = document.getElementById('presetPrev');
+  const presetNextBtn = document.getElementById('presetNext');
   const presetNameEl = document.getElementById('presetName');
-  document.getElementById('presetPrev')?.addEventListener('click', () => {
-    if (bo.examples.length === 0) return;
-    currentPresetIdx = (currentPresetIdx - 1 + bo.examples.length) % bo.examples.length;
+  let presetHideTimer = null;
+  function showPresetBrowser() {
+    if (!presetBrowserEl) return;
+    presetBrowserEl.classList.remove('hidden');
+    clearTimeout(presetHideTimer);
+    presetHideTimer = setTimeout(() => presetBrowserEl.classList.add('hidden'), 3000);
+  }
+  function stepPreset(delta) {
+    const count = bo.examples.length;
+    if (count === 0) return false;
+    if (currentPresetIdx < 0 || currentPresetIdx >= count) {
+      currentPresetIdx = delta >= 0 ? 0 : count - 1;
+    } else {
+      currentPresetIdx = (currentPresetIdx + delta + count) % count;
+    }
     bo.loadExample(bo.examples[currentPresetIdx], state, syncAllUI);
     if (presetNameEl) presetNameEl.textContent = bo.examples[currentPresetIdx].name;
-  });
-  document.getElementById('presetNext')?.addEventListener('click', () => {
-    if (bo.examples.length === 0) return;
-    currentPresetIdx = (currentPresetIdx + 1) % bo.examples.length;
-    bo.loadExample(bo.examples[currentPresetIdx], state, syncAllUI);
-    if (presetNameEl) presetNameEl.textContent = bo.examples[currentPresetIdx].name;
-  });
+    showPresetBrowser();
+    return true;
+  }
+  presetPrevBtn?.addEventListener('click', () => { stepPreset(-1); });
+  presetNextBtn?.addEventListener('click', () => { stepPreset(1); });
+  document.addEventListener('mousemove', showPresetBrowser);
+  presetBrowserEl?.addEventListener('pointerdown', showPresetBrowser);
+  if (presetBrowserEl) {
+    showPresetBrowser();
+  }
 
   // Keyboard handler
   document.addEventListener('keydown', (e) => {
@@ -6797,6 +7075,12 @@ async function main() {
       } else if (e.key === 'm' || e.key === 'M') {
         bo.toggleLockMotion();
       }
+    } else if (e.key === 'ArrowRight') {
+      e.preventDefault();
+      stepPreset(1);
+    } else if (e.key === 'ArrowLeft') {
+      e.preventDefault();
+      stepPreset(-1);
     }
   });
 
