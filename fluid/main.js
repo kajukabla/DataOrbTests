@@ -8,6 +8,10 @@ const PARTICLE_WG = 256;
 // Slightly inset from 0.37 to prevent post-process/filter edge ridges.
 const SIM_SPHERE_RADIUS = 0.3665;
 const VISIBLE_SPHERE_RADIUS = SIM_SPHERE_RADIUS;
+// Decoupled source force scales (formerly influenced by global splatForce).
+const MOUSE_SPLAT_FORCE_BASE = 6000;
+const BURST_SPLAT_FORCE_BASE = 6000;
+const FACE_SPLAT_FORCE_BASE = 6000;
 
 const state = {
   particleCount: 4194304,   // 4M default
@@ -41,12 +45,12 @@ const state = {
   burstBehavior: 0,
   burstForce: 0.8,
   burstForceRandomness: 0.25,
-  burstSpeed: 0.6,
+  burstSpeed: 0.4,
   burstTravelSpeed: 1.2,
   burstDuration: 0.8,
   burstWidth: 0.35,
+  burstRadialAngle: 45,
   sheenColor: [1.0, 0.9, 0.7],
-  splatForce: 6000,
   curlStrength: 15,
   pressureIters: 30,
   pressureDecay: 0.8,
@@ -75,6 +79,13 @@ const state = {
   // Face effector
   faceEffectorMode: 0,
   faceDyeContribution: 1.1,
+  faceDyeFill: 1.4,
+  faceEdgeBoost: 0.9,
+  faceFlowCarry: 0.12,
+  faceHoleCarve: 0.78,
+  faceMouthBoost: 1.0,
+  faceMaskDetail: 0.68,
+  faceStampSize: 1.35,
   faceDebugMode: 0,
 };
 
@@ -3761,7 +3772,7 @@ async function main() {
     smoothedEyeRight: 1,
     prevMouth: 0,
     lastFaceSeenAt: -1,
-    noFaceGraceMs: 1200,
+    noFaceGraceMs: 3500,
     lastMouthBurstTime: -999,
     droppedFrames: 0,
     errorStreak: 0,
@@ -4748,10 +4759,17 @@ async function main() {
     if (!face) return;
     const contribution = Math.max(0, Math.min(2, state.faceDyeContribution ?? 1));
     if (contribution <= 0.001) return;
-    const forceScale = contribution;
-    const dyeScale = contribution;
-    const radiusScale = 0.75 + contribution * 0.45;
-    const detailScale = Math.max(0.25, Math.min(1.0, contribution));
+    const fillGain = Math.max(0, state.faceDyeFill ?? 1.4);
+    const edgeGain = Math.max(0, state.faceEdgeBoost ?? 0.9);
+    const flowCarry = Math.max(0, Math.min(1.5, state.faceFlowCarry ?? 0.12));
+    const holeCarve = Math.max(0, Math.min(1.0, state.faceHoleCarve ?? 0.78));
+    const mouthBoost = Math.max(0, state.faceMouthBoost ?? 1.0);
+    const maskDetail = Math.max(0.2, Math.min(1.0, state.faceMaskDetail ?? 0.68));
+    const stampSize = Math.max(0.5, Math.min(3.0, state.faceStampSize ?? 1.35));
+    const forceScale = contribution * flowCarry;
+    const dyeScale = contribution * fillGain;
+    const radiusScale = stampSize * (0.72 + contribution * 0.4);
+    const detailScale = Math.max(0.2, Math.min(1.0, maskDetail * (0.5 + contribution * 0.5)));
 
     const addFaceSplat = (x, y, dx, dy, r, g, b, radius) => {
       addSplat(
@@ -4786,120 +4804,119 @@ async function main() {
     const poseMotion = Math.max(0, Math.min(1.25, faceTracking.matrixMotion * 1.85 + Math.hypot(faceTracking.centerVelX, faceTracking.centerVelY) * 6.5));
     const getPoint = (idx) => facePoint(face, idx);
     const mouthCenter = [face.mouthCenterX, face.mouthCenterY];
-    const flowX = faceTracking.centerVelX * state.splatForce * 0.012;
-    const flowY = faceTracking.centerVelY * state.splatForce * 0.012;
-    const fillCol = palette(modeTime * (0.03 + smile * 0.015), 2);
-    const rimCol = palette(modeTime * 0.09 + browLift * 0.07, 5);
-    const rimStep = detailScale < 0.45 ? 4 : (detailScale < 0.75 ? 3 : 2);
-    const fillStep = detailScale < 0.45 ? 7 : (detailScale < 0.75 ? 5 : 4);
-    const holeStep = detailScale < 0.45 ? 2 : 1;
-    const mouthStep = detailScale < 0.45 ? 3 : 2;
-    const wakeStep = detailScale < 0.45 ? 7 : 5;
+    const flowX = faceTracking.centerVelX * FACE_SPLAT_FORCE_BASE * 0.0038;
+    const flowY = faceTracking.centerVelY * FACE_SPLAT_FORCE_BASE * 0.0038;
+    const fillCol = palette(modeTime * (0.026 + smile * 0.018), 2);
+    const edgeCol = palette(modeTime * 0.072 + browLift * 0.08, 5);
+    const mouthCol = palette(modeTime * 0.11 + mouth * 0.22 + cheekPuff * 0.06, 1);
+    const contourStep = detailScale > 0.72 ? 2 : (detailScale > 0.46 ? 3 : 4);
+    const holeStep = detailScale > 0.68 ? 1 : 2;
+    const fillTs = detailScale > 0.72
+      ? [0.18, 0.34, 0.5, 0.66, 0.82]
+      : (detailScale > 0.46 ? [0.24, 0.44, 0.64, 0.82] : [0.34, 0.58, 0.82]);
 
-    const carveLoop = (indices, openness, sizeMul = 1.0) => {
-      const closed = 1.0 - Math.max(0, Math.min(1, openness));
-      for (let i = 0; i < indices.length; i += holeStep) {
-        const idx = indices[i];
-        const pt = getPoint(idx);
-        if (!pt) continue;
-        const [ix, iy] = direction(pt[0], pt[1], face.centerX, face.centerY);
-        const force = state.splatForce * (0.03 + closed * 0.2 + poseMotion * 0.08);
-        addFaceSplat(
-          pt[0], pt[1],
-          ix * force + flowX * 0.3,
-          iy * force + flowY * 0.3,
-          -0.06 * (0.8 + closed),
-          -0.06 * (0.8 + closed),
-          -0.06 * (0.8 + closed),
-          state.splatRadius * (2.0 + sizeMul * (1.1 + closed * 1.2))
-        );
-      }
-    };
+    // Stable anchor so face-dye remains visible even if expression-driven regions fluctuate.
+    const anchorGain = 0.02 + contribution * 0.018;
+    addFaceSplat(
+      face.centerX, face.centerY,
+      flowX * 0.5, flowY * 0.5,
+      fillCol[0] * anchorGain, fillCol[1] * anchorGain, fillCol[2] * anchorGain,
+      state.splatRadius * (3.6 + stampSize * 1.2)
+    );
+    const nosePt = getPoint(1);
+    if (nosePt) {
+      addFaceSplat(
+        nosePt[0], nosePt[1],
+        flowX * 0.45, flowY * 0.45,
+        fillCol[0] * anchorGain * 0.8, fillCol[1] * anchorGain * 0.8, fillCol[2] * anchorGain * 0.8,
+        state.splatRadius * (3.0 + stampSize * 1.0)
+      );
+    }
 
-    // 1) Rim silhouette: bright edge to make head outline unmistakable.
-    for (let i = 0; i < FACE_IDX.contour.length; i += rimStep) {
+    // 1) Dye-fill the whole facial surface.
+    for (let i = 0; i < FACE_IDX.contour.length; i += contourStep) {
       const idx = FACE_IDX.contour[i];
       const pt = getPoint(idx);
       if (!pt) continue;
       const [rx, ry] = direction(face.centerX, face.centerY, pt[0], pt[1]);
-      const tx = -ry;
-      const ty = rx;
-      const tangential = Math.sin(modeTime * 5.0 + i * 0.37);
-      const force = state.splatForce * (0.055 + mouth * 0.14 + poseMotion * 0.12);
-      const tint = 0.045 + smile * 0.04;
-      addFaceSplat(
-        pt[0], pt[1],
-        rx * force + tx * force * 0.18 * tangential + flowX,
-        ry * force + ty * force * 0.18 * tangential + flowY,
-        rimCol[0] * tint, rimCol[1] * tint, rimCol[2] * tint,
-        state.splatRadius * (2.5 + mouth * 1.2 + cheekPuff * 0.7)
-      );
-    }
-
-    // 2) Interior fill: paint a recognizable face volume instead of sparse points.
-    for (let i = 0; i < FACE_IDX.contour.length; i += fillStep) {
-      const idx = FACE_IDX.contour[i];
-      const pt = getPoint(idx);
-      if (!pt) continue;
-      for (const t of [0.34, 0.62]) {
+      for (const t of fillTs) {
         const x = face.centerX + (pt[0] - face.centerX) * t;
         const y = face.centerY + (pt[1] - face.centerY) * t;
-        const g = 0.03 + mouth * 0.045 + poseMotion * 0.04;
+        const radialFalloff = 1.0 - t * 0.72;
+        const g = 0.026 + radialFalloff * 0.04 + mouth * 0.018 + poseMotion * 0.012;
+        const drift = 0.2 + (1.0 - t) * 0.3;
         addFaceSplat(
           x, y,
-          flowX * (0.6 + t * 0.3), flowY * (0.6 + t * 0.3),
+          flowX * drift + rx * FACE_SPLAT_FORCE_BASE * 0.0014 * (1.0 - t),
+          flowY * drift + ry * FACE_SPLAT_FORCE_BASE * 0.0014 * (1.0 - t),
           fillCol[0] * g, fillCol[1] * g, fillCol[2] * g,
-          state.splatRadius * (2.8 - t * 0.7 + smile * 0.35)
+          state.splatRadius * (2.3 + radialFalloff * 2.1 + smile * 0.3)
         );
       }
     }
 
-    // 3) Eye and mouth holes.
-    carveLoop(FACE_IDX.leftEye, eyeLeftOpen, 0.9);
-    carveLoop(FACE_IDX.rightEye, eyeRightOpen, 0.9);
-    carveLoop(FACE_IDX.mouthHole, 1.0 - Math.max(0, Math.min(1, mouth * (0.9 + pucker * 0.2))), 1.2 + mouth * 1.5);
+    // 2) Add a controlled contour accent so the head boundary reads clearly.
+    for (let i = 0; i < FACE_IDX.contour.length; i += contourStep) {
+      const idx = FACE_IDX.contour[i];
+      const pt = getPoint(idx);
+      if (!pt) continue;
+      const [nx, ny] = direction(face.centerX, face.centerY, pt[0], pt[1]);
+      const edgeTint = edgeGain * (0.024 + smile * 0.02 + poseMotion * 0.014);
+      const edgeNudge = FACE_SPLAT_FORCE_BASE * 0.0035 * edgeGain;
+      addFaceSplat(
+        pt[0], pt[1],
+        flowX * 0.95 + nx * edgeNudge * 0.35,
+        flowY * 0.95 + ny * edgeNudge * 0.35,
+        edgeCol[0] * edgeTint, edgeCol[1] * edgeTint, edgeCol[2] * edgeTint,
+        state.splatRadius * (2.4 + edgeGain * 1.5 + cheekPuff * 0.4)
+      );
+    }
 
-    // 4) Mouth jets driven by jaw + funnel/pucker blendshapes.
+    // 3) Carve eye + mouth holes by blending these regions toward near-black dye.
+    const carveToDark = (indices, openness, sizeMul = 1.0) => {
+      if (holeCarve <= 0.001) return;
+      const closed = 1.0 - Math.max(0, Math.min(1, openness));
+      const dark = 0.00025 + (0.0014 + closed * 0.006) * holeCarve;
+      for (let i = 0; i < indices.length; i += holeStep) {
+        const idx = indices[i];
+        const pt = getPoint(idx);
+        if (!pt) continue;
+        addFaceSplat(
+          pt[0], pt[1],
+          flowX * 0.12, flowY * 0.12,
+          dark, dark, dark,
+          state.splatRadius * (1.25 + sizeMul * (0.55 + closed * 0.55))
+        );
+      }
+    };
+    carveToDark(FACE_IDX.leftEye, eyeLeftOpen, 1.0);
+    carveToDark(FACE_IDX.rightEye, eyeRightOpen, 1.0);
+    carveToDark(FACE_IDX.mouthHole, 1.0 - Math.max(0, Math.min(1, mouth * (0.9 + pucker * 0.2 + funnel * 0.1))), 1.35);
+
+    // 4) Mouth-open should brighten/fill the mouth region, not shoot jets.
     const mouthDrive = Math.max(0, Math.min(1, mouth * 0.72 + pucker * 0.18 + funnel * 0.15));
-    if (mouthDrive > 0.16) {
+    if (mouthDrive > 0.06) {
+      const mouthStep = detailScale > 0.68 ? 1 : 2;
       for (let i = 0; i < FACE_IDX.mouthHole.length; i += mouthStep) {
         const idx = FACE_IDX.mouthHole[i];
         const pt = getPoint(idx);
         if (!pt) continue;
-        const [mx, my] = direction(mouthCenter[0], mouthCenter[1], pt[0], pt[1]);
-        const burst = state.splatForce * (0.06 + mouthDrive * 0.35);
-        const g = 0.03 + mouthDrive * 0.08;
+        const g = 0.018 + mouthDrive * 0.07 * mouthBoost;
         addFaceSplat(
           pt[0], pt[1],
-          mx * burst + flowX * 0.5, my * burst + flowY * 0.5,
-          fillCol[0] * g, fillCol[1] * g, fillCol[2] * g,
-          state.splatRadius * (2.4 + mouthDrive * 2.6)
+          flowX * 0.62, flowY * 0.62,
+          mouthCol[0] * g, mouthCol[1] * g, mouthCol[2] * g,
+          state.splatRadius * (2.5 + mouthDrive * 2.8 * mouthBoost)
         );
       }
-    }
-
-    // 5) Matrix-driven motion wake.
-    if (poseMotion > 0.05) {
-      for (let i = 1; i < FACE_IDX.contour.length; i += wakeStep) {
-        const idx = FACE_IDX.contour[i];
-        const pt = getPoint(idx);
-        if (!pt) continue;
-        const wake = state.splatForce * (0.045 + poseMotion * 0.18);
+      if (mouthBurst) {
+        const burstGain = 0.028 + mouthDrive * 0.12 * mouthBoost;
         addFaceSplat(
-          pt[0], pt[1],
-          flowX * (1.1 + poseMotion * 0.7), flowY * (1.1 + poseMotion * 0.7),
-          0, 0, 0,
-          state.splatRadius * (2.1 + poseMotion * 1.6)
+          mouthCenter[0], mouthCenter[1],
+          flowX * 0.75, flowY * 0.75,
+          mouthCol[0] * burstGain, mouthCol[1] * burstGain, mouthCol[2] * burstGain,
+          state.splatRadius * (4.0 + mouthDrive * 3.5 * mouthBoost)
         );
-        if (mouthBurst) {
-          const [rx, ry] = direction(face.centerX, face.centerY, pt[0], pt[1]);
-          addFaceSplat(
-            pt[0], pt[1],
-            rx * wake * 0.7, ry * wake * 0.7,
-            -0.05, -0.05, -0.05,
-            state.splatRadius * 2.8
-          );
-        }
       }
     }
 
@@ -4916,6 +4933,7 @@ async function main() {
   const burstShots = [];
   let burstEmitterStamp = '';
   let burstGlobalPhase = Math.random() * Math.PI * 2;
+  let burstVolleyCooldown = 0;
 
   function wrapAngle(v) {
     const TAU = Math.PI * 2;
@@ -4929,6 +4947,7 @@ async function main() {
     const stamp = `${wanted}:${behavior}`;
     if (stamp === burstEmitterStamp && burstEmitters.length === wanted) return;
     burstEmitterStamp = stamp;
+    burstVolleyCooldown = 0;
     burstEmitters.length = 0;
     for (let i = 0; i < wanted; i++) {
       const angle = (i / Math.max(1, wanted)) * Math.PI * 2;
@@ -4957,7 +4976,7 @@ async function main() {
     if (burstShots.length > 160) return;
     const TAU = Math.PI * 2;
     const slot = idx / Math.max(1, count);
-    const widthN = Math.max(0, Math.min(2, width));
+    const widthN = Math.max(0, Math.min(12, width));
     const width01 = Math.min(1, widthN);
     const widthBoost = Math.max(0, widthN - 1);
     const edgeSourceR = SIM_SPHERE_RADIUS + 0.012;
@@ -4969,23 +4988,38 @@ async function main() {
     let sourceR = edgeSourceR;
     let targetAngle = sourceAngle + Math.PI;
     let targetR = 0.12;
+    let explicitTargetX = NaN;
+    let explicitTargetY = NaN;
 
     if (behavior === 1) {
+      // Inward ring: emit from edge, aimed exactly at center.
       sourceAngle = slot * TAU + burstGlobalPhase * 0.15;
       sourceR = edgeSourceR;
-      targetAngle = sourceAngle + Math.PI + (Math.random() * 2 - 1) * (0.18 + widthN * 0.45);
-      targetR = 0.015 + Math.random() * (0.09 + widthN * 0.12);
+      explicitTargetX = 0.5;
+      explicitTargetY = 0.5;
     } else if (behavior === 2) {
+      // Outward ring: emit from center, aimed exactly outward.
       sourceAngle = slot * TAU + burstGlobalPhase * 0.3;
-      sourceR = centerSourceR;
-      targetAngle = sourceAngle + (Math.random() * 2 - 1) * (0.18 + widthN * 0.32);
-      targetR = SIM_SPHERE_RADIUS - (0.05 + width01 * 0.04) - Math.random() * 0.04;
+      sourceR = 0;
+      targetAngle = sourceAngle;
+      targetR = SIM_SPHERE_RADIUS - (0.03 + width01 * 0.03);
     } else if (behavior === 3) {
-      e.angle = wrapAngle(e.angle + 0.42 * e.drift);
-      sourceAngle = e.angle;
+      // Radial jets: outer-wall sources, inward radial direction rotated by angle slider.
+      sourceAngle = slot * TAU + burstGlobalPhase * 0.18;
       sourceR = edgeSourceR;
-      targetAngle = sourceAngle + e.drift * (0.65 + Math.random() * 0.5);
-      targetR = 0.14 + Math.random() * (SIM_SPHERE_RADIUS - 0.17);
+      const sx = 0.5 + Math.cos(sourceAngle) * sourceR;
+      const sy = 0.5 + Math.sin(sourceAngle) * sourceR;
+      const inwardX = 0.5 - sx;
+      const inwardY = 0.5 - sy;
+      const inwardLen = Math.hypot(inwardX, inwardY) || 1;
+      const nx = inwardX / inwardLen;
+      const ny = inwardY / inwardLen;
+      const ang = ((state.burstRadialAngle || 0) * Math.PI) / 180;
+      const rx = nx * Math.cos(ang) - ny * Math.sin(ang);
+      const ry = nx * Math.sin(ang) + ny * Math.cos(ang);
+      const reach = SIM_SPHERE_RADIUS * (1.8 + width01 * 0.4 + widthBoost * 0.15);
+      explicitTargetX = sx + rx * reach;
+      explicitTargetY = sy + ry * reach;
     } else if (behavior === 4) {
       sourceAngle = slot * TAU + burstGlobalPhase;
       sourceR = edgeSourceR;
@@ -5001,8 +5035,8 @@ async function main() {
 
     const sx = 0.5 + Math.cos(sourceAngle) * sourceR;
     const sy = 0.5 + Math.sin(sourceAngle) * sourceR;
-    const tx0 = 0.5 + Math.cos(targetAngle) * targetR;
-    const ty0 = 0.5 + Math.sin(targetAngle) * targetR;
+    const tx0 = Number.isFinite(explicitTargetX) ? explicitTargetX : (0.5 + Math.cos(targetAngle) * targetR);
+    const ty0 = Number.isFinite(explicitTargetY) ? explicitTargetY : (0.5 + Math.sin(targetAngle) * targetR);
     const t = clampPointToSphere(tx0, ty0, 0.03);
     const dx = t.x - sx;
     const dy = t.y - sy;
@@ -5011,10 +5045,10 @@ async function main() {
 
     const jitter = 1 + (Math.random() * 2 - 1) * state.burstForceRandomness;
     const speed = 0.35 + Math.max(0.25, travelSpeed) * 1.15; // world units / second
-    const life = Math.min(1.3, 0.07 + duration * 0.16);
+    const life = Math.min(2.6, 0.07 + duration * 0.16);
     const forceScale = Math.max(0.15, (0.45 + state.burstForce * 1.5) * jitter);
-    const dyeScale = forceScale * (1.8 + widthN * 0.8); // intentionally dye-heavy
-    const radius = state.splatRadius * (0.9 + width01 * 2.8 + widthBoost * 2.2 + state.burstForce * 0.2);
+    const dyeScale = forceScale * (1.8 + width01 * 0.8 + widthBoost * 0.2); // intentionally dye-heavy
+    const radius = state.splatRadius * (0.9 + width01 * 2.8 + widthBoost * 0.9 + state.burstForce * 0.2);
 
     burstShots.push({
       x: sx,
@@ -5039,21 +5073,29 @@ async function main() {
     }
 
     ensureBurstEmitters(count, behavior);
-    const findSpeed = Math.max(0, Number.isFinite(state.burstSpeed) ? state.burstSpeed : 0);
-    const findNorm = Math.pow(Math.max(0, Math.min(1, findSpeed / 2.0)), 1.35);
+    const waitSeconds = Math.max(0, Math.min(10, Number.isFinite(state.burstSpeed) ? state.burstSpeed : 0.4));
     const travelSpeed = Math.max(0.25, Number.isFinite(state.burstTravelSpeed) ? state.burstTravelSpeed : 1.2);
     const duration = Math.max(0.05, Number.isFinite(state.burstDuration) ? state.burstDuration : 0.8);
-    const width = Math.max(0, Math.min(2, Number.isFinite(state.burstWidth) ? state.burstWidth : 0.35));
+    const width = Math.max(0, Math.min(12, Number.isFinite(state.burstWidth) ? state.burstWidth : 0.35));
     burstGlobalPhase = wrapAngle(burstGlobalPhase + dt * 0.42);
 
-    // Find speed only controls how often new shots are launched.
-    const shotInterval = Math.max(0.24, (2.8 - findNorm * 2.45) + Math.min(0.95, duration * 0.18));
-    for (let i = 0; i < burstEmitters.length; i++) {
-      const e = burstEmitters[i];
-      e.cooldown -= dt;
-      if (e.cooldown <= 0) {
-        spawnBurstShot(e, behavior, i, count, travelSpeed, duration, width);
-        e.cooldown = shotInterval * (0.8 + Math.random() * 0.45);
+    // Target find speed acts as explicit wait time between firing events.
+    if (behavior === 0) {
+      for (let i = 0; i < burstEmitters.length; i++) {
+        const e = burstEmitters[i];
+        e.cooldown -= dt;
+        if (e.cooldown <= 0) {
+          spawnBurstShot(e, behavior, i, count, travelSpeed, duration, width);
+          e.cooldown = waitSeconds * (0.8 + Math.random() * 0.45);
+        }
+      }
+    } else {
+      burstVolleyCooldown -= dt;
+      if (burstVolleyCooldown <= 0) {
+        for (let i = 0; i < burstEmitters.length; i++) {
+          spawnBurstShot(burstEmitters[i], behavior, i, count, travelSpeed, duration, width);
+        }
+        burstVolleyCooldown = waitSeconds;
       }
     }
 
@@ -5088,8 +5130,8 @@ async function main() {
         addSplat(
           px,
           py,
-          stepX * state.splatForce * force,
-          stepY * state.splatForce * force,
+          stepX * BURST_SPLAT_FORCE_BASE * force,
+          stepY * BURST_SPLAT_FORCE_BASE * force,
           col[0] * dye,
           col[1] * dye,
           col[2] * dye,
@@ -5399,6 +5441,8 @@ async function main() {
 
     // Collect splats into pre-allocated buffer
     splatCount = 0;
+    // Prioritize face dye so it cannot be starved by other emitters sharing MAX_SPLATS.
+    applyFaceEffectors(dt, time);
     updateBurstEmitters(dt);
 
     // Mouse splat — clamp to sphere (tighter than visual edge to keep splat radius inside)
@@ -5413,12 +5457,11 @@ async function main() {
       const str = state.clickStrength * 6.0;
       const sz = 1.0 + state.clickSize * 8.0;
       addSplat(pointer.x, pointer.y,
-        pointer.dx * state.splatForce * str,
-        pointer.dy * state.splatForce * str,
+        pointer.dx * MOUSE_SPLAT_FORCE_BASE * str,
+        pointer.dy * MOUSE_SPLAT_FORCE_BASE * str,
         col[0] * str, col[1] * str, col[2] * str,
         state.splatRadius * sz * (1.0 + speed * 20));
     }
-    applyFaceEffectors(dt, time);
     if (pointer.moved) { pointer.moved = false; }
 
     // ── Upload batch splat data + write simulation params ──
@@ -5881,6 +5924,13 @@ async function main() {
     });
   }
 
+  function syncBurstPatternUI() {
+    const radialGroup = document.getElementById('burstRadialAngleGroup');
+    if (radialGroup) {
+      radialGroup.style.display = Math.round(state.burstBehavior || 0) === 3 ? '' : 'none';
+    }
+  }
+
   wireSlider('particleSize', 'particleSize');
   wireSlider('sizeRandomness', 'sizeRandomness');
   wireSlider('glintBrightness', 'glintBrightness');
@@ -6146,7 +6196,7 @@ async function main() {
   wireColor('sheenColor', 'sheenColor');
   wireSlider('clickSize', 'clickSize');
   wireSlider('clickStrength', 'clickStrength');
-  wireSelect('burstBehavior', 'burstBehavior');
+  wireSelect('burstBehavior', 'burstBehavior', () => syncBurstPatternUI());
   wireSlider('burstCount', 'burstCount', v => Math.round(v));
   wireSlider('burstForce', 'burstForce');
   wireSlider('burstForceRandomness', 'burstForceRandomness');
@@ -6154,6 +6204,8 @@ async function main() {
   wireSlider('burstTravelSpeed', 'burstTravelSpeed');
   wireSlider('burstDuration', 'burstDuration');
   wireSlider('burstWidth', 'burstWidth');
+  wireSlider('burstRadialAngle', 'burstRadialAngle', v => Math.round(v));
+  syncBurstPatternUI();
   wireSlider('noiseAmount', 'noiseAmount', v => v.toFixed(2));
   wireSelect('noiseType', 'noiseType', v => applyNoiseTypeProfile(v, true));
   wireSelect('noiseMapping', 'noiseMapping');
@@ -6174,6 +6226,13 @@ async function main() {
     }
   });
   wireSlider('faceDyeContribution', 'faceDyeContribution', v => v.toFixed(2));
+  wireSlider('faceDyeFill', 'faceDyeFill', v => v.toFixed(2));
+  wireSlider('faceEdgeBoost', 'faceEdgeBoost', v => v.toFixed(2));
+  wireSlider('faceFlowCarry', 'faceFlowCarry', v => v.toFixed(2));
+  wireSlider('faceHoleCarve', 'faceHoleCarve', v => v.toFixed(2));
+  wireSlider('faceMouthBoost', 'faceMouthBoost', v => v.toFixed(2));
+  wireSlider('faceMaskDetail', 'faceMaskDetail', v => v.toFixed(2));
+  wireSlider('faceStampSize', 'faceStampSize', v => v.toFixed(2));
   wireSelect('faceDebugMode', 'faceDebugMode', v => {
     state.faceDebugMode = Math.max(0, Math.min(2, Math.round(v)));
     if ((state.faceDebugMode > 0 || state.faceEffectorMode > 0) && !faceTracking.enabled) {
@@ -6206,7 +6265,6 @@ async function main() {
     });
   }
   wireSlider('curlStrength', 'curlStrength', v => Math.round(v));
-  wireSlider('splatForce', 'splatForce', v => Math.round(v));
   wireSlider('velDissipation', 'velDissipation', v => v.toFixed(3));
   wireSlider('dyeDissipation', 'dyeDissipation', v => v.toFixed(3));
   wireSlider('pressureIters', 'pressureIters', v => Math.round(v));
@@ -6289,6 +6347,8 @@ async function main() {
     syncSlider('burstTravelSpeed', 'burstTravelSpeed');
     syncSlider('burstDuration', 'burstDuration');
     syncSlider('burstWidth', 'burstWidth');
+    syncSlider('burstRadialAngle', 'burstRadialAngle', v => Math.round(v));
+    syncBurstPatternUI();
     syncSlider('noiseAmount', 'noiseAmount', v => v.toFixed(2));
     syncSlider('noiseBehavior', 'noiseBehavior', formatNoiseBehavior);
     syncSlider('noiseFrequency', 'noiseFrequency');
@@ -6313,12 +6373,18 @@ async function main() {
       if (faceModeSel) faceModeSel.value = String(mode);
     }
     syncSlider('faceDyeContribution', 'faceDyeContribution', v => v.toFixed(2));
+    syncSlider('faceDyeFill', 'faceDyeFill', v => v.toFixed(2));
+    syncSlider('faceEdgeBoost', 'faceEdgeBoost', v => v.toFixed(2));
+    syncSlider('faceFlowCarry', 'faceFlowCarry', v => v.toFixed(2));
+    syncSlider('faceHoleCarve', 'faceHoleCarve', v => v.toFixed(2));
+    syncSlider('faceMouthBoost', 'faceMouthBoost', v => v.toFixed(2));
+    syncSlider('faceMaskDetail', 'faceMaskDetail', v => v.toFixed(2));
+    syncSlider('faceStampSize', 'faceStampSize', v => v.toFixed(2));
     {
       const faceDebugSel = document.getElementById('faceDebugMode');
       if (faceDebugSel) faceDebugSel.value = String(Math.round(state.faceDebugMode || 0));
     }
     syncSlider('curlStrength', 'curlStrength', v => Math.round(v));
-    syncSlider('splatForce', 'splatForce', v => Math.round(v));
     syncSlider('velDissipation', 'velDissipation', v => v.toFixed(3));
     syncSlider('dyeDissipation', 'dyeDissipation', v => v.toFixed(3));
     syncSlider('pressureIters', 'pressureIters', v => Math.round(v));
@@ -6386,13 +6452,14 @@ async function main() {
     state.clickStrength = snapTo(randRange(0, 1), 0.01);
     // Burst emitters
     state.burstBehavior = Math.round(randRange(0, 4));
-    state.burstCount = Math.round(randRange(0, 8));
-    state.burstForce = snapTo(randRange(0, 3.2), 0.01);
+    state.burstCount = Math.round(randRange(0, 16));
+    state.burstForce = snapTo(randRange(0, 6.4), 0.01);
     state.burstForceRandomness = snapTo(randRange(0, 1), 0.01);
-    state.burstSpeed = snapTo(randRange(0, 2.0), 0.01);
-    state.burstTravelSpeed = snapTo(randRange(0.35, 3.8), 0.01);
-    state.burstDuration = snapTo(randRange(0.1, 8.0), 0.01);
-    state.burstWidth = snapTo(randRange(0.05, 2.0), 0.01);
+    state.burstSpeed = snapTo(randRange(0, 10.0), 0.01);
+    state.burstTravelSpeed = snapTo(randRange(0.35, 7.6), 0.01);
+    state.burstDuration = snapTo(randRange(0.1, 32.0), 0.01);
+    state.burstWidth = snapTo(randRange(0.05, 12.0), 0.01);
+    state.burstRadialAngle = snapTo(randRange(0, 360), 1);
     // Noise
     state.noiseAmount = snapTo(randRange(0, 1), 0.01);
     state.noiseType = Math.round(randRange(0, 7));
@@ -6412,7 +6479,6 @@ async function main() {
     state.noiseSpeed = snapTo(randRange(0, 1), 0.01);
     // Fluid sim
     state.curlStrength = Math.round(randRange(0, 50));
-    state.splatForce = snapTo(randRange(1000, 20000), 100);
     state.velDissipation = snapTo(randRange(0.99, 1.0), 0.001);
     state.dyeDissipation = snapTo(randRange(0.98, 1.0), 0.001);
     state.pressureIters = Math.round(randRange(10, 60));
@@ -6445,13 +6511,14 @@ async function main() {
     clickSize: { min: 0, max: 1, step: 0.01 },
     clickStrength: { min: 0, max: 1, step: 0.01 },
     burstBehavior: { min: 0, max: 4, step: 1 },
-    burstCount: { min: 0, max: 8, step: 1 },
-    burstForce: { min: 0, max: 4, step: 0.01 },
+    burstCount: { min: 0, max: 16, step: 1 },
+    burstForce: { min: 0, max: 8, step: 0.01 },
     burstForceRandomness: { min: 0, max: 1, step: 0.01 },
-    burstSpeed: { min: 0, max: 2.0, step: 0.01 },
-    burstTravelSpeed: { min: 0.25, max: 4.0, step: 0.01 },
-    burstDuration: { min: 0.05, max: 8.0, step: 0.01 },
-    burstWidth: { min: 0, max: 2.0, step: 0.01 },
+    burstSpeed: { min: 0, max: 10.0, step: 0.01 },
+    burstTravelSpeed: { min: 0.25, max: 8.0, step: 0.01 },
+    burstDuration: { min: 0.05, max: 32.0, step: 0.01 },
+    burstWidth: { min: 0, max: 12.0, step: 0.01 },
+    burstRadialAngle: { min: 0, max: 360, step: 1 },
     noiseAmount: { min: 0, max: 1, step: 0.01 },
     noiseType: { min: 0, max: 7, step: 1 },
     noiseBehavior: { min: 0, max: 8, step: 1 },
@@ -6463,7 +6530,6 @@ async function main() {
     noiseAnisotropy: { min: 0, max: 1, step: 0.01 },
     noiseBlend: { min: 0, max: 1, step: 0.01 },
     curlStrength: { min: 0, max: 50, step: 1 },
-    splatForce: { min: 1000, max: 20000, step: 100 },
     velDissipation: { min: 0.99, max: 1.0, step: 0.001 },
     dyeDissipation: { min: 0.98, max: 1.0, step: 0.001 },
     pressureIters: { min: 10, max: 60, step: 1 },

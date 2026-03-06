@@ -18,13 +18,14 @@ export const SLIDER_SPACE = {
   clickSize:         { min: 0,    max: 1,     step: 0.01 },
   clickStrength:     { min: 0,    max: 1,     step: 0.01 },
   burstBehavior:     { min: 0,    max: 4,     step: 1    },
-  burstCount:        { min: 0,    max: 8,     step: 1    },
-  burstForce:        { min: 0,    max: 4,     step: 0.01 },
+  burstCount:        { min: 0,    max: 16,    step: 1    },
+  burstForce:        { min: 0,    max: 8,     step: 0.01 },
   burstForceRandomness:{ min: 0,  max: 1,     step: 0.01 },
-  burstSpeed:        { min: 0,    max: 2.0,   step: 0.01 },
-  burstTravelSpeed:  { min: 0.25, max: 4.0,   step: 0.01 },
-  burstDuration:     { min: 0.05, max: 8.0,   step: 0.01 },
-  burstWidth:        { min: 0,    max: 2.0,   step: 0.01 },
+  burstSpeed:        { min: 0,    max: 10.0,  step: 0.01 },
+  burstTravelSpeed:  { min: 0.25, max: 8.0,   step: 0.01 },
+  burstDuration:     { min: 0.05, max: 32.0,  step: 0.01 },
+  burstWidth:        { min: 0,    max: 12.0,  step: 0.01 },
+  burstRadialAngle:  { min: 0,    max: 360,   step: 1    },
   noiseAmount:       { min: 0,    max: 1,     step: 0.01 },
   noiseType:         { min: 0,    max: 7,     step: 1    },
   noiseBehavior:     { min: 0,    max: 8,     step: 1    },
@@ -35,7 +36,6 @@ export const SLIDER_SPACE = {
   noiseAnisotropy:   { min: 0,    max: 1,     step: 0.01 },
   noiseBlend:        { min: 0,    max: 1,     step: 0.01 },
   curlStrength:      { min: 0,    max: 50,    step: 1    },
-  splatForce:        { min: 1000, max: 20000, step: 100  },
   velDissipation:    { min: 0.99, max: 1.0,   step: 0.001 },
   dyeDissipation:    { min: 0.98, max: 1.0,   step: 0.001 },
   pressureIters:     { min: 10,   max: 60,    step: 1    },
@@ -226,7 +226,6 @@ export function normalizedToState(x, state, lockedKeys) {
   }
   // Clamp critical params so the sim is always visually active
   if (state.simSpeed < 0.2) state.simSpeed = 0.2;
-  if (state.splatForce < 3000) state.splatForce = 3000;
 }
 
 /** Generate a random normalized vector in [0,1]^D. */
@@ -807,7 +806,7 @@ export class BOController {
   /** Toggle locking motion/dynamics params. */
   toggleLockMotion() {
     const motionKeys = SLIDER_KEYS.filter(k =>
-      ['simSpeed', 'burstBehavior', 'burstCount', 'burstForce', 'burstForceRandomness', 'burstSpeed', 'burstTravelSpeed', 'burstDuration', 'burstWidth',
+      ['simSpeed', 'burstBehavior', 'burstCount', 'burstForce', 'burstForceRandomness', 'burstSpeed', 'burstTravelSpeed', 'burstDuration', 'burstWidth', 'burstRadialAngle',
         'noiseAmount', 'noiseType', 'noiseBehavior', 'noiseFrequency', 'noiseSpeed',
         'noiseWarp', 'noiseSharpness', 'noiseAnisotropy', 'noiseBlend',
         'curlStrength', 'dyeNoiseAmount'].includes(k));

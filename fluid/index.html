@@ -272,37 +272,41 @@
           <option value="0" selected>Edge Jets (Wander)</option>
           <option value="1">Inward Ring Jets</option>
           <option value="2">Outward Ring Jets</option>
-          <option value="3">Sweep Jets</option>
+          <option value="3">Radial Jets</option>
           <option value="4">Rotating Hunters</option>
         </select>
       </div>
       <div class="setting-group">
         <label>Jet Count <span class="val" id="burstCountVal">0</span></label>
-        <input type="range" id="burstCount" min="0" max="8" step="1" value="0">
+        <input type="range" id="burstCount" min="0" max="16" step="1" value="0">
       </div>
       <div class="setting-group">
         <label>Jet Force <span class="val" id="burstForceVal">0.8</span></label>
-        <input type="range" id="burstForce" min="0.0" max="4.0" step="0.01" value="0.8">
+        <input type="range" id="burstForce" min="0.0" max="8.0" step="0.01" value="0.8">
       </div>
       <div class="setting-group">
         <label>Jet Force Jitter <span class="val" id="burstForceRandomnessVal">0.25</span></label>
         <input type="range" id="burstForceRandomness" min="0.0" max="1.0" step="0.01" value="0.25">
       </div>
       <div class="setting-group">
-        <label>Target Find Speed <span class="val" id="burstSpeedVal">0.6</span></label>
-        <input type="range" id="burstSpeed" min="0.0" max="2.0" step="0.01" value="0.6">
+        <label>Jet Wait (s) <span class="val" id="burstSpeedVal">0.4</span></label>
+        <input type="range" id="burstSpeed" min="0.0" max="10.0" step="0.01" value="0.4">
       </div>
       <div class="setting-group">
         <label>Jet Speed <span class="val" id="burstTravelSpeedVal">1.2</span></label>
-        <input type="range" id="burstTravelSpeed" min="0.25" max="4.0" step="0.01" value="1.2">
+        <input type="range" id="burstTravelSpeed" min="0.25" max="8.0" step="0.01" value="1.2">
       </div>
       <div class="setting-group">
         <label>Jet Trail Duration <span class="val" id="burstDurationVal">0.8</span></label>
-        <input type="range" id="burstDuration" min="0.05" max="8.0" step="0.01" value="0.8">
+        <input type="range" id="burstDuration" min="0.05" max="32.0" step="0.01" value="0.8">
       </div>
       <div class="setting-group">
         <label>Jet Width <span class="val" id="burstWidthVal">0.35</span></label>
-        <input type="range" id="burstWidth" min="0.0" max="2.0" step="0.01" value="0.35">
+        <input type="range" id="burstWidth" min="0.0" max="12.0" step="0.01" value="0.35">
+      </div>
+      <div class="setting-group" id="burstRadialAngleGroup">
+        <label>Radial Angle <span class="val" id="burstRadialAngleVal">45</span></label>
+        <input type="range" id="burstRadialAngle" min="0" max="360" step="1" value="45">
       </div>
 
       <div style="margin:12px 0 6px; color:#777; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Face Effector</div>
@@ -316,6 +320,34 @@
       <div class="setting-group">
         <label>Face Dye Contribution <span class="val" id="faceDyeContributionVal">1.10</span></label>
         <input type="range" id="faceDyeContribution" min="0.0" max="2.0" step="0.01" value="1.10">
+      </div>
+      <div class="setting-group">
+        <label>Face Dye Fill <span class="val" id="faceDyeFillVal">1.40</span></label>
+        <input type="range" id="faceDyeFill" min="0.0" max="3.0" step="0.01" value="1.40">
+      </div>
+      <div class="setting-group">
+        <label>Face Edge Boost <span class="val" id="faceEdgeBoostVal">0.90</span></label>
+        <input type="range" id="faceEdgeBoost" min="0.0" max="2.0" step="0.01" value="0.90">
+      </div>
+      <div class="setting-group">
+        <label>Face Flow Carry <span class="val" id="faceFlowCarryVal">0.12</span></label>
+        <input type="range" id="faceFlowCarry" min="0.0" max="1.5" step="0.01" value="0.12">
+      </div>
+      <div class="setting-group">
+        <label>Face Hole Carve <span class="val" id="faceHoleCarveVal">0.78</span></label>
+        <input type="range" id="faceHoleCarve" min="0.0" max="1.0" step="0.01" value="0.78">
+      </div>
+      <div class="setting-group">
+        <label>Mouth Dye Boost <span class="val" id="faceMouthBoostVal">1.00</span></label>
+        <input type="range" id="faceMouthBoost" min="0.0" max="2.0" step="0.01" value="1.00">
+      </div>
+      <div class="setting-group">
+        <label>Face Mask Detail <span class="val" id="faceMaskDetailVal">0.68</span></label>
+        <input type="range" id="faceMaskDetail" min="0.2" max="1.0" step="0.01" value="0.68">
+      </div>
+      <div class="setting-group">
+        <label>Face Stamp Size <span class="val" id="faceStampSizeVal">1.35</span></label>
+        <input type="range" id="faceStampSize" min="0.5" max="3.0" step="0.01" value="1.35">
       </div>
       <div class="setting-group">
         <button id="faceTrackingToggle" style="width:100%;">Start Webcam Face Tracking</button>
@@ -396,10 +428,6 @@
         <input type="range" id="dyeNoiseAmount" min="0.0" max="0.15" step="0.001" value="0.0">
       </div>
 
-      <div class="setting-group">
-        <label>Splat Force <span class="val" id="splatForceVal">6000</span></label>
-        <input type="range" id="splatForce" min="1000" max="20000" step="100" value="6000">
-      </div>
       <div class="setting-group">
         <label>Vel Dissipation <span class="val" id="velDissipationVal">0.998</span></label>
         <input type="range" id="velDissipation" min="0.99" max="1.0" step="0.001" value="0.998">
