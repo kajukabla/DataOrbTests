@@ -4,7 +4,6 @@ const WORKGROUP = 8;
 const TEX_FMT = 'rgba16float';
 const PARTICLE_STRIDE = 32;       // 8 floats × 4 bytes
 const PARTICLE_WG = 256;
-const ENABLE_REACTION_DIFFUSION = false;
 // Shared hard containment radius for all simulation layers.
 // Slightly inset from 0.37 to prevent post-process/filter edge ridges.
 const SIM_SPHERE_RADIUS = 0.3665;
@@ -40,15 +39,12 @@ const state = {
   noiseBlend: 0.5,
   burstCount: 0,
   burstBehavior: 0,
-  burstForce: 1.0,
+  burstForce: 0.8,
   burstForceRandomness: 0.25,
-  burstSpeed: 0.4,
-  burstDuration: 0.25,
-  burstWidth: 0.3,
+  burstSpeed: 0.6,
+  burstDuration: 0.8,
+  burstWidth: 0.25,
   sheenColor: [1.0, 0.9, 0.7],
-  rimIntensity: 0.5,
-  chromaticStrength: 1.0,
-  causticIntensity: 0.2,
   splatForce: 6000,
   curlStrength: 15,
   pressureIters: 30,
@@ -58,13 +54,6 @@ const state = {
   // Dye-coupled noise
   noiseDyeIntensity: 0.0,
   dyeNoiseAmount: 0.0,
-  // Reaction-diffusion is temporarily disabled.
-  rdAmount: 0.0,
-  rdFeedRate: 0.028,
-  rdKillRate: 0.056,
-  rdDyeAmount: 0,
-  rdForceAmount: 0,
-  rdScale: 0.12,
   bloomIntensity: 0,
   bloomThreshold: 0.4,
   bloomRadius: 0.5,
@@ -77,9 +66,6 @@ const state = {
   tempBuoyancy: 0.5,
   tempDissipation: 0.99,
   tempDyeTint: 0,
-  // Depth/Parallax
-  depthAmount: 0,
-  depthSpeed: 0.3,
   // Mood lighting
   moodAmount: 0,
   moodSpeed: 0.3,
@@ -90,115 +76,32 @@ const state = {
   faceDebugMode: 0,
 };
 
-const FACE_TRACKER_LIB_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+const FACE_TRACKER_BUNDLE_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
 const FACE_TRACKER_WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
 const FACE_TRACKER_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+let faceVisionModuleCache = null;
 
-const FACE_MODE_PROFILES = {
-  1: { // Vertex Burst Jets
-    noiseAmount: 0.14,
-    noiseType: 4,
-    noiseFrequency: 0.52,
-    noiseSpeed: 0.62,
-    noiseDyeIntensity: 0.12,
-    dyeNoiseAmount: 0.016,
-    curlStrength: 21,
-    tempAmount: 0.06,
-    tempBuoyancy: 0.45,
-    burstCount: 2,
-    burstForce: 0.42,
-  },
-  2: { // Mesh Noise Mask
-    noiseAmount: 0.26,
-    noiseType: 1,
-    noiseFrequency: 0.66,
-    noiseSpeed: 0.38,
-    noiseWarp: 0.92,
-    noiseSharpness: 0.66,
-    noiseBlend: 0.72,
-    noiseDyeIntensity: 0.2,
-    dyeNoiseAmount: 0.03,
-    curlStrength: 18,
-    tempAmount: 0.02,
-    tempBuoyancy: 0.3,
-    burstCount: 0,
-    burstForce: 0.2,
-  },
-  3: { // Mouth Shockwave
-    noiseAmount: 0.08,
-    noiseType: 0,
-    noiseFrequency: 0.44,
-    noiseSpeed: 0.5,
-    noiseDyeIntensity: 0.05,
-    dyeNoiseAmount: 0.012,
-    curlStrength: 15,
-    tempAmount: 0.22,
-    tempBuoyancy: 0.72,
-    burstCount: 1,
-    burstForce: 0.55,
-  },
-  4: { // Jawline Vortex
-    noiseAmount: 0.19,
-    noiseType: 5,
-    noiseFrequency: 0.58,
-    noiseSpeed: 0.55,
-    noiseAnisotropy: 0.88,
-    noiseDyeIntensity: 0.08,
-    dyeNoiseAmount: 0.014,
-    curlStrength: 32,
-    tempAmount: 0.1,
-    tempBuoyancy: 0.5,
-    burstCount: 0,
-    burstForce: 0.25,
-  },
-  5: { // Brow Shear Fans
-    noiseAmount: 0.15,
-    noiseType: 6,
-    noiseFrequency: 0.6,
-    noiseSpeed: 0.44,
-    noiseWarp: 0.65,
-    noiseSharpness: 0.7,
-    noiseDyeIntensity: 0.11,
-    dyeNoiseAmount: 0.02,
-    curlStrength: 24,
-    tempAmount: 0.08,
-    tempBuoyancy: 0.56,
-    burstCount: 0,
-    burstForce: 0.2,
-  },
-  6: { // Cheek Pulse Emitters
-    noiseAmount: 0.16,
-    noiseType: 3,
-    noiseFrequency: 0.68,
-    noiseSpeed: 0.58,
-    noiseBlend: 0.9,
-    noiseDyeIntensity: 0.14,
-    dyeNoiseAmount: 0.025,
-    curlStrength: 20,
-    tempAmount: 0.14,
-    tempBuoyancy: 0.6,
-    burstCount: 0,
-    burstForce: 0.22,
-  },
-  7: { // Fluid Texture Mesh
-    noiseAmount: 0.1,
-    noiseType: 2,
-    noiseFrequency: 0.5,
-    noiseSpeed: 0.34,
-    noiseDyeIntensity: 0.04,
-    dyeNoiseAmount: 0.008,
-    curlStrength: 14,
-    tempAmount: 0.04,
-    tempBuoyancy: 0.4,
-    burstCount: 0,
-    burstForce: 0.15,
-  },
-};
+const FACE_BLENDSHAPE_KEYS = [
+  'jawOpen',
+  'mouthPucker',
+  'mouthFunnel',
+  'mouthSmileLeft',
+  'mouthSmileRight',
+  'eyeBlinkLeft',
+  'eyeBlinkRight',
+  'browInnerUp',
+  'browDownLeft',
+  'browDownRight',
+  'cheekPuff',
+  'noseSneerLeft',
+  'noseSneerRight',
+];
 
 const FACE_IDX = {
   contour: [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109],
   jaw: [323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93],
   lips: [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 308, 324, 318, 402, 317, 14, 87, 178, 88, 95, 78],
+  mouthHole: [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415],
   leftBrow: [70, 63, 105, 66, 107],
   rightBrow: [300, 293, 334, 296, 336],
   leftEye: [33, 160, 158, 133, 153, 144],
@@ -223,6 +126,7 @@ function uniqueIndices(...groups) {
 const FACE_DENSE_INDICES = uniqueIndices(
   FACE_IDX.contour,
   FACE_IDX.lips,
+  FACE_IDX.mouthHole,
   FACE_IDX.leftEye,
   FACE_IDX.rightEye,
   FACE_IDX.leftBrow,
@@ -234,6 +138,7 @@ const FACE_DENSE_INDICES = uniqueIndices(
 const FACE_DEBUG_PATHS = [
   { points: FACE_IDX.contour, closed: true },
   { points: FACE_IDX.lips, closed: true },
+  { points: FACE_IDX.mouthHole, closed: true },
   { points: FACE_IDX.leftEye, closed: true },
   { points: FACE_IDX.rightEye, closed: true },
   { points: FACE_IDX.leftBrow, closed: false },
@@ -814,9 +719,57 @@ fn worleyLite(p: vec2f) -> f32 {
   return 1.0 - clamp(d, 0.0, 1.0);
 }
 
-fn applyNoiseMirror(uvRaw: vec2f) -> vec2f {
-  let pMirror = uvRaw - SPHERE_CENTER;
-  return SPHERE_CENTER + vec2f(abs(pMirror.x), pMirror.y);
+struct SymmetryFrame {
+  uv: vec2f,
+  basisX: vec2f,
+  basisY: vec2f,
+  handedness: f32,
+};
+
+fn makeSymmetryFrame(uvRaw: vec2f) -> SymmetryFrame {
+  var frame: SymmetryFrame;
+  frame.uv = uvRaw;
+  frame.basisX = vec2f(1.0, 0.0);
+  frame.basisY = vec2f(0.0, 1.0);
+  frame.handedness = 1.0;
+
+  if (np.behavior < 0.5) {
+    return frame;
+  }
+
+  let p = uvRaw - SPHERE_CENTER;
+  if (np.behavior < 1.5) {
+    // Exact left/right mirror around the vertical axis.
+    let sx = select(-1.0, 1.0, p.x >= 0.0);
+    frame.uv = SPHERE_CENTER + vec2f(abs(p.x), p.y);
+    frame.basisX = vec2f(sx, 0.0);
+    frame.basisY = vec2f(0.0, 1.0);
+    frame.handedness = sx;
+    return frame;
+  }
+
+  // 2+: n-fold rotational symmetry by canonical wedge folding (single sample domain).
+  let folds = max(2.0, min(8.0, floor(np.behavior + 0.5)));
+  let sector = TAU / folds;
+  let theta = atan2(p.y, p.x);
+  let k = floor(theta / sector + 0.5); // nearest sector axis index
+  let rotToCanonical = -k * sector;
+
+  var q = rot2(p, rotToCanonical);
+  var reflectY = 1.0;
+  if (q.y < 0.0) {
+    q.y = -q.y;
+    reflectY = -1.0;
+  }
+  frame.uv = SPHERE_CENTER + q;
+
+  let rotBack = -rotToCanonical;
+  let c = cos(rotBack);
+  let s = sin(rotBack);
+  frame.basisX = vec2f(c, s);
+  frame.basisY = vec2f(-s * reflectY, c * reflectY);
+  frame.handedness = reflectY;
+  return frame;
 }
 
 fn applyNoiseMapping(uvRaw: vec2f, t: f32) -> vec2f {
@@ -941,30 +894,13 @@ fn scalarFieldCore(uvRaw: vec2f) -> f32 {
 }
 
 fn scalarField(uvRaw: vec2f) -> f32 {
-  if (np.behavior < 0.5) {
-    return scalarFieldCore(uvRaw);
-  }
-  if (np.behavior < 1.5) {
-    // Pure left/right reflection of the source field.
-    return scalarFieldCore(applyNoiseMirror(uvRaw));
-  }
+  let frame = makeSymmetryFrame(uvRaw);
+  return scalarFieldCore(frame.uv);
+}
 
-  // 2+: n-fold reflected rotational symmetry without wedge folding spokes.
-  let folds = i32(clamp(floor(np.behavior + 0.5), 2.0, 8.0));
-  let p = uvRaw - SPHERE_CENTER;
-  var acc = 0.0;
-  var count = 0.0;
-  var i = 0;
-  loop {
-    if (i >= folds || i >= 8) { break; }
-    let a = TAU * f32(i) / f32(folds);
-    let pr = rot2(p, a);
-    let uvFold = SPHERE_CENTER + vec2f(abs(pr.x), pr.y);
-    acc += scalarFieldCore(uvFold);
-    count += 1.0;
-    i = i + 1;
-  }
-  return acc / max(count, 1.0);
+fn uvToPixel(uv: vec2f, res: f32) -> vec2u {
+  let px = clamp(uv * res - vec2f(0.5), vec2f(0.0), vec2f(res - 1.0));
+  return vec2u(px + vec2f(0.5));
 }
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
@@ -980,25 +916,30 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   }
   let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.08, dist);
 
+  let frame = makeSymmetryFrame(uv);
   var vel = textureLoad(velSrc, id.xy, 0).xy;
+  if (np.behavior >= 0.5) {
+    let velCanonical = textureLoad(velSrc, uvToPixel(frame.uv, np.simRes), 0).xy;
+    vel = frame.basisX * velCanonical.x + frame.basisY * velCanonical.y;
+  }
   let eps = 1.0 / np.simRes;
-  let sC = scalarField(uv);
-  let sX = scalarField(uv + vec2f(eps, 0.0));
-  let sY = scalarField(uv + vec2f(0.0, eps));
-  var curl = vec2f(sY - sC, -(sX - sC)) / eps;
+  let sC = scalarFieldCore(frame.uv);
+  let sX = scalarFieldCore(frame.uv + vec2f(eps, 0.0));
+  let sY = scalarFieldCore(frame.uv + vec2f(0.0, eps));
+  var curlCanonical = vec2f(sY - sC, -(sX - sC)) / eps;
 
-  let uv2 = SPHERE_CENTER + (uv - SPHERE_CENTER) * 1.91;
-  let uv2X = SPHERE_CENTER + (uv + vec2f(eps, 0.0) - SPHERE_CENTER) * 1.91;
-  let uv2Y = SPHERE_CENTER + (uv + vec2f(0.0, eps) - SPHERE_CENTER) * 1.91;
-  let s2C = scalarField(uv2);
-  let s2X = scalarField(uv2X);
-  let s2Y = scalarField(uv2Y);
-  curl += vec2f(s2Y - s2C, -(s2X - s2C)) / eps * (0.35 + np.blend * 0.25);
+  let uv2 = SPHERE_CENTER + (frame.uv - SPHERE_CENTER) * 1.91;
+  let uv2X = SPHERE_CENTER + (frame.uv + vec2f(eps, 0.0) - SPHERE_CENTER) * 1.91;
+  let uv2Y = SPHERE_CENTER + (frame.uv + vec2f(0.0, eps) - SPHERE_CENTER) * 1.91;
+  let s2C = scalarFieldCore(uv2);
+  let s2X = scalarFieldCore(uv2X);
+  let s2Y = scalarFieldCore(uv2Y);
+  curlCanonical += vec2f(s2Y - s2C, -(s2X - s2C)) / eps * (0.35 + np.blend * 0.25);
 
-  var behaviorGain = 1.0;
-  if (np.behavior >= 2.0) { behaviorGain = 0.82; }
+  // Curl vector is a 90°-rotated gradient, so reflections require det(J)*J.
+  let curl = (frame.basisX * curlCanonical.x + frame.basisY * curlCanonical.y) * frame.handedness;
   let layerBoost = 1.0 + (np.sharpness + np.warp + np.anisotropy + np.blend) * 0.35;
-  vel += curl * np.amount * (7.0 + 2.0 * layerBoost) * edgeFade * behaviorGain;
+  vel += curl * np.amount * (7.0 + 2.0 * layerBoost) * edgeFade;
   if (dist > SPHERE_RADIUS - 0.04) {
     let normal = (uv - SPHERE_CENTER) / max(dist, 1e-5);
     let outward = dot(vel, normal);
@@ -1019,7 +960,7 @@ struct DyeNoiseParams {
   amount: f32,
   simRes: f32,
   curlDyeAmount: f32,
-  color: vec4f,
+  color: vec4f, // rgb=tint, a=noise symmetry behavior (0=none, 1=mirror, 2+=n-fold)
 };
 
 @group(0) @binding(0) var<uniform> dp: DyeNoiseParams;
@@ -1027,16 +968,59 @@ struct DyeNoiseParams {
 @group(0) @binding(2) var dyeSrc: texture_2d<f32>;
 @group(0) @binding(3) var dyeDst: texture_storage_2d<rgba16float, write>;
 
+const TAU: f32 = 6.28318530718;
 const SPHERE_CENTER = vec2f(0.5, 0.5);
 const SPHERE_RADIUS = ${SIM_SPHERE_RADIUS};
+
+fn rot2(p: vec2f, a: f32) -> vec2f {
+  let c = cos(a);
+  let s = sin(a);
+  return vec2f(c * p.x - s * p.y, s * p.x + c * p.y);
+}
+
+fn foldSymmetryUV(uvRaw: vec2f, behavior: f32) -> vec2f {
+  if (behavior < 0.5) {
+    return uvRaw;
+  }
+  let p = uvRaw - SPHERE_CENTER;
+  if (behavior < 1.5) {
+    return SPHERE_CENTER + vec2f(abs(p.x), p.y);
+  }
+
+  let folds = max(2.0, min(8.0, floor(behavior + 0.5)));
+  let sector = TAU / folds;
+  let theta = atan2(p.y, p.x);
+  let k = floor(theta / sector + 0.5);
+  var q = rot2(p, -k * sector);
+  q.y = abs(q.y);
+  return SPHERE_CENTER + q;
+}
+
+fn uvToPixel(uv: vec2f, res: f32) -> vec2u {
+  let px = clamp(uv * res - vec2f(0.5), vec2f(0.0), vec2f(res - 1.0));
+  return vec2u(px + vec2f(0.5));
+}
+
+fn sampleSymVel(uvRaw: vec2f, fallbackPx: vec2u, behavior: f32, res: f32) -> vec2f {
+  if (behavior < 0.5) {
+    return textureLoad(velSrc, fallbackPx, 0).xy;
+  }
+  return textureLoad(velSrc, uvToPixel(foldSymmetryUV(uvRaw, behavior), res), 0).xy;
+}
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
   let res = u32(dp.simRes);
   if (id.x >= res || id.y >= res) { return; }
   let uv = (vec2f(id.xy) + 0.5) / dp.simRes;
-
+  let behavior = dp.color.a;
+  let symUV = foldSymmetryUV(uv, behavior);
+  let symPx = uvToPixel(symUV, dp.simRes);
   var dye = textureLoad(dyeSrc, id.xy, 0);
+  if (behavior >= 0.5) {
+    // Project dye to a canonical symmetry domain so mirrored sectors stay locked.
+    dye = textureLoad(dyeSrc, symPx, 0);
+  }
 
   // Fade out near sphere edge to prevent bleed
   let dist = length(uv - SPHERE_CENTER);
@@ -1047,11 +1031,19 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.06, dist);
 
   // Compute velocity divergence (negative = convergent flow = density buildup)
-  let vC = textureLoad(velSrc, id.xy, 0).xy;
-  let vR = textureLoad(velSrc, vec2u(min(id.x + 1u, res - 1u), id.y), 0).xy;
-  let vL = textureLoad(velSrc, vec2u(max(id.x, 1u) - 1u, id.y), 0).xy;
-  let vU = textureLoad(velSrc, vec2u(id.x, min(id.y + 1u, res - 1u)), 0).xy;
-  let vD = textureLoad(velSrc, vec2u(id.x, max(id.y, 1u) - 1u), 0).xy;
+  let idR = vec2u(min(id.x + 1u, res - 1u), id.y);
+  let idL = vec2u(max(id.x, 1u) - 1u, id.y);
+  let idU = vec2u(id.x, min(id.y + 1u, res - 1u));
+  let idD = vec2u(id.x, max(id.y, 1u) - 1u);
+  let uvR = (vec2f(idR) + 0.5) / dp.simRes;
+  let uvL = (vec2f(idL) + 0.5) / dp.simRes;
+  let uvU = (vec2f(idU) + 0.5) / dp.simRes;
+  let uvD = (vec2f(idD) + 0.5) / dp.simRes;
+  let vC = sampleSymVel(uv, id.xy, behavior, dp.simRes);
+  let vR = sampleSymVel(uvR, idR, behavior, dp.simRes);
+  let vL = sampleSymVel(uvL, idL, behavior, dp.simRes);
+  let vU = sampleSymVel(uvU, idU, behavior, dp.simRes);
+  let vD = sampleSymVel(uvD, idD, behavior, dp.simRes);
   let div = (vR.x - vL.x + vU.y - vD.y) * 0.5;
 
   // Don't inject into already-bright areas — preserves contrast
@@ -1062,9 +1054,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     return;
   }
 
-  // Color varies spatially using velocity direction + position
-  let velAngle = atan2(vC.y, vC.x);
-  let colorPhase = velAngle * 0.5 + dp.time * 0.05 + dot(uv, vec2f(5.0, 3.0));
+  // Symmetry-safe color phase: canonical position + speed only (no signed angle terms).
+  let symP = (symUV - SPHERE_CENTER) / max(SPHERE_RADIUS, 1e-5);
+  let colorPhase = dp.time * 0.05 + dot(symP, vec2f(6.0, 3.2)) + length(vC) * 1.15;
   // Cycle through R, G, B emphasis zones for real hue variety
   let cR = 0.3 + 0.7 * max(sin(colorPhase), 0.0);
   let cG = 0.3 + 0.7 * max(sin(colorPhase + 2.094), 0.0);
@@ -1128,180 +1120,6 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
     textureStore(dyeDst, id.xy, vec4f(dye, 1.0));
   }
-}
-`;
-
-// ─── Reaction-Diffusion (Gray-Scott) Shader ─────────────────────────────────
-const reactionDiffusionShader = /* wgsl */`
-struct RDParams {
-  time: f32,
-  rdAmount: f32,
-  simRes: f32,
-  feedRate: f32,
-  killRate: f32,
-  rdDyeAmount: f32,
-  rdForceAmount: f32,
-  rdScale: f32,
-  flowCoupling: f32,
-  noiseAmount: f32,
-  noiseFrequency: f32,
-  noiseSpeed: f32,
-};
-
-@group(0) @binding(0) var<uniform> rp: RDParams;
-@group(0) @binding(1) var rdSrc: texture_2d<f32>;
-@group(0) @binding(2) var velSrc: texture_2d<f32>;
-@group(0) @binding(3) var rdDst: texture_storage_2d<rgba16float, write>;
-
-const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS: f32 = ${SIM_SPHERE_RADIUS};
-const Da: f32 = 1.0;
-const Db: f32 = 0.5;
-
-@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
-fn main(@builtin(global_invocation_id) id: vec3u) {
-  let res = u32(rp.simRes);
-  if (id.x >= res || id.y >= res) { return; }
-  let uv = (vec2f(id.xy) + 0.5) / rp.simRes;
-  let dist = length(uv - SPHERE_CENTER);
-  if (dist > SPHERE_RADIUS) {
-    textureStore(rdDst, id.xy, vec4f(1.0, 0.0, 0.0, 0.0));
-    return;
-  }
-
-  let c = textureLoad(rdSrc, id.xy, 0);
-  let vel = textureLoad(velSrc, id.xy, 0).xy;
-  let flowPx = clamp(round(vel * (0.03 + rp.noiseFrequency * 0.06)), vec2f(-3.0), vec2f(3.0));
-  let samplePos = vec2i(
-    clamp(i32(id.x) - i32(flowPx.x), 0, i32(res) - 1),
-    clamp(i32(id.y) - i32(flowPx.y), 0, i32(res) - 1)
-  );
-  let adv = textureLoad(rdSrc, vec2u(samplePos), 0);
-  let flowMix = clamp(rp.flowCoupling * (0.2 + rp.noiseAmount * 0.8), 0.0, 1.0) * 0.35;
-  let A = mix(c.r, adv.r, flowMix);
-  let B = mix(c.g, adv.g, flowMix);
-
-  // 9-point Laplacian — keep legacy presets (rdScale ~0.5) in an active, not over-diffused, range.
-  let step = u32(1.0 + floor(rp.rdScale * 3.0));
-  let cR = textureLoad(rdSrc, vec2u(min(id.x + step, res - 1u), id.y), 0);
-  let cL = textureLoad(rdSrc, vec2u(max(id.x, step) - step, id.y), 0);
-  let cU = textureLoad(rdSrc, vec2u(id.x, min(id.y + step, res - 1u)), 0);
-  let cD = textureLoad(rdSrc, vec2u(id.x, max(id.y, step) - step), 0);
-  let cUR = textureLoad(rdSrc, vec2u(min(id.x + step, res - 1u), min(id.y + step, res - 1u)), 0);
-  let cUL = textureLoad(rdSrc, vec2u(max(id.x, step) - step, min(id.y + step, res - 1u)), 0);
-  let cDR = textureLoad(rdSrc, vec2u(min(id.x + step, res - 1u), max(id.y, step) - step), 0);
-  let cDL = textureLoad(rdSrc, vec2u(max(id.x, step) - step, max(id.y, step) - step), 0);
-
-  let lapA = (cR.r + cL.r + cU.r + cD.r) * 0.2 + (cUR.r + cUL.r + cDR.r + cDL.r) * 0.05 - A;
-  let lapB = (cR.g + cL.g + cU.g + cD.g) * 0.2 + (cUR.g + cUL.g + cDR.g + cDL.g) * 0.05 - B;
-
-  // Slow autonomous drift keeps the pattern morphing even without direct user splats.
-  let t = rp.time * (0.16 + rp.noiseSpeed * 0.4);
-  let waveA = sin(dot(uv, vec2f(9.0 + rp.noiseFrequency * 10.0, 7.0 + rp.noiseFrequency * 8.0)) + t);
-  let waveB = cos(dot(uv, vec2f(6.0 + rp.noiseFrequency * 8.0, 11.0 + rp.noiseFrequency * 9.0)) - t * 0.8);
-  let drift = 0.0025 * rp.rdAmount * (0.3 + rp.noiseAmount * 0.7);
-  let f = clamp(rp.feedRate + waveA * drift, 0.005, 0.09);
-  let k = clamp(rp.killRate + waveB * drift * 0.8, 0.02, 0.085);
-  let ABB = A * B * B;
-  let dt = 0.22 + rp.rdAmount * 0.58;
-  var newA = A + (Da * lapA - ABB + f * (1.0 - A)) * dt;
-  var newB = B + (Db * lapB + ABB - (f + k) * B) * dt;
-
-  // Autonomous + flow-driven nucleation: prevents dead-lock at uniform A=1/B=0 and lets clicks/noise kick RD alive.
-  let velMag = length(vel);
-  let nucWave = max(0.0, sin(dot(uv, vec2f(57.0, 41.0)) + t * 1.7));
-  let baseNucleation = (0.00025 + rp.noiseAmount * 0.00085) * rp.rdAmount;
-  let flowNucleation = min(0.018, velMag * 0.00018 * (0.3 + rp.flowCoupling * 0.7));
-  let seed = (baseNucleation * nucWave + flowNucleation) * (1.0 - B) * max(A, 0.0);
-  newB += seed;
-  newA -= seed * 0.58;
-
-  textureStore(rdDst, id.xy, vec4f(clamp(newA, 0.0, 1.0), clamp(newB, 0.0, 1.0), 0.0, 0.0));
-}
-`;
-
-// ─── RD Coupling Shader (injects dye + velocity from RD field) ──────────────
-const rdCouplingShader = /* wgsl */`
-struct RDParams {
-  time: f32,
-  rdAmount: f32,
-  simRes: f32,
-  feedRate: f32,
-  killRate: f32,
-  rdDyeAmount: f32,
-  rdForceAmount: f32,
-  rdScale: f32,
-  flowCoupling: f32,
-  noiseAmount: f32,
-  noiseFrequency: f32,
-  noiseSpeed: f32,
-};
-
-@group(0) @binding(0) var<uniform> rp: RDParams;
-@group(0) @binding(1) var rdSrc: texture_2d<f32>;
-@group(0) @binding(2) var dyeSrc: texture_2d<f32>;
-@group(0) @binding(3) var velSrc: texture_2d<f32>;
-@group(0) @binding(4) var dyeDst: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(5) var velDst: texture_storage_2d<rgba16float, write>;
-
-const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS: f32 = ${SIM_SPHERE_RADIUS};
-
-@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
-fn main(@builtin(global_invocation_id) id: vec3u) {
-  let res = u32(rp.simRes);
-  if (id.x >= res || id.y >= res) { return; }
-  let uv = (vec2f(id.xy) + 0.5) / rp.simRes;
-  let dist = length(uv - SPHERE_CENTER);
-
-  var dye = textureLoad(dyeSrc, id.xy, 0);
-  var vel = textureLoad(velSrc, id.xy, 0).xy;
-
-  if (dist > SPHERE_RADIUS) {
-    textureStore(dyeDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
-    textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
-    return;
-  }
-
-  let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.06, dist);
-  let rd = textureLoad(rdSrc, id.xy, 0);
-  let B = rd.g;
-
-  // Inject dye proportional to chemical B
-  let existingBrightness = max(dye.r, max(dye.g, dye.b));
-  let headroom = max(1.0 - existingBrightness, 0.0);
-
-  // Color varies spatially (same pattern as dyeNoiseShader)
-  let velAngle = atan2(vel.y, vel.x);
-  let colorPhase = velAngle * 0.5 + rp.time * 0.05 + dot(uv, vec2f(5.0, 3.0));
-  let cR = 0.3 + 0.7 * max(sin(colorPhase), 0.0);
-  let cG = 0.3 + 0.7 * max(sin(colorPhase + 2.094), 0.0);
-  let cB = 0.3 + 0.7 * max(sin(colorPhase + 4.189), 0.0);
-  let spatialColor = vec3f(cR, cG, cB);
-
-  let activeB = smoothstep(0.03, 0.45, B);
-  let dyeInject = activeB * rp.rdDyeAmount * 1.35 * edgeFade * headroom;
-  dye += vec4f(spatialColor * dyeInject, 0.0);
-
-  // Add force from RD gradient
-  let rdR = textureLoad(rdSrc, vec2u(min(id.x + 1u, res - 1u), id.y), 0).g;
-  let rdL = textureLoad(rdSrc, vec2u(max(id.x, 1u) - 1u, id.y), 0).g;
-  let rdU = textureLoad(rdSrc, vec2u(id.x, min(id.y + 1u, res - 1u)), 0).g;
-  let rdD = textureLoad(rdSrc, vec2u(id.x, max(id.y, 1u) - 1u), 0).g;
-  let grad = vec2f(rdR - rdL, rdU - rdD) * 0.5;
-  vel += grad * rp.rdForceAmount * 90.0 * edgeFade;
-  if (dist > SPHERE_RADIUS - 0.04) {
-    let normal = (uv - SPHERE_CENTER) / max(dist, 1e-5);
-    let outward = dot(vel, normal);
-    if (outward > 0.0) {
-      vel -= normal * outward;
-    }
-    let wallT = clamp((dist - (SPHERE_RADIUS - 0.04)) / 0.04, 0.0, 1.0);
-    vel *= mix(1.0, 0.78, wallT);
-  }
-
-  textureStore(dyeDst, id.xy, dye);
-  textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
 }
 `;
 
@@ -1436,53 +1254,6 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 `;
 
-const rdSplatShader = /* wgsl */`
-${commonHeader}
-
-struct Splat {
-  x: f32, y: f32, dx: f32, dy: f32,
-  r: f32, g: f32, b: f32, radius: f32,
-};
-
-@group(0) @binding(1) var rdSrc: texture_2d<f32>;
-@group(0) @binding(2) var rdDst: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(3) var<storage, read> splats: array<Splat>;
-@group(0) @binding(4) var<uniform> splatMeta: vec4u;
-
-@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
-fn main(@builtin(global_invocation_id) id: vec3u) {
-  let res = u32(p.simRes);
-  if (id.x >= res || id.y >= res) { return; }
-  let uv = (vec2f(id.xy) + 0.5) / p.simRes;
-  let toCenter = uv - SPHERE_CENTER;
-  let dist = length(toCenter);
-  if (dist > SPHERE_RADIUS) {
-    textureStore(rdDst, id.xy, vec4f(1.0, 0.0, 0.0, 0.0));
-    return;
-  }
-  let boundaryFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.06, dist);
-  var rd = textureLoad(rdSrc, id.xy, 0);
-  var A = rd.r;
-  var B = rd.g;
-  var seed = 0.0;
-  let count = min(splatMeta.x, ${MAX_SPLATS}u);
-  for (var i = 0u; i < count; i++) {
-    let s = splats[i];
-    let rad = max(s.radius, 0.00005);
-    let diff = uv - vec2f(s.x, s.y);
-    let dist2 = dot(diff, diff);
-    let strength = exp(-dist2 / (2.0 * rad * rad));
-    let velStim = clamp(length(vec2f(s.dx, s.dy)) * 0.002, 0.0, 1.0);
-    let dyeStim = clamp((s.r + s.g + s.b) * 0.2, 0.0, 1.0);
-    seed += strength * max(velStim, dyeStim);
-  }
-  let seedAmt = min(seed * boundaryFade * 0.08, 0.25);
-  B = clamp(B + seedAmt, 0.0, 1.0);
-  A = clamp(A - seedAmt * 0.55, 0.0, 1.0);
-  textureStore(rdDst, id.xy, vec4f(A, B, 0.0, 0.0));
-}
-`;
-
 // ─── Particle Compact Shader (GPU indirect draw — builds visible index list) ──
 function makeParticleCompactShader(count) {
   return /* wgsl */`
@@ -1597,19 +1368,6 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   // Sample velocity at particle position
   var vel = textureSampleLevel(velTex, samp, vec2f(part.posX, part.posY), 0.0).xy;
 
-  // ── Glass marble velocity fix (commented out) ─────────────────────────
-  // var vel = ... (use var instead of let above to enable this)
-  // let pToC = vec2f(part.posX, part.posY) - SPHERE_CENTER;
-  // let pDst = length(pToC);
-  // if (pDst > SPHERE_RADIUS - 0.08) {
-  //   let pN = pToC / max(pDst, 0.001);
-  //   let radial = dot(vel, pN);
-  //   if (radial < 0.0) {
-  //     let prox = smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS, pDst);
-  //     vel -= pN * radial * prox;
-  //   }
-  // }
-  // ─────────────────────────────────────────────────────────────────────
 
   // Advect particle with fluid
   let dt = p.dt;
@@ -1721,16 +1479,6 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     colors[idx] = vec4f(0.0);
     return;
   }
-
-  // ── Glass marble dye warp + rimOverride (commented out) ───────────────
-  // let pNorm = centered / 0.43;
-  // let pR = min(length(pNorm), 0.999);
-  // let pZ = sqrt(max(1.0 - pR * pR, 0.0));
-  // let warpedPUV = particleUV - centered * (1.0 - pZ) * 0.3;
-  // let dye = textureSampleLevel(dyeTex, samp, warpedPUV, 0.0).rgb;
-  // let rimOverride = smoothstep(0.28, 0.43, pDist);
-  // let fluidGate = max(smoothstep(0.0, 0.15, intensity), rimOverride);
-  // ─────────────────────────────────────────────────────────────────────
 
   let dye = textureSampleLevel(dyeTex, samp, particleUV, 0.0).rgb;
   let intensity = dot(dye, vec3f(0.3, 0.6, 0.1));
@@ -1861,16 +1609,6 @@ fn main(
   let aspect = screenSize.x / screenSize.y;
   let clipSize = vec2f(pixelSize * 2.0 / screenSize.x, pixelSize * 2.0 / screenSize.y);
 
-  // ── Glass marble inverse warp (commented out) ─────────────────────────
-  // let pCen = vec2f(part.posX, part.posY) - vec2f(0.5, 0.5);
-  // let pDistN = min(length(pCen) / 0.43, 0.999);
-  // let pZV = sqrt(max(1.0 - pDistN * pDistN, 0.0));
-  // var warpedXY = vec2f(part.posX, part.posY) + pCen * (1.0 - pZV) * 0.3;
-  // let wCen = warpedXY - vec2f(0.5, 0.5);
-  // let wDist = length(wCen);
-  // if (wDist > 0.43) { warpedXY = vec2f(0.5, 0.5) + wCen / wDist * 0.43; }
-  // let rawClip = warpedXY * 2.0 - 1.0;
-  // ─────────────────────────────────────────────────────────────────────
 
   let rawClip = vec2f(part.posX, part.posY) * 2.0 - 1.0;
   let clipPos = vec2f(
@@ -2092,7 +1830,7 @@ struct DisplayUniforms {
   accentColor: vec4f, // xyz=accentColor RGB, w=colorBlend
   sheenColor: vec4f,  // xyz=sheenColor RGB, w=metallic
   tipColor: vec4f,    // xyz=tipColor RGB, w=roughness
-  depth: vec4f,       // x=depthAmount, y=depthSpeed, z=pad, w=pad
+  _pad1: vec4f,
 };
 @group(0) @binding(2) var<uniform> du: DisplayUniforms;
 
@@ -2137,27 +1875,6 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     return vec4f(0.0, 0.0, 0.0, 1.0);
   }
 
-  // ── Glass marble (commented out) ──────────────────────────────────────
-  // let normPos = centered / screenRadius;
-  // let r = min(length(normPos), 0.999);
-  // let z = sqrt(max(1.0 - r * r, 0.0));
-  // let distortAmount = 0.3;
-  // let warpedUV = uv - centered * (1.0 - z) * distortAmount;
-  // let refractDir = normPos * (1.0 - z);
-  // let chromaticStrength = du.baseColor.w;
-  // let iorR = 0.01 * chromaticStrength;
-  // let iorG = 0.025 * chromaticStrength;
-  // let iorB = 0.04 * chromaticStrength;
-  // let uvR = warpedUV + refractDir * iorR;
-  // let uvG = warpedUV + refractDir * iorG;
-  // let uvB = warpedUV + refractDir * iorB;
-  // let raw = vec3f(
-  //   textureSampleLevel(dyeTex, samp, uvR, 0.0).r,
-  //   textureSampleLevel(dyeTex, samp, uvG, 0.0).g,
-  //   textureSampleLevel(dyeTex, samp, uvB, 0.0).b
-  // );
-  // ─────────────────────────────────────────────────────────────────────
-
   // Sample fluid dye
   let raw = textureSampleLevel(dyeTex, samp, uv, 0.0).rgb;
   let intensity = dot(raw, vec3f(0.3, 0.6, 0.1));
@@ -2176,12 +1893,6 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let fluidCol = oklabToLinear(mix(mix(okAccent, okBase, t2), okTip, t3));
   var color = fluidCol * intensity * ${hdr ? '0.5' : '0.25'};
 
-  // ── Glass marble depth darkening (commented out) ──────────────────────
-  // let pathLength = 2.0 * z;
-  // let absorptionColor = vec3f(0.04, 0.06, 0.02);
-  // color *= exp(-absorptionColor * pathLength * 2.0);
-  // ─────────────────────────────────────────────────────────────────────
-
   // Surface gradient for multi-lobe metallic sheen (clamp samples to sphere)
   let texel = vec2f(1.0 / 512.0);
   let uvL = uv - vec2f(texel.x * 2.0, 0.0);
@@ -2197,7 +1908,11 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let grad = vec2f(iR - iL, iT - iB);
   let gradLen = length(grad);
   let sheenDir = normalize(vec2f(0.4, 0.6));
-  let spec = max(dot(normalize(grad + vec2f(0.001)), sheenDir), 0.0);
+  var spec = max(dot(normalize(grad + vec2f(0.001)), sheenDir), 0.0);
+  if (du._pad1.x >= 0.5) {
+    // Keep symmetry modes visually symmetric by removing directional bias.
+    spec = smoothstep(0.002, 0.08, gradLen);
+  }
 
   // Material properties
   let metallic = du.sheenColor.w;
@@ -2229,18 +1944,6 @@ ${hdr ? '  // HDR: browser expects linear values, handles transfer function' : `
 }
 
 // ─── Glass Shell Fragment Shader (commented out) ────────────────────────────
-// const glassShellFrag = /* wgsl */`
-// struct GlassUniforms {
-//   screen: vec4f,
-//   params: vec4f,
-// };
-// @group(0) @binding(0) var<uniform> gu: GlassUniforms;
-// @fragment fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-//   ... Fresnel rim, specular highlight, caustic ring, env reflection ...
-//   See git history for full implementation.
-// }
-// `;
-
 // ─── GPU Particle Init Shader ────────────────────────────────────────────────
 function makeParticleInitShader(count) {
   return /* wgsl */`
@@ -3077,8 +2780,6 @@ async function main() {
   const divTex = makeTex('divergence');
   let dyeA = makeTex('dyeA'), dyeB = makeTex('dyeB');
   const curlTex = makeTex('curl');
-  let rdA = ENABLE_REACTION_DIFFUSION ? makeTex('rdA') : null;
-  let rdB = ENABLE_REACTION_DIFFUSION ? makeTex('rdB') : null;
   let tempA = makeTex('tempA'), tempB = makeTex('tempB');
 
   const linearSampler = device.createSampler({
@@ -3127,7 +2828,7 @@ async function main() {
   });
   const particleUBData = new Float32Array(16);
 
-  // displayUB: [width, height, time, sheenStrength, baseR, baseG, baseB, pad, accentR, accentG, accentB, colorBlend, sheenR, sheenG, sheenB, pad, tipR, tipG, tipB, pad]
+  // displayUB: [width, height, time, sheenStrength, baseR, baseG, baseB, pad, accentR, accentG, accentB, colorBlend, sheenR, sheenG, sheenB, pad, tipR, tipG, tipB, pad, symmetryBehavior, pad, pad, pad]
   const displayUB = device.createBuffer({
     size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
@@ -3264,7 +2965,7 @@ async function main() {
   const dyeNoiseBuf = device.createBuffer({
     size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const dyeNoiseData = new Float32Array(8); // [time, amount, simRes, pad, r, g, b, a]
+  const dyeNoiseData = new Float32Array(8); // [time, amount, simRes, curlDyeAmount, r, g, b, symmetryBehavior]
 
   // ─── Sphere Cleanup pipeline (hard-zero outside sphere every frame) ─────
   const cleanupBGL = device.createBindGroupLayout({
@@ -3288,42 +2989,6 @@ async function main() {
   });
   const cleanupData = new Float32Array([SIM_RES, 0, 0, 0]);
   device.queue.writeBuffer(cleanupBuf, 0, cleanupData);
-
-  // ─── Reaction-Diffusion pipeline (disabled) ───────────────────────────────
-  let rdPipe = null;
-  let rdBuf = null;
-  let rdData = null;
-  let rdCouplingBGL = null;
-  let rdCouplingPipeline = null;
-  if (ENABLE_REACTION_DIFFUSION) {
-    rdPipe = buildPipeline(reactionDiffusionShader, 'reactionDiffusion',
-      ['uniform', 'texture', 'texture', 'storage']);
-
-    rdBuf = device.createBuffer({
-      size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-    });
-    rdData = new Float32Array(12); // [time, rdAmount, simRes, feedRate, killRate, rdDyeAmount, rdForceAmount, rdScale, flowCoupling, noiseAmount, noiseFrequency, noiseSpeed]
-
-    // RD Coupling pipeline: uniform, texture(rd), texture(dye), texture(vel), storage(dyeDst), storage(velDst)
-    rdCouplingBGL = device.createBindGroupLayout({
-      label: 'rdCoupling_bgl',
-      entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-        { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
-        { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
-        { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
-        { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
-        { binding: 5, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
-      ],
-    });
-    const rdCouplingModule = device.createShaderModule({ code: rdCouplingShader, label: 'rdCoupling' });
-    checkShader(rdCouplingModule, 'rdCoupling');
-    rdCouplingPipeline = device.createComputePipeline({
-      label: 'rdCoupling',
-      layout: device.createPipelineLayout({ bindGroupLayouts: [rdCouplingBGL] }),
-      compute: { module: rdCouplingModule, entryPoint: 'main' },
-    });
-  }
 
   // ─── Temperature/Buoyancy pipelines ─────────────────────────────────────
   // Temperature advect: custom BGL (uniform, texture(vel), texture(temp), sampler, storage(tempDst))
@@ -3353,17 +3018,6 @@ async function main() {
     compute: { module: tempSplatModule, entryPoint: 'main' },
   });
 
-  let rdSplatPipe = null;
-  if (ENABLE_REACTION_DIFFUSION) {
-    const rdSplatModule = device.createShaderModule({ code: rdSplatShader, label: 'rdSplat' });
-    checkShader(rdSplatModule, 'rdSplat');
-    rdSplatPipe = device.createComputePipeline({
-      label: 'rdSplat',
-      layout: batchSplatLayout,
-      compute: { module: rdSplatModule, entryPoint: 'main' },
-    });
-  }
-
   // ─── Display render pipeline ────────────────────────────────────────────
   const displayBGL = device.createBindGroupLayout({
     entries: [
@@ -3386,15 +3040,6 @@ async function main() {
     },
     primitive: { topology: 'triangle-list' },
   });
-
-  // ─── Glass Shell render pipeline (commented out) ───────────────────────
-  // const glassUB = device.createBuffer({
-  //   size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  // });
-  // const glassUBData = new Float32Array(8);
-  // const glassShellBGL = device.createBindGroupLayout({ ... });
-  // const glassShellPipeline = device.createRenderPipeline({ ... });
-  // See git history for full glass shell pipeline setup.
 
   // ─── Bloom Pipelines ──────────────────────────────────────────────────────
   const BLOOM_MIPS = 5;
@@ -3783,61 +3428,6 @@ async function main() {
   const pressTexs = [pressA, pressB];
   const tempTexs = [tempA, tempB];
 
-  // ─── RD Texture Initialization (A=1, B=0 everywhere, seed B patches) ───
-  if (ENABLE_REACTION_DIFFUSION) {
-    const pixels = new Float32Array(SIM_RES * SIM_RES * 4);
-    for (let i = 0; i < SIM_RES * SIM_RES; i++) {
-      pixels[i * 4] = 1.0;     // A = 1.0
-      pixels[i * 4 + 1] = 0.0; // B = 0.0
-      pixels[i * 4 + 2] = 0.0;
-      pixels[i * 4 + 3] = 0.0;
-    }
-    // Seed random B patches — large enough for RD to nucleate
-    for (let s = 0; s < 30; s++) {
-      const cx = Math.floor(SIM_RES * 0.5 + (Math.random() - 0.5) * SIM_RES * 0.4);
-      const cy = Math.floor(SIM_RES * 0.5 + (Math.random() - 0.5) * SIM_RES * 0.4);
-      const r = 5 + Math.floor(Math.random() * 10);
-      for (let dy = -r; dy <= r; dy++) {
-        for (let dx = -r; dx <= r; dx++) {
-          const px = cx + dx, py = cy + dy;
-          if (px < 0 || px >= SIM_RES || py < 0 || py >= SIM_RES) continue;
-          if (dx * dx + dy * dy > r * r) continue;
-          const idx = (py * SIM_RES + px) * 4;
-          pixels[idx] = 0.5;      // A reduced
-          pixels[idx + 1] = 0.25; // B seeded
-        }
-      }
-    }
-    // Convert to float16 for rgba16float texture
-    const u16 = new Uint16Array(SIM_RES * SIM_RES * 4);
-    for (let i = 0; i < pixels.length; i++) {
-      // Float32 to Float16 conversion
-      const f = pixels[i];
-      const view = new DataView(new ArrayBuffer(4));
-      view.setFloat32(0, f);
-      const bits = view.getUint32(0);
-      const sign = (bits >> 16) & 0x8000;
-      const exp = ((bits >> 23) & 0xFF) - 127 + 15;
-      const mant = (bits >> 13) & 0x3FF;
-      if (exp <= 0) u16[i] = sign;
-      else if (exp >= 31) u16[i] = sign | 0x7C00;
-      else u16[i] = sign | (exp << 10) | mant;
-    }
-    device.queue.writeTexture(
-      { texture: rdA },
-      u16.buffer,
-      { bytesPerRow: SIM_RES * 8, rowsPerImage: SIM_RES },
-      { width: SIM_RES, height: SIM_RES }
-    );
-    // Copy same init to rdB
-    device.queue.writeTexture(
-      { texture: rdB },
-      u16.buffer,
-      { bytesPerRow: SIM_RES * 8, rowsPerImage: SIM_RES },
-      { width: SIM_RES, height: SIM_RES }
-    );
-  }
-
   // ─── Temperature texture init (0.5 = ambient everywhere) ──────────────
   {
     const pixels = new Float32Array(SIM_RES * SIM_RES * 4);
@@ -3956,27 +3546,6 @@ async function main() {
     [bg(cleanupBGL, [ubuf(cleanupBuf), tview(velB), tview(dyeA), tview(velA), tview(dyeB)]),
      bg(cleanupBGL, [ubuf(cleanupBuf), tview(velB), tview(dyeB), tview(velA), tview(dyeA)])],
   ];
-  // RD is temporarily disabled; keep bind-group slots null to avoid resource creation.
-  const rdStepBGs = ENABLE_REACTION_DIFFUSION ? [
-    [bg(rdPipe.layout, [ubuf(rdBuf), tview(rdA), tview(velA), tview(rdB)]),
-     bg(rdPipe.layout, [ubuf(rdBuf), tview(rdA), tview(velB), tview(rdB)])],
-    [bg(rdPipe.layout, [ubuf(rdBuf), tview(rdB), tview(velA), tview(rdA)]),
-     bg(rdPipe.layout, [ubuf(rdBuf), tview(rdB), tview(velB), tview(rdA)])],
-  ] : null;
-  const rdSplatBGs = ENABLE_REACTION_DIFFUSION ? [
-    bg(batchSplatBGL, [ubuf(paramBuf), tview(rdA), tview(rdB), ubuf(splatBuf), ubuf(splatCountBuf)]),
-    bg(batchSplatBGL, [ubuf(paramBuf), tview(rdB), tview(rdA), ubuf(splatBuf), ubuf(splatCountBuf)]),
-  ] : null;
-  const rdCouplingBGs = ENABLE_REACTION_DIFFUSION ? [
-    [[bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdA), tview(dyeA), tview(velA), tview(dyeB), tview(velB)]),
-      bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdA), tview(dyeB), tview(velA), tview(dyeA), tview(velB)])],
-     [bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdA), tview(dyeA), tview(velB), tview(dyeB), tview(velA)]),
-      bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdA), tview(dyeB), tview(velB), tview(dyeA), tview(velA)])]],
-    [[bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdB), tview(dyeA), tview(velA), tview(dyeB), tview(velB)]),
-      bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdB), tview(dyeB), tview(velA), tview(dyeA), tview(velB)])],
-     [bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdB), tview(dyeA), tview(velB), tview(dyeB), tview(velA)]),
-      bg(rdCouplingBGL, [ubuf(rdBuf), tview(rdB), tview(dyeB), tview(velB), tview(dyeA), tview(velA)])]],
-  ] : null;
   // ─── Temperature/Buoyancy bind groups ──────────────────────────────────
   // tempSplat: uses batchSplatBGL (uniform, texture, storage-tex, storage-buf, uniform)
   const tempSplatBGs = [
@@ -4012,9 +3581,9 @@ async function main() {
     ];
   }
   let particleUpdateBGs = makeParticleUpdateBGs(particleBuf, colorBuf);
-  // const glassShellBG = bg(glassShellBGL, [ubuf(glassUB)]); // glass marble
 
   let splatCount = 0;
+  let frameTimeScale = 1.0;
   function addSplat(x, y, dx, dy, r, g, b, radius) {
     // Containment at source: clamp splat center and remove outward force near wall.
     const WALL_R = SIM_SPHERE_RADIUS;
@@ -4044,6 +3613,13 @@ async function main() {
       dy *= damp;
     }
 
+    // Master-speed scaling for impulse-style effectors so slowdown is uniform.
+    dx *= frameTimeScale;
+    dy *= frameTimeScale;
+    r *= frameTimeScale;
+    g *= frameTimeScale;
+    b *= frameTimeScale;
+
     if (splatCount >= MAX_SPLATS) return;
     const off = splatCount * 8;
     splatArrayData[off]     = x;
@@ -4069,9 +3645,12 @@ async function main() {
     enabled: false,
     ready: false,
     initializing: false,
+    startToken: 0,
+    engine: 'worker',
     worker: null,
     stream: null,
     video: null,
+    mainLandmarker: null,
     frameInFlight: false,
     frameInFlightSince: 0,
     frameEveryMs: 1000 / 45,
@@ -4080,8 +3659,20 @@ async function main() {
     face: null,
     rawLandmarks: null,
     rawLandmarkCount: 0,
+    blendshapeScores: null,
+    blendshapeCount: 0,
+    transformMatrix: null,
+    matrixMotion: 0,
+    poseRoll: 0,
+    poseScale: 1,
     prevMapped: null,
+    prevCenterX: NaN,
+    prevCenterY: NaN,
+    centerVelX: 0,
+    centerVelY: 0,
     smoothedMouth: 0,
+    smoothedEyeLeft: 1,
+    smoothedEyeRight: 1,
     prevMouth: 0,
     lastFaceSeenAt: -1,
     noFaceGraceMs: 1200,
@@ -4089,12 +3680,80 @@ async function main() {
     droppedFrames: 0,
     errorStreak: 0,
     inferenceMs: 0,
+    initWatchdog: 0,
+    mainFallbackAttempted: false,
   };
 
   function setFaceStatus(text, error = false) {
     if (!faceTrackingStatusEl) return;
     faceTrackingStatusEl.textContent = text;
     faceTrackingStatusEl.style.color = error ? '#cc6666' : '#666';
+  }
+
+  function syncFaceTrackingToggleButton() {
+    if (!faceTrackingToggleBtn) return;
+    if (faceTracking.initializing) {
+      faceTrackingToggleBtn.textContent = 'Starting webcam...';
+      faceTrackingToggleBtn.classList.add('active');
+      faceTrackingToggleBtn.disabled = true;
+      return;
+    }
+    faceTrackingToggleBtn.disabled = false;
+    if (faceTracking.enabled) {
+      faceTrackingToggleBtn.textContent = 'Stop Webcam Face Tracking';
+      faceTrackingToggleBtn.classList.add('active');
+    } else {
+      faceTrackingToggleBtn.textContent = 'Start Webcam Face Tracking';
+      faceTrackingToggleBtn.classList.remove('active');
+    }
+  }
+
+  function normalizeBlendshapePayload(raw) {
+    if (!raw) return null;
+    const out = Object.create(null);
+    let used = 0;
+    for (const key of FACE_BLENDSHAPE_KEYS) {
+      const v = Number(raw[key]);
+      if (!Number.isFinite(v)) continue;
+      out[key] = Math.max(0, Math.min(1, v));
+      used++;
+    }
+    return used > 0 ? out : null;
+  }
+
+  function parseBlendshapeFromResult(res) {
+    const categories = res?.faceBlendshapes?.[0]?.categories;
+    if (!categories?.length) return { scores: null, count: 0 };
+    const bag = Object.create(null);
+    for (const cat of categories) {
+      if (!cat?.categoryName) continue;
+      bag[cat.categoryName] = cat.score;
+    }
+    return { scores: normalizeBlendshapePayload(bag), count: categories.length };
+  }
+
+  function parseMatrixPayload(raw) {
+    if (!raw) return null;
+    const src = Array.isArray(raw)
+      ? raw
+      : (raw.data || raw.matrix || raw.values || raw);
+    if (!src || typeof src.length !== 'number' || src.length < 16) return null;
+    const mat = new Float32Array(16);
+    for (let i = 0; i < 16; i++) {
+      const v = Number(src[i]);
+      mat[i] = Number.isFinite(v) ? v : 0;
+    }
+    return mat;
+  }
+
+  function parseMatrixFromResult(res) {
+    return parseMatrixPayload(res?.facialTransformationMatrixes?.[0] || null);
+  }
+
+  function blendScore(blend, key, fallback = 0) {
+    if (!blend) return fallback;
+    const v = blend[key];
+    return Number.isFinite(v) ? v : fallback;
   }
 
   function syncFaceDebugCanvasSize() {
@@ -4219,6 +3878,12 @@ async function main() {
     }
 
     const face = faceTracking.face;
+    const blend = faceTracking.blendshapeScores;
+    const streamLabel = `L${faceTracking.rawLandmarkCount || 0}  B${faceTracking.blendshapeCount || 0}  M${faceTracking.transformMatrix ? 16 : 0}`;
+    ctx2d.fillStyle = 'rgba(255,255,255,0.82)';
+    ctx2d.font = '11px system-ui, sans-serif';
+    ctx2d.fillText(streamLabel, 18, vh - 42);
+
     if (!face) {
       const age = faceTracking.lastFaceSeenAt > 0 ? nowMs - faceTracking.lastFaceSeenAt : Infinity;
       ctx2d.fillStyle = age < faceTracking.noFaceGraceMs ? 'rgba(255,220,120,0.9)' : 'rgba(255,80,80,0.9)';
@@ -4226,6 +3891,38 @@ async function main() {
       ctx2d.fillText(age < faceTracking.noFaceGraceMs ? 'Tracking hold...' : 'Searching for face...', 18, vh - 22);
       return;
     }
+
+    const traceLoop = (indices) => {
+      let started = false;
+      let firstX = 0;
+      let firstY = 0;
+      ctx2d.beginPath();
+      for (const idx of indices) {
+        if (idx >= face.count) continue;
+        const [sx, sy] = simUVToScreen(face.mapped[idx * 2], face.mapped[idx * 2 + 1]);
+        if (!started) {
+          ctx2d.moveTo(sx, sy);
+          firstX = sx;
+          firstY = sy;
+          started = true;
+        } else {
+          ctx2d.lineTo(sx, sy);
+        }
+      }
+      if (started) ctx2d.lineTo(firstX, firstY);
+      return started;
+    };
+
+    // Filled face silhouette with carved eye/mouth holes (debug only).
+    ctx2d.save();
+    ctx2d.fillStyle = 'rgba(70,180,255,0.12)';
+    if (traceLoop(FACE_IDX.contour)) ctx2d.fill();
+    ctx2d.globalCompositeOperation = 'destination-out';
+    ctx2d.fillStyle = 'rgba(0,0,0,1)';
+    if (traceLoop(FACE_IDX.leftEye)) ctx2d.fill();
+    if (traceLoop(FACE_IDX.rightEye)) ctx2d.fill();
+    if (traceLoop(FACE_IDX.mouthHole)) ctx2d.fill();
+    ctx2d.restore();
 
     const sample = [];
     for (let i = 0; i < FACE_DENSE_INDICES.length; i += 2) sample.push(FACE_DENSE_INDICES[i]);
@@ -4248,7 +3945,7 @@ async function main() {
     ctx2d.stroke();
 
     // Structural loops for a clear, readable mesh.
-    ctx2d.strokeStyle = 'rgba(255, 190, 70, 0.72)';
+    ctx2d.strokeStyle = 'rgba(255, 190, 70, 0.82)';
     ctx2d.lineWidth = 1.3;
     for (const path of FACE_DEBUG_PATHS) {
       let started = false;
@@ -4271,13 +3968,33 @@ async function main() {
     }
 
     // Key points.
-    ctx2d.fillStyle = 'rgba(255,255,255,0.88)';
-    for (let i = 0; i < FACE_DENSE_INDICES.length; i += 2) {
+    ctx2d.fillStyle = 'rgba(255,255,255,0.84)';
+    for (let i = 0; i < FACE_DENSE_INDICES.length; i += 1) {
       const idx = FACE_DENSE_INDICES[i];
       if (idx >= face.count) continue;
       const [sx, sy] = simUVToScreen(face.mapped[idx * 2], face.mapped[idx * 2 + 1]);
       ctx2d.fillRect(sx - 1, sy - 1, 2, 2);
     }
+
+    // Pose axes from the facial transformation matrix.
+    const [cx2, cy2] = simUVToScreen(face.centerX, face.centerY);
+    const axisLen = Math.max(14, Math.min(56, boundaryR * (face.radius / Math.max(SIM_SPHERE_RADIUS, 1e-6)) * 0.55));
+    const roll = Number.isFinite(face.roll) ? face.roll : (faceTracking.poseRoll || 0);
+    const axX = Math.cos(roll);
+    const axY = Math.sin(roll);
+    const ayX = -axY;
+    const ayY = axX;
+    ctx2d.lineWidth = 2;
+    ctx2d.strokeStyle = 'rgba(255,100,100,0.95)';
+    ctx2d.beginPath();
+    ctx2d.moveTo(cx2, cy2);
+    ctx2d.lineTo(cx2 + axX * axisLen, cy2 + axY * axisLen);
+    ctx2d.stroke();
+    ctx2d.strokeStyle = 'rgba(100,255,140,0.95)';
+    ctx2d.beginPath();
+    ctx2d.moveTo(cx2, cy2);
+    ctx2d.lineTo(cx2 + ayX * axisLen, cy2 + ayY * axisLen);
+    ctx2d.stroke();
 
     // Mouth center highlight.
     const [mx, my] = simUVToScreen(face.mouthCenterX, face.mouthCenterY);
@@ -4286,6 +4003,13 @@ async function main() {
     ctx2d.beginPath();
     ctx2d.arc(mx, my, 8 + face.mouthOpen * 10, 0, Math.PI * 2);
     ctx2d.stroke();
+
+    const jaw = blendScore(blend, 'jawOpen', face.mouthOpen);
+    const blinkL = blendScore(blend, 'eyeBlinkLeft', 1 - (face.eyeLeftOpen ?? 0.5));
+    const blinkR = blendScore(blend, 'eyeBlinkRight', 1 - (face.eyeRightOpen ?? 0.5));
+    ctx2d.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx2d.font = '11px system-ui, sans-serif';
+    ctx2d.fillText(`jaw ${jaw.toFixed(2)}  blinkL ${blinkL.toFixed(2)}  blinkR ${blinkR.toFixed(2)}  motion ${faceTracking.matrixMotion.toFixed(3)}`, 18, vh - 8);
   }
 
   if (faceDebugCanvas) {
@@ -4309,7 +4033,7 @@ async function main() {
     return [landmarks[off], landmarks[off + 1], landmarks[off + 2]];
   }
 
-  function mapFaceLandmarksToSim(rawLandmarks) {
+  function mapFaceLandmarksToSim(rawLandmarks, blendScores = null) {
     const count = Math.floor(rawLandmarks.length / 3);
     if (count < 200) return null;
 
@@ -4320,6 +4044,8 @@ async function main() {
     const cheekR = getRawLandmark(rawLandmarks, count, 454);
     const brow = getRawLandmark(rawLandmarks, count, 10);
     const chin = getRawLandmark(rawLandmarks, count, 152);
+    const eyeL = getRawLandmark(rawLandmarks, count, 33);
+    const eyeR = getRawLandmark(rawLandmarks, count, 263);
 
     const centerCamX = (nose[0] + mouthTop[0] + mouthBot[0]) / 3;
     const centerCamY = (nose[1] + mouthTop[1] + mouthBot[1]) / 3;
@@ -4367,12 +4093,42 @@ async function main() {
     );
     const mouthGap = Math.hypot(mouthBot[0] - mouthTop[0], mouthBot[1] - mouthTop[1]);
     const mouthRatio = mouthGap / Math.max(mouthW, 1e-6);
-    const mouthOpen = Math.max(0, Math.min(1, (mouthRatio - 0.04) / 0.22));
+    const mouthLandmark = Math.max(0, Math.min(1, (mouthRatio - 0.04) / 0.22));
+    const jawBlend = blendScore(blendScores, 'jawOpen', mouthLandmark);
+    const mouthOpen = Math.max(mouthLandmark, jawBlend * 0.96);
+
+    const eyeLeftH = Math.hypot(
+      getRawLandmark(rawLandmarks, count, 159)[0] - getRawLandmark(rawLandmarks, count, 145)[0],
+      getRawLandmark(rawLandmarks, count, 159)[1] - getRawLandmark(rawLandmarks, count, 145)[1]
+    );
+    const eyeLeftW = Math.hypot(
+      getRawLandmark(rawLandmarks, count, 33)[0] - getRawLandmark(rawLandmarks, count, 133)[0],
+      getRawLandmark(rawLandmarks, count, 33)[1] - getRawLandmark(rawLandmarks, count, 133)[1]
+    );
+    const eyeRightH = Math.hypot(
+      getRawLandmark(rawLandmarks, count, 386)[0] - getRawLandmark(rawLandmarks, count, 374)[0],
+      getRawLandmark(rawLandmarks, count, 386)[1] - getRawLandmark(rawLandmarks, count, 374)[1]
+    );
+    const eyeRightW = Math.hypot(
+      getRawLandmark(rawLandmarks, count, 263)[0] - getRawLandmark(rawLandmarks, count, 362)[0],
+      getRawLandmark(rawLandmarks, count, 263)[1] - getRawLandmark(rawLandmarks, count, 362)[1]
+    );
+    const eyeOpenLandmarkL = Math.max(0, Math.min(1, (eyeLeftH / Math.max(eyeLeftW, 1e-6) - 0.1) / 0.26));
+    const eyeOpenLandmarkR = Math.max(0, Math.min(1, (eyeRightH / Math.max(eyeRightW, 1e-6) - 0.1) / 0.26));
+    const blinkL = blendScore(blendScores, 'eyeBlinkLeft', 1 - eyeOpenLandmarkL);
+    const blinkR = blendScore(blendScores, 'eyeBlinkRight', 1 - eyeOpenLandmarkR);
+    const eyeLeftOpen = Math.max(0, Math.min(1, eyeOpenLandmarkL * (1 - blinkL * 0.9)));
+    const eyeRightOpen = Math.max(0, Math.min(1, eyeOpenLandmarkR * (1 - blinkR * 0.9)));
 
     const mouthTopMappedX = mapped[13 * 2];
     const mouthTopMappedY = mapped[13 * 2 + 1];
     const mouthBotMappedX = mapped[14 * 2];
     const mouthBotMappedY = mapped[14 * 2 + 1];
+    const eyeMidX = (eyeL[0] + eyeR[0]) * 0.5;
+    const eyeMidY = (eyeL[1] + eyeR[1]) * 0.5;
+    const roll = Math.atan2(eyeR[1] - eyeL[1], eyeR[0] - eyeL[0]);
+    const yaw = Math.max(-1, Math.min(1, (nose[0] - eyeMidX) * 7.5));
+    const pitch = Math.max(-1, Math.min(1, (nose[1] - eyeMidY) * 7.0));
 
     return {
       count,
@@ -4381,6 +4137,11 @@ async function main() {
       centerY,
       radius: targetRadius,
       mouthOpen,
+      eyeLeftOpen,
+      eyeRightOpen,
+      roll,
+      yaw,
+      pitch,
       mouthCenterX: (mouthTopMappedX + mouthBotMappedX) * 0.5,
       mouthCenterY: (mouthTopMappedY + mouthBotMappedY) * 0.5,
     };
@@ -4400,41 +4161,177 @@ async function main() {
     return [dx / l, dy / l];
   }
 
-  function injectFaceNoiseMask(face, modeTime, mouthOpen) {
-    // Sparse mesh-mask perturbation: mostly velocity (not dense dye dots).
-    const stride = 5;
-    for (let i = 0; i < FACE_DENSE_INDICES.length; i += stride) {
-      const idx = FACE_DENSE_INDICES[i];
-      const pt = facePoint(face, idx);
-      if (!pt) continue;
-      const [nx, ny] = direction(face.centerX, face.centerY, pt[0], pt[1]);
-      const phase = Math.sin(modeTime * 9.0 + i * 0.47);
-      const sign = phase >= 0 ? 1 : -1;
-      const force = state.splatForce * (0.035 + mouthOpen * 0.06) * sign;
-      const dyeGain = sign > 0 ? (0.05 + mouthOpen * 0.08) : 0.0;
-      const col = palette(modeTime * 0.05 + i * 0.03, 3);
-      addSplat(
-        pt[0], pt[1],
-        nx * force, ny * force,
-        col[0] * dyeGain, col[1] * dyeGain, col[2] * dyeGain,
-        state.splatRadius * (1.4 + mouthOpen * 1.2)
-      );
+  function applyFaceLandmarkResult(landmarks, inferenceMs = 0, error = '', extras = null) {
+    faceTracking.inferenceMs = inferenceMs || 0;
+    const engineLabel = faceTracking.engine === 'main' ? 'main-cpu' : 'worker';
+    const blendScores = normalizeBlendshapePayload(extras?.blendshapes || null);
+    const blendCount = Number.isFinite(extras?.blendshapeCount)
+      ? Math.max(0, Math.floor(extras.blendshapeCount))
+      : (blendScores ? FACE_BLENDSHAPE_KEYS.length : 0);
+    const matrix = parseMatrixPayload(extras?.matrix || null);
+
+    if (blendScores) {
+      faceTracking.blendshapeScores = blendScores;
+      faceTracking.blendshapeCount = blendCount;
+    } else if (!faceTracking.face) {
+      faceTracking.blendshapeScores = null;
+      faceTracking.blendshapeCount = 0;
     }
+
+    if (matrix) {
+      if (faceTracking.transformMatrix && faceTracking.transformMatrix.length === 16) {
+        let d = 0;
+        for (let i = 0; i < 16; i++) {
+          d += Math.abs(matrix[i] - faceTracking.transformMatrix[i]);
+        }
+        faceTracking.matrixMotion = faceTracking.matrixMotion * 0.78 + d * 0.22;
+      } else {
+        faceTracking.matrixMotion = 0;
+      }
+      faceTracking.transformMatrix = matrix;
+      const ax = Math.hypot(matrix[0], matrix[1], matrix[2]);
+      const ay = Math.hypot(matrix[4], matrix[5], matrix[6]);
+      faceTracking.poseScale = Math.max(0.001, (ax + ay) * 0.5);
+      faceTracking.poseRoll = Math.atan2(matrix[1], matrix[0]) || faceTracking.poseRoll || 0;
+    } else {
+      faceTracking.matrixMotion *= 0.92;
+      if (!faceTracking.face) {
+        faceTracking.transformMatrix = null;
+        faceTracking.poseScale = 1;
+      }
+    }
+
+    if (error) {
+      faceTracking.errorStreak++;
+      if (faceTracking.errorStreak % 3 === 0) {
+        console.warn('Face tracker inference warning:', error);
+      }
+      if (faceTracking.engine === 'worker' && faceTracking.errorStreak >= 9 && !faceTracking.mainFallbackAttempted) {
+        switchToMainThreadTracker('worker-runtime-errors');
+      }
+    } else {
+      faceTracking.errorStreak = 0;
+    }
+
+    if (!landmarks || landmarks.length < 3) {
+      faceTracking.rawLandmarks = null;
+      faceTracking.rawLandmarkCount = 0;
+      const now = performance.now();
+      if (faceTracking.lastFaceSeenAt < 0 || (now - faceTracking.lastFaceSeenAt) > faceTracking.noFaceGraceMs) {
+        faceTracking.face = null;
+        if (faceTracking.prevMapped) faceTracking.prevMapped.fill(NaN);
+        faceTracking.prevCenterX = NaN;
+        faceTracking.prevCenterY = NaN;
+        faceTracking.centerVelX = 0;
+        faceTracking.centerVelY = 0;
+      }
+      if (faceTracking.ready) {
+        const ageMs = faceTracking.lastFaceSeenAt < 0 ? 9999 : performance.now() - faceTracking.lastFaceSeenAt;
+        const jaw = blendScore(faceTracking.blendshapeScores, 'jawOpen', faceTracking.smoothedMouth || 0);
+        const streamTag = `L0/B${faceTracking.blendshapeCount || 0}/M${faceTracking.transformMatrix ? 16 : 0}`;
+        if (ageMs <= faceTracking.noFaceGraceMs) {
+          setFaceStatus(`Face tracking active (${engineLabel}, ${faceTracking.inferenceMs.toFixed(1)} ms, holding lock, jaw ${(jaw * 100).toFixed(0)}%, ${streamTag})`);
+        } else {
+          setFaceStatus(`Face tracking active (${engineLabel}, ${faceTracking.inferenceMs.toFixed(1)} ms, searching, ${streamTag})`);
+        }
+      }
+      return;
+    }
+
+    faceTracking.rawLandmarks = landmarks;
+    faceTracking.rawLandmarkCount = landmarks.length / 3;
+    const mappedFace = mapFaceLandmarksToSim(landmarks, faceTracking.blendshapeScores);
+    if (!mappedFace) {
+      faceTracking.face = null;
+      if (faceTracking.prevMapped) faceTracking.prevMapped.fill(NaN);
+      return;
+    }
+    faceTracking.lastFaceSeenAt = performance.now();
+    faceTracking.smoothedMouth = faceTracking.smoothedMouth * 0.72 + mappedFace.mouthOpen * 0.28;
+    faceTracking.smoothedEyeLeft = faceTracking.smoothedEyeLeft * 0.74 + mappedFace.eyeLeftOpen * 0.26;
+    faceTracking.smoothedEyeRight = faceTracking.smoothedEyeRight * 0.74 + mappedFace.eyeRightOpen * 0.26;
+    mappedFace.mouthOpen = faceTracking.smoothedMouth;
+    mappedFace.eyeLeftOpen = faceTracking.smoothedEyeLeft;
+    mappedFace.eyeRightOpen = faceTracking.smoothedEyeRight;
+    if (faceTracking.transformMatrix && Number.isFinite(faceTracking.poseRoll)) {
+      mappedFace.roll = faceTracking.poseRoll;
+    }
+
+    if (Number.isFinite(faceTracking.prevCenterX) && Number.isFinite(faceTracking.prevCenterY)) {
+      const dtSec = Math.max(1e-3, faceTracking.frameEveryMs / 1000);
+      faceTracking.centerVelX = (mappedFace.centerX - faceTracking.prevCenterX) / dtSec;
+      faceTracking.centerVelY = (mappedFace.centerY - faceTracking.prevCenterY) / dtSec;
+    } else {
+      faceTracking.centerVelX = 0;
+      faceTracking.centerVelY = 0;
+    }
+    faceTracking.prevCenterX = mappedFace.centerX;
+    faceTracking.prevCenterY = mappedFace.centerY;
+    faceTracking.face = mappedFace;
+    const jaw = blendScore(faceTracking.blendshapeScores, 'jawOpen', mappedFace.mouthOpen);
+    const streamTag = `L${faceTracking.rawLandmarkCount || 0}/B${faceTracking.blendshapeCount || 0}/M${faceTracking.transformMatrix ? 16 : 0}`;
+    setFaceStatus(`Face tracking active (${engineLabel}, ${faceTracking.inferenceMs.toFixed(1)} ms, jaw ${(jaw * 100).toFixed(0)}%, ${streamTag})`);
   }
 
-  function applyFaceModeProfile(mode, syncFn = null) {
-    const prof = FACE_MODE_PROFILES[mode];
-    if (!prof) return;
-    for (const [k, v] of Object.entries(prof)) {
-      state[k] = v;
+  async function initMainThreadLandmarker() {
+    if (faceTracking.mainLandmarker) return faceTracking.mainLandmarker;
+    if (!faceVisionModuleCache) {
+      faceVisionModuleCache = await import(FACE_TRACKER_BUNDLE_URL);
     }
-    if (syncFn) syncFn();
+    const vision = faceVisionModuleCache;
+    const fileset = await vision.FilesetResolver.forVisionTasks(FACE_TRACKER_WASM_URL);
+    const lm = await vision.FaceLandmarker.createFromOptions(fileset, {
+      baseOptions: {
+        modelAssetPath: FACE_TRACKER_MODEL_URL,
+        delegate: 'CPU',
+      },
+      runningMode: 'VIDEO',
+      numFaces: 1,
+      minFaceDetectionConfidence: 0.25,
+      minFacePresenceConfidence: 0.25,
+      minTrackingConfidence: 0.2,
+      outputFaceBlendshapes: true,
+      outputFacialTransformationMatrixes: true,
+    });
+    faceTracking.mainLandmarker = lm;
+    return lm;
+  }
+
+  async function switchToMainThreadTracker(reason = 'fallback') {
+    if (!faceTracking.enabled) return;
+    if (faceTracking.engine === 'main') return;
+    if (faceTracking.mainFallbackAttempted) return;
+    faceTracking.mainFallbackAttempted = true;
+    faceTracking.engine = 'main';
+    faceTracking.ready = false;
+    faceTracking.frameInFlight = false;
+    faceTracking.frameInFlightSince = 0;
+    if (faceTracking.worker) {
+      try { faceTracking.worker.postMessage({ type: 'dispose' }); } catch {}
+      try { faceTracking.worker.terminate(); } catch {}
+      faceTracking.worker = null;
+    }
+    console.warn(`Face tracker: switching to main-thread compatibility mode (${reason}).`);
+    setFaceStatus('Switching face tracker to compatibility mode...');
+    try {
+      await initMainThreadLandmarker();
+      if (!faceTracking.enabled) return;
+      faceTracking.ready = true;
+      faceTracking.nextFrameAt = 0;
+      setFaceStatus('Face tracking active (main-cpu)');
+    } catch (err) {
+      console.error('Face tracker main-thread fallback failed:', err?.message || err);
+      setFaceStatus(`Face tracker failed: ${err?.message || err}`, true);
+      stopFaceTracking(true);
+    }
   }
 
   async function startFaceTracking() {
     if (faceTracking.initializing || faceTracking.enabled) return;
+    const startToken = ++faceTracking.startToken;
     faceTracking.initializing = true;
     setFaceStatus('Starting webcam + face tracker...');
+    syncFaceTrackingToggleButton();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
@@ -4445,20 +4342,52 @@ async function main() {
           frameRate: { ideal: 60, max: 120 },
         },
       });
+      if (startToken !== faceTracking.startToken || !faceTracking.initializing) {
+        for (const track of stream.getTracks()) track.stop();
+        return;
+      }
 
       const video = document.createElement('video');
       video.autoplay = true;
       video.muted = true;
       video.playsInline = true;
       video.srcObject = stream;
-      await video.play();
+      try { video.play(); } catch {}
+      if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        await new Promise((resolve) => {
+          let done = false;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            video.removeEventListener('loadeddata', onLoaded);
+            resolve();
+          };
+          const onLoaded = () => finish();
+          video.addEventListener('loadeddata', onLoaded, { once: true });
+          setTimeout(finish, 1200);
+        });
+      }
+      if (startToken !== faceTracking.startToken || !faceTracking.initializing) {
+        try { video.pause(); } catch {}
+        video.srcObject = null;
+        for (const track of stream.getTracks()) track.stop();
+        return;
+      }
 
-      const worker = new Worker(new URL('./face-tracker-worker.js', import.meta.url), { type: 'module' });
+      const worker = new Worker(new URL('./face-tracker-worker.js', import.meta.url));
+      if (startToken !== faceTracking.startToken || !faceTracking.initializing) {
+        try { worker.terminate(); } catch {}
+        try { video.pause(); } catch {}
+        video.srcObject = null;
+        for (const track of stream.getTracks()) track.stop();
+        return;
+      }
       faceTracking.worker = worker;
       faceTracking.stream = stream;
       faceTracking.video = video;
       faceTracking.enabled = true;
       faceTracking.ready = false;
+      faceTracking.engine = 'worker';
       faceTracking.frameInFlight = false;
       faceTracking.frameInFlightSince = 0;
       faceTracking.droppedFrames = 0;
@@ -4466,11 +4395,32 @@ async function main() {
       faceTracking.lastFaceSeenAt = -1;
       faceTracking.rawLandmarks = null;
       faceTracking.rawLandmarkCount = 0;
+      faceTracking.blendshapeScores = null;
+      faceTracking.blendshapeCount = 0;
+      faceTracking.transformMatrix = null;
+      faceTracking.matrixMotion = 0;
+      faceTracking.poseRoll = 0;
+      faceTracking.poseScale = 1;
+      faceTracking.prevCenterX = NaN;
+      faceTracking.prevCenterY = NaN;
+      faceTracking.centerVelX = 0;
+      faceTracking.centerVelY = 0;
+      faceTracking.smoothedMouth = 0;
+      faceTracking.smoothedEyeLeft = 1;
+      faceTracking.smoothedEyeRight = 1;
+      faceTracking.mainFallbackAttempted = false;
+      if (faceTracking.initWatchdog) clearTimeout(faceTracking.initWatchdog);
+      faceTracking.initWatchdog = 0;
+      syncFaceTrackingToggleButton();
 
       worker.onmessage = (ev) => {
         const msg = ev.data || {};
         if (msg.type === 'init-ok') {
           faceTracking.ready = true;
+          if (faceTracking.initWatchdog) {
+            clearTimeout(faceTracking.initWatchdog);
+            faceTracking.initWatchdog = 0;
+          }
           const delegate = msg.delegate || 'cpu';
           setFaceStatus(`Face tracking active (${delegate}, worker thread)`);
           return;
@@ -4481,109 +4431,100 @@ async function main() {
           return;
         }
         if (msg.type === 'init-error') {
+          console.error('Face tracker init error:', msg.error || 'unknown error');
           setFaceStatus(`Face tracker failed: ${msg.error || 'unknown error'}`, true);
-          stopFaceTracking();
+          stopFaceTracking(true);
           return;
         }
         if (msg.type === 'result') {
           faceTracking.frameInFlight = false;
           faceTracking.frameInFlightSince = 0;
-          faceTracking.inferenceMs = msg.inferenceMs || 0;
-          if (faceTracking.inferenceMs > 0) {
-            const target = Math.max(1000 / 30, Math.min(1000 / 55, faceTracking.inferenceMs * 1.2));
+          const infMs = msg.inferenceMs || 0;
+          if (infMs > 0) {
+            const target = Math.max(1000 / 30, Math.min(1000 / 55, infMs * 1.2));
             faceTracking.frameEveryMs = faceTracking.frameEveryMs * 0.82 + target * 0.18;
           }
-          if (msg.error) {
-            faceTracking.errorStreak++;
-            if (faceTracking.errorStreak % 3 === 0) {
-              console.warn('Face tracker inference warning:', msg.error);
-            }
-          } else {
-            faceTracking.errorStreak = 0;
-          }
-          if (!msg.landmarks) {
-            faceTracking.rawLandmarks = null;
-            faceTracking.rawLandmarkCount = 0;
-            const now = performance.now();
-            if (faceTracking.lastFaceSeenAt < 0 || (now - faceTracking.lastFaceSeenAt) > faceTracking.noFaceGraceMs) {
-              faceTracking.face = null;
-              if (faceTracking.prevMapped) faceTracking.prevMapped.fill(NaN);
-            }
-            if (faceTracking.ready) {
-              const ageMs = faceTracking.lastFaceSeenAt < 0 ? 9999 : performance.now() - faceTracking.lastFaceSeenAt;
-              if (ageMs <= faceTracking.noFaceGraceMs) {
-                setFaceStatus(`Face tracking active (${faceTracking.inferenceMs.toFixed(1)} ms, holding lock)`);
-              } else {
-                setFaceStatus(`Face tracking active (${faceTracking.inferenceMs.toFixed(1)} ms, searching)`);
-              }
-            }
-            return;
-          }
-          const landmarks = new Float32Array(msg.landmarks);
-          faceTracking.rawLandmarks = landmarks;
-          faceTracking.rawLandmarkCount = landmarks.length / 3;
-          const mappedFace = mapFaceLandmarksToSim(landmarks);
-          if (!mappedFace) {
-            faceTracking.face = null;
-            if (faceTracking.prevMapped) faceTracking.prevMapped.fill(NaN);
-            return;
-          }
-          faceTracking.lastFaceSeenAt = performance.now();
-          faceTracking.smoothedMouth = faceTracking.smoothedMouth * 0.72 + mappedFace.mouthOpen * 0.28;
-          mappedFace.mouthOpen = faceTracking.smoothedMouth;
-          faceTracking.face = mappedFace;
-          setFaceStatus(`Face tracking active (${faceTracking.inferenceMs.toFixed(1)} ms, mouth ${(mappedFace.mouthOpen * 100).toFixed(0)}%)`);
+          const lm = msg.landmarks ? new Float32Array(msg.landmarks) : null;
+          applyFaceLandmarkResult(lm, infMs, msg.error || '', {
+            blendshapes: msg.blendshapes || null,
+            blendshapeCount: msg.blendshapeCount || 0,
+            matrix: msg.matrix || null,
+          });
         }
       };
 
       worker.onerror = (err) => {
         console.error('Face tracker worker error:', err?.message || err);
-        setFaceStatus('Face tracker worker crashed, restarting...', true);
-        stopFaceTracking();
-        const shouldAutoRestart = (state.faceEffectorMode > 0 || state.faceDebugMode > 0);
-        if (shouldAutoRestart) {
-          setTimeout(() => {
-            if (state.faceEffectorMode > 0 || state.faceDebugMode > 0) {
-              startFaceTracking();
-            }
-          }, 350);
-        }
+        setFaceStatus('Face tracker worker crashed', true);
+        stopFaceTracking(true);
+      };
+
+      worker.onmessageerror = (err) => {
+        console.error('Face tracker message error:', err?.message || err);
       };
 
       worker.postMessage({
         type: 'init',
-        libURL: FACE_TRACKER_LIB_URL,
+        bundleURL: FACE_TRACKER_BUNDLE_URL,
         wasmURL: FACE_TRACKER_WASM_URL,
         modelURL: FACE_TRACKER_MODEL_URL,
+        preferGPU: false,
       });
-
-      if (faceTrackingToggleBtn) {
-        faceTrackingToggleBtn.textContent = 'Stop Webcam Face Tracking';
-        faceTrackingToggleBtn.classList.add('active');
-      }
+      setFaceStatus('Initializing face tracker...');
+      faceTracking.initWatchdog = setTimeout(() => {
+        if (faceTracking.enabled && !faceTracking.ready) {
+          setFaceStatus('Face tracker is still initializing...', true);
+          console.warn('Face tracker init is taking longer than expected.');
+          switchToMainThreadTracker('worker-init-timeout');
+        }
+      }, 6000);
     } catch (err) {
+      if (startToken !== faceTracking.startToken) return;
       console.error('Face tracking start failed:', err);
       setFaceStatus(`Face tracking unavailable: ${err?.message || err}`, true);
-      stopFaceTracking();
+      stopFaceTracking(true);
     } finally {
-      faceTracking.initializing = false;
+      if (startToken === faceTracking.startToken) {
+        faceTracking.initializing = false;
+      }
+      syncFaceTrackingToggleButton();
     }
   }
 
-  function stopFaceTracking() {
+  function stopFaceTracking(preserveStatus = false) {
+    faceTracking.startToken++;
+    faceTracking.initializing = false;
     faceTracking.enabled = false;
     faceTracking.ready = false;
+    faceTracking.engine = 'worker';
     faceTracking.frameInFlight = false;
     faceTracking.frameInFlightSince = 0;
     faceTracking.face = null;
     faceTracking.rawLandmarks = null;
     faceTracking.rawLandmarkCount = 0;
+    faceTracking.blendshapeScores = null;
+    faceTracking.blendshapeCount = 0;
+    faceTracking.transformMatrix = null;
+    faceTracking.matrixMotion = 0;
+    faceTracking.poseRoll = 0;
+    faceTracking.poseScale = 1;
     faceTracking.prevMapped = null;
+    faceTracking.prevCenterX = NaN;
+    faceTracking.prevCenterY = NaN;
+    faceTracking.centerVelX = 0;
+    faceTracking.centerVelY = 0;
     faceTracking.smoothedMouth = 0;
+    faceTracking.smoothedEyeLeft = 1;
+    faceTracking.smoothedEyeRight = 1;
     faceTracking.prevMouth = 0;
     faceTracking.lastFaceSeenAt = -1;
     faceTracking.lastMouthBurstTime = -999;
     faceTracking.errorStreak = 0;
+    faceTracking.mainFallbackAttempted = false;
+    if (faceTracking.initWatchdog) {
+      clearTimeout(faceTracking.initWatchdog);
+      faceTracking.initWatchdog = 0;
+    }
     if (faceTracking.worker) {
       try { faceTracking.worker.postMessage({ type: 'dispose' }); } catch {}
       try { faceTracking.worker.terminate(); } catch {}
@@ -4595,18 +4536,60 @@ async function main() {
       try { faceTracking.video.pause(); } catch {}
       faceTracking.video.srcObject = null;
     }
+    if (faceTracking.mainLandmarker) {
+      try { faceTracking.mainLandmarker.close?.(); } catch {}
+    }
     faceTracking.worker = null;
     faceTracking.stream = null;
     faceTracking.video = null;
-    if (faceTrackingToggleBtn) {
-      faceTrackingToggleBtn.textContent = 'Start Webcam Face Tracking';
-      faceTrackingToggleBtn.classList.remove('active');
+    faceTracking.mainLandmarker = null;
+    syncFaceTrackingToggleButton();
+    if (!preserveStatus) {
+      setFaceStatus('Face tracking idle');
     }
-    setFaceStatus('Face tracking idle');
   }
 
   function pumpFaceTracker(nowMs) {
     if (!faceTracking.enabled || !faceTracking.ready) return;
+    const v = faceTracking.video;
+    if (!v || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+
+    if (faceTracking.engine === 'main') {
+      if (!faceTracking.mainLandmarker) return;
+      if (nowMs < faceTracking.nextFrameAt) return;
+      faceTracking.nextFrameAt = nowMs + faceTracking.frameEveryMs;
+      const t0 = performance.now();
+      try {
+        const res = faceTracking.mainLandmarker.detectForVideo(v, nowMs);
+        const blendPayload = parseBlendshapeFromResult(res);
+        const matrixPayload = parseMatrixFromResult(res);
+        const lms = res?.faceLandmarks?.[0];
+        if (!lms || !lms.length) {
+          applyFaceLandmarkResult(null, performance.now() - t0, '', {
+            blendshapes: blendPayload.scores,
+            blendshapeCount: blendPayload.count,
+            matrix: matrixPayload,
+          });
+          return;
+        }
+        const packed = new Float32Array(lms.length * 3);
+        for (let i = 0; i < lms.length; i++) {
+          const off = i * 3;
+          packed[off] = lms[i].x;
+          packed[off + 1] = lms[i].y;
+          packed[off + 2] = lms[i].z;
+        }
+        applyFaceLandmarkResult(packed, performance.now() - t0, '', {
+          blendshapes: blendPayload.scores,
+          blendshapeCount: blendPayload.count,
+          matrix: matrixPayload,
+        });
+      } catch (err) {
+        applyFaceLandmarkResult(null, performance.now() - t0, err?.message || String(err));
+      }
+      return;
+    }
+
     if (faceTracking.frameInFlight) {
       if (faceTracking.frameInFlightSince > 0 && (nowMs - faceTracking.frameInFlightSince) > faceTracking.frameTimeoutMs) {
         faceTracking.frameInFlight = false;
@@ -4618,8 +4601,6 @@ async function main() {
       }
     }
     if (nowMs < faceTracking.nextFrameAt) return;
-    const v = faceTracking.video;
-    if (!v || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
 
     faceTracking.frameInFlight = true;
     faceTracking.frameInFlightSince = nowMs;
@@ -4649,8 +4630,7 @@ async function main() {
   }
 
   function applyFaceEffectors(dt, modeTime) {
-    const mode = Math.round(state.faceEffectorMode || 0);
-    if (mode <= 0) return;
+    if (Math.round(state.faceEffectorMode || 0) <= 0) return;
     const face = faceTracking.face;
     if (!face) return;
 
@@ -4659,142 +4639,133 @@ async function main() {
       faceTracking.prevMapped.fill(NaN);
     }
 
-    const mouth = face.mouthOpen;
+    const blend = faceTracking.blendshapeScores;
+    const jaw = blendScore(blend, 'jawOpen', face.mouthOpen);
+    const pucker = blendScore(blend, 'mouthPucker', 0);
+    const funnel = blendScore(blend, 'mouthFunnel', 0);
+    const smile = (blendScore(blend, 'mouthSmileLeft', 0) + blendScore(blend, 'mouthSmileRight', 0)) * 0.5;
+    const blinkL = blendScore(blend, 'eyeBlinkLeft', 1 - (face.eyeLeftOpen ?? 0.5));
+    const blinkR = blendScore(blend, 'eyeBlinkRight', 1 - (face.eyeRightOpen ?? 0.5));
+    const browLift = blendScore(blend, 'browInnerUp', 0);
+    const cheekPuff = blendScore(blend, 'cheekPuff', 0);
+
+    const eyeLeftOpen = Math.max(0, Math.min(1, (face.eyeLeftOpen ?? 0.5) * (1 - blinkL * 0.9)));
+    const eyeRightOpen = Math.max(0, Math.min(1, (face.eyeRightOpen ?? 0.5) * (1 - blinkR * 0.9)));
+    const mouth = Math.max(face.mouthOpen, jaw * 0.95);
     const mouthDelta = mouth - faceTracking.prevMouth;
     const mouthBurst = mouth > 0.52 && mouthDelta > 0.06 && (modeTime - faceTracking.lastMouthBurstTime) > 0.11;
     if (mouthBurst) faceTracking.lastMouthBurstTime = modeTime;
-
-    const meshPulse = 0.5 + 0.5 * Math.sin(modeTime * 8.0);
+    const poseMotion = Math.max(0, Math.min(1.25, faceTracking.matrixMotion * 1.85 + Math.hypot(faceTracking.centerVelX, faceTracking.centerVelY) * 6.5));
     const getPoint = (idx) => facePoint(face, idx);
     const mouthCenter = [face.mouthCenterX, face.mouthCenterY];
+    const flowX = faceTracking.centerVelX * state.splatForce * 0.012;
+    const flowY = faceTracking.centerVelY * state.splatForce * 0.012;
+    const fillCol = palette(modeTime * (0.03 + smile * 0.015), 2);
+    const rimCol = palette(modeTime * 0.09 + browLift * 0.07, 5);
 
-    if (mode === 1) {
-      for (let i = 0; i < FACE_IDX.contour.length; i += 3) {
+    const carveLoop = (indices, openness, sizeMul = 1.0) => {
+      const closed = 1.0 - Math.max(0, Math.min(1, openness));
+      for (let i = 0; i < indices.length; i++) {
+        const idx = indices[i];
+        const pt = getPoint(idx);
+        if (!pt) continue;
+        const [ix, iy] = direction(pt[0], pt[1], face.centerX, face.centerY);
+        const force = state.splatForce * (0.03 + closed * 0.2 + poseMotion * 0.08);
+        addSplat(
+          pt[0], pt[1],
+          ix * force + flowX * 0.3,
+          iy * force + flowY * 0.3,
+          -0.06 * (0.8 + closed),
+          -0.06 * (0.8 + closed),
+          -0.06 * (0.8 + closed),
+          state.splatRadius * (2.0 + sizeMul * (1.1 + closed * 1.2))
+        );
+      }
+    };
+
+    // 1) Rim silhouette: bright edge to make head outline unmistakable.
+    for (let i = 0; i < FACE_IDX.contour.length; i += 2) {
+      const idx = FACE_IDX.contour[i];
+      const pt = getPoint(idx);
+      if (!pt) continue;
+      const [rx, ry] = direction(face.centerX, face.centerY, pt[0], pt[1]);
+      const tx = -ry;
+      const ty = rx;
+      const tangential = Math.sin(modeTime * 5.0 + i * 0.37);
+      const force = state.splatForce * (0.055 + mouth * 0.14 + poseMotion * 0.12);
+      const tint = 0.045 + smile * 0.04;
+      addSplat(
+        pt[0], pt[1],
+        rx * force + tx * force * 0.18 * tangential + flowX,
+        ry * force + ty * force * 0.18 * tangential + flowY,
+        rimCol[0] * tint, rimCol[1] * tint, rimCol[2] * tint,
+        state.splatRadius * (2.5 + mouth * 1.2 + cheekPuff * 0.7)
+      );
+    }
+
+    // 2) Interior fill: paint a recognizable face volume instead of sparse points.
+    for (let i = 0; i < FACE_IDX.contour.length; i += 4) {
+      const idx = FACE_IDX.contour[i];
+      const pt = getPoint(idx);
+      if (!pt) continue;
+      for (const t of [0.34, 0.62]) {
+        const x = face.centerX + (pt[0] - face.centerX) * t;
+        const y = face.centerY + (pt[1] - face.centerY) * t;
+        const g = 0.03 + mouth * 0.045 + poseMotion * 0.04;
+        addSplat(
+          x, y,
+          flowX * (0.6 + t * 0.3), flowY * (0.6 + t * 0.3),
+          fillCol[0] * g, fillCol[1] * g, fillCol[2] * g,
+          state.splatRadius * (2.8 - t * 0.7 + smile * 0.35)
+        );
+      }
+    }
+
+    // 3) Eye and mouth holes.
+    carveLoop(FACE_IDX.leftEye, eyeLeftOpen, 0.9);
+    carveLoop(FACE_IDX.rightEye, eyeRightOpen, 0.9);
+    carveLoop(FACE_IDX.mouthHole, 1.0 - Math.max(0, Math.min(1, mouth * (0.9 + pucker * 0.2))), 1.2 + mouth * 1.5);
+
+    // 4) Mouth jets driven by jaw + funnel/pucker blendshapes.
+    const mouthDrive = Math.max(0, Math.min(1, mouth * 0.72 + pucker * 0.18 + funnel * 0.15));
+    if (mouthDrive > 0.16) {
+      for (let i = 0; i < FACE_IDX.mouthHole.length; i += 2) {
+        const idx = FACE_IDX.mouthHole[i];
+        const pt = getPoint(idx);
+        if (!pt) continue;
+        const [mx, my] = direction(mouthCenter[0], mouthCenter[1], pt[0], pt[1]);
+        const burst = state.splatForce * (0.06 + mouthDrive * 0.35);
+        const g = 0.03 + mouthDrive * 0.08;
+        addSplat(
+          pt[0], pt[1],
+          mx * burst + flowX * 0.5, my * burst + flowY * 0.5,
+          fillCol[0] * g, fillCol[1] * g, fillCol[2] * g,
+          state.splatRadius * (2.4 + mouthDrive * 2.6)
+        );
+      }
+    }
+
+    // 5) Matrix-driven motion wake.
+    if (poseMotion > 0.05) {
+      for (let i = 1; i < FACE_IDX.contour.length; i += 5) {
         const idx = FACE_IDX.contour[i];
         const pt = getPoint(idx);
         if (!pt) continue;
-        const [nx, ny] = direction(face.centerX, face.centerY, pt[0], pt[1]);
-        const force = state.splatForce * (0.08 + mouth * 0.2);
-        const col = palette(modeTime * 0.1 + i * 0.03, 4);
-        addSplat(pt[0], pt[1], nx * force, ny * force, col[0] * 0.08, col[1] * 0.08, col[2] * 0.08, state.splatRadius * (2.8 + mouth * 1.4));
-      }
-      if (mouthBurst) {
-        for (let i = 0; i < FACE_IDX.lips.length; i += 2) {
-          const idx = FACE_IDX.lips[i];
-          const pt = getPoint(idx);
-          if (!pt) continue;
-          const [nx, ny] = direction(mouthCenter[0], mouthCenter[1], pt[0], pt[1]);
-          const f = state.splatForce * 0.33;
-          addSplat(pt[0], pt[1], nx * f, ny * f, 0.0, 0.0, 0.0, state.splatRadius * 3.4);
-        }
-      }
-    } else if (mode === 2) {
-      injectFaceNoiseMask(face, modeTime, mouth);
-      if (mouthBurst) {
-        for (let i = 0; i < FACE_IDX.lips.length; i += 3) {
-          const idx = FACE_IDX.lips[i];
-          const pt = getPoint(idx);
-          if (!pt) continue;
-          const [nx, ny] = direction(mouthCenter[0], mouthCenter[1], pt[0], pt[1]);
-          const f = state.splatForce * 0.18;
-          addSplat(pt[0], pt[1], nx * f, ny * f, 0, 0, 0, state.splatRadius * 2.6);
-        }
-      }
-    } else if (mode === 3) {
-      if (mouth > 0.2) {
-        for (let i = 0; i < FACE_IDX.lips.length; i += 2) {
-          const idx = FACE_IDX.lips[i];
-          const pt = getPoint(idx);
-          if (!pt) continue;
-          const [nx, ny] = direction(mouthCenter[0], mouthCenter[1], pt[0], pt[1]);
-          const f = state.splatForce * (0.08 + mouth * 0.35);
-          const col = palette(modeTime * 0.18 + i * 0.04, 1);
-          addSplat(pt[0], pt[1], nx * f, ny * f, col[0] * 0.07, col[1] * 0.07, col[2] * 0.07, state.splatRadius * (2.5 + mouth * 2.8));
-        }
-      }
-      if (mouthBurst) {
-        for (let k = 0; k < 12; k++) {
-          const a = (k / 12) * Math.PI * 2;
-          const px = mouthCenter[0] + Math.cos(a) * face.radius * 0.22;
-          const py = mouthCenter[1] + Math.sin(a) * face.radius * 0.22;
-          addSplat(px, py, Math.cos(a) * state.splatForce * 0.26, Math.sin(a) * state.splatForce * 0.26, 0, 0, 0, state.splatRadius * 3.2);
-        }
-      }
-    } else if (mode === 4) {
-      for (let i = 0; i < FACE_IDX.jaw.length; i += 2) {
-        const idx = FACE_IDX.jaw[i];
-        const pt = getPoint(idx);
-        if (!pt) continue;
-        const [nx, ny] = direction(face.centerX, face.centerY, pt[0], pt[1]);
-        const tx = -ny;
-        const ty = nx;
-        const f = state.splatForce * (0.11 + mouth * 0.2);
-        addSplat(pt[0], pt[1], tx * f, ty * f, 0, 0, 0, state.splatRadius * 2.4);
-      }
-      if (mouthBurst) {
-        const chin = getPoint(152);
-        if (chin) {
-          addSplat(chin[0], chin[1], 0, -state.splatForce * 0.34, 0.06, 0.05, 0.04, state.splatRadius * 3.1);
-        }
-      }
-    } else if (mode === 5) {
-      for (const idx of FACE_IDX.leftBrow) {
-        const pt = getPoint(idx);
-        if (!pt) continue;
-        const f = state.splatForce * (0.08 + mouth * 0.12);
-        addSplat(pt[0], pt[1], f, f * 0.2, 0.02, 0.03, 0.06, state.splatRadius * 2.2);
-      }
-      for (const idx of FACE_IDX.rightBrow) {
-        const pt = getPoint(idx);
-        if (!pt) continue;
-        const f = state.splatForce * (0.08 + mouth * 0.12);
-        addSplat(pt[0], pt[1], -f, f * 0.2, 0.02, 0.03, 0.06, state.splatRadius * 2.2);
-      }
-      if (mouthBurst) {
-        const nose = getPoint(1);
-        if (nose) addSplat(nose[0], nose[1], 0, -state.splatForce * 0.26, 0, 0, 0, state.splatRadius * 2.8);
-      }
-    } else if (mode === 6) {
-      const leftCheek = getPoint(123);
-      const rightCheek = getPoint(352);
-      if (leftCheek) {
-        const f = state.splatForce * (0.06 + meshPulse * 0.15 + mouth * 0.12);
-        addSplat(leftCheek[0], leftCheek[1], f, 0, 0.06, 0.05, 0.02, state.splatRadius * 3.0);
-      }
-      if (rightCheek) {
-        const f = state.splatForce * (0.06 + (1.0 - meshPulse) * 0.15 + mouth * 0.12);
-        addSplat(rightCheek[0], rightCheek[1], -f, 0, 0.02, 0.03, 0.06, state.splatRadius * 3.0);
-      }
-      if (mouthBurst && leftCheek && rightCheek) {
-        const midX = (leftCheek[0] + rightCheek[0]) * 0.5;
-        const midY = (leftCheek[1] + rightCheek[1]) * 0.5;
-        addSplat(midX, midY, 0, state.splatForce * 0.24, 0, 0, 0, state.splatRadius * 3.2);
-      }
-    } else if (mode === 7) {
-      // "Fluid Texture Mesh": velocity-only mesh advection, so existing fluid texture gets
-      // pulled across the tracked face mesh rather than painted as point dots.
-      for (let i = 0; i < FACE_DENSE_INDICES.length; i += 4) {
-        const idx = FACE_DENSE_INDICES[i];
-        if (idx >= face.count) continue;
-        const off = idx * 2;
-        const x = face.mapped[off];
-        const y = face.mapped[off + 1];
-        const px = faceTracking.prevMapped[off];
-        const py = faceTracking.prevMapped[off + 1];
-        if (Number.isFinite(px) && Number.isFinite(py)) {
-          const vx = (x - px) / Math.max(dt, 1e-5);
-          const vy = (y - py) / Math.max(dt, 1e-5);
-          const forceScale = state.splatForce * (0.03 + mouth * 0.06);
-          addSplat(x, y, vx * forceScale, vy * forceScale, 0, 0, 0, state.splatRadius * 2.0);
-        }
-      }
-      if (mouthBurst) {
-        for (let i = 0; i < FACE_IDX.lips.length; i += 2) {
-          const idx = FACE_IDX.lips[i];
-          const pt = getPoint(idx);
-          if (!pt) continue;
-          const [nx, ny] = direction(mouthCenter[0], mouthCenter[1], pt[0], pt[1]);
-          addSplat(pt[0], pt[1], nx * state.splatForce * 0.22, ny * state.splatForce * 0.22, 0, 0, 0, state.splatRadius * 3.0);
+        const wake = state.splatForce * (0.045 + poseMotion * 0.18);
+        addSplat(
+          pt[0], pt[1],
+          flowX * (1.1 + poseMotion * 0.7), flowY * (1.1 + poseMotion * 0.7),
+          0, 0, 0,
+          state.splatRadius * (2.1 + poseMotion * 1.6)
+        );
+        if (mouthBurst) {
+          const [rx, ry] = direction(face.centerX, face.centerY, pt[0], pt[1]);
+          addSplat(
+            pt[0], pt[1],
+            rx * wake * 0.7, ry * wake * 0.7,
+            -0.05, -0.05, -0.05,
+            state.splatRadius * 2.8
+          );
         }
       }
     }
@@ -4807,139 +4778,189 @@ async function main() {
     faceTracking.prevMouth = mouth;
   }
 
-  // ─── Burst Emitters (edge/center impulse system) ────────────────────────
+  // ─── Jet Emitters (flick-style moving injectors) ────────────────────────
   const burstEmitters = [];
+  const burstShots = [];
   let burstEmitterStamp = '';
-  let burstRotPhase = 0;
+  let burstGlobalPhase = Math.random() * Math.PI * 2;
+
+  function wrapAngle(v) {
+    const TAU = Math.PI * 2;
+    let a = v % TAU;
+    if (a < 0) a += TAU;
+    return a;
+  }
 
   function ensureBurstEmitters(count, behavior) {
     const wanted = Math.max(0, Math.round(count));
     const stamp = `${wanted}:${behavior}`;
     if (stamp === burstEmitterStamp && burstEmitters.length === wanted) return;
     burstEmitterStamp = stamp;
-    burstRotPhase = 0;
     burstEmitters.length = 0;
     for (let i = 0; i < wanted; i++) {
+      const angle = (i / Math.max(1, wanted)) * Math.PI * 2;
       burstEmitters.push({
-        angle: (i / Math.max(1, wanted)) * Math.PI * 2,
-        timer: Math.random() * 0.4,
-        active: 0,
-        shotTimer: 0,
-        drift: (Math.random() * 2 - 1) || 1,
+        angle,
+        cooldown: Math.random() * 0.25,
+        drift: (Math.random() < 0.5 ? -1 : 1) * (0.7 + Math.random() * 0.8),
       });
     }
   }
 
-  function emitBurstAtAngle(angle, fromCenter, outward, power = 1, width = 0) {
-    const spread = Math.max(0, Math.min(1, width));
-    const lobeCount = fromCenter ? (1 + Math.round(spread * 2.0)) : (1 + Math.round(spread * 3.0));
-    const edgeInset = 0.045 + spread * 0.028;
-    const edgeRadius = Math.max(0.02, SIM_SPHERE_RADIUS - edgeInset);
-    const dirSign = outward ? 1 : -1;
-
-    for (let l = 0; l < lobeCount && splatCount < MAX_SPLATS; l++) {
-      const lane = lobeCount <= 1 ? 0 : (l / (lobeCount - 1) * 2 - 1);
-      const arcSpread = fromCenter ? 0.2 : 0.34;
-      const jitterAngle = (Math.random() * 2 - 1) * (0.015 + spread * 0.06);
-      const shotAngle = angle + lane * spread * arcSpread + jitterAngle;
-      const radialJitter = (Math.random() * 2 - 1) * spread * 0.014;
-      const srcR = fromCenter
-        ? (0.015 + spread * 0.06 + Math.abs(lane) * 0.02)
-        : Math.max(0.015, edgeRadius + radialJitter);
-      const sx = 0.5 + Math.cos(shotAngle) * srcR;
-      const sy = 0.5 + Math.sin(shotAngle) * srcR;
-      const dirX = Math.cos(shotAngle) * dirSign;
-      const dirY = Math.sin(shotAngle) * dirSign;
-      const jitter = 1 + (Math.random() * 2 - 1) * state.burstForceRandomness;
-      const force = state.splatForce * (0.22 + state.burstForce * 2.6) * (0.92 + spread * 0.35) * jitter * power;
-      const col = palette(time * 0.09 + shotAngle * 0.17, 4);
-      const radius = state.splatRadius * (1.6 + state.burstForce * 1.8) * (0.9 + power * 0.45) * (1.0 + spread * 2.6);
-      addSplat(sx, sy, dirX * force, dirY * force, col[0], col[1], col[2], radius);
+  function clampPointToSphere(px, py, margin = 0.02) {
+    const maxR = Math.max(0.02, SIM_SPHERE_RADIUS - margin);
+    let dx = px - 0.5;
+    let dy = py - 0.5;
+    const d = Math.hypot(dx, dy);
+    if (d > maxR) {
+      const s = maxR / Math.max(d, 1e-6);
+      dx *= s;
+      dy *= s;
     }
+    return { x: 0.5 + dx, y: 0.5 + dy };
   }
 
-  function armBurstEmitter(e, duration) {
-    e.active = duration;
-    e.shotTimer = 0;
-  }
+  function spawnBurstShot(e, behavior, idx, count, speedNorm, duration, width) {
+    if (burstShots.length > 160) return;
+    const TAU = Math.PI * 2;
+    const slot = idx / Math.max(1, count);
+    const edgeSourceR = SIM_SPHERE_RADIUS + 0.012;
+    const centerSourceR = 0.02 + width * 0.05;
+    const innerTargetMin = 0.03 + width * 0.05;
+    const innerTargetMax = Math.max(innerTargetMin + 0.02, SIM_SPHERE_RADIUS - 0.09);
 
-  function runBurstEmitter(e, dt, duration, cadence, angleJitter, fromCenter, outward, width, angleOffset = 0) {
-    if (e.active <= 0) return;
-    e.active = Math.max(0, e.active - dt);
-    e.shotTimer -= dt;
-    while (e.shotTimer <= 0 && splatCount < MAX_SPLATS) {
-      const burstT = 1 - (Math.max(0, e.active) / Math.max(duration, 1e-5));
-      const envelope = 0.7 + Math.sin(Math.min(1, Math.max(0, burstT)) * Math.PI) * 0.55;
-      const jitterAngle = (Math.random() * 2 - 1) * angleJitter;
-      emitBurstAtAngle(e.angle + angleOffset + jitterAngle, fromCenter, outward, envelope, width);
-      e.shotTimer += cadence;
-      if (e.active <= 0) break;
+    let sourceAngle = e.angle;
+    let sourceR = edgeSourceR;
+    let targetAngle = sourceAngle + Math.PI;
+    let targetR = 0.12;
+
+    if (behavior === 1) {
+      sourceAngle = slot * TAU + burstGlobalPhase * 0.15;
+      sourceR = edgeSourceR;
+      targetAngle = sourceAngle + Math.PI + (Math.random() * 2 - 1) * (0.16 + width * 0.3);
+      targetR = 0.02 + Math.random() * (0.08 + width * 0.08);
+    } else if (behavior === 2) {
+      sourceAngle = slot * TAU + burstGlobalPhase * 0.3;
+      sourceR = centerSourceR;
+      targetAngle = sourceAngle + (Math.random() * 2 - 1) * (0.2 + width * 0.25);
+      targetR = SIM_SPHERE_RADIUS - (0.045 + width * 0.05) - Math.random() * 0.03;
+    } else if (behavior === 3) {
+      e.angle = wrapAngle(e.angle + (0.2 + speedNorm * 0.9) * e.drift);
+      sourceAngle = e.angle;
+      sourceR = edgeSourceR;
+      targetAngle = sourceAngle + Math.PI * (0.65 + Math.random() * 0.6) * e.drift;
+      targetR = 0.08 + Math.random() * (SIM_SPHERE_RADIUS - 0.13);
+    } else if (behavior === 4) {
+      sourceAngle = slot * TAU + burstGlobalPhase * (0.8 + speedNorm * 1.0);
+      sourceR = edgeSourceR;
+      targetAngle = burstGlobalPhase * 1.2 + slot * TAU * 0.6 + (Math.random() * 2 - 1) * 0.2;
+      targetR = 0.07 + Math.random() * 0.14;
+    } else {
+      e.angle = wrapAngle(e.angle + (Math.random() * 2 - 1) * 0.45 + e.drift * (0.12 + speedNorm * 0.35));
+      sourceAngle = e.angle;
+      sourceR = edgeSourceR;
+      targetAngle = Math.random() * TAU;
+      targetR = innerTargetMin + Math.random() * Math.max(0.02, innerTargetMax - innerTargetMin);
     }
+
+    const sx = 0.5 + Math.cos(sourceAngle) * sourceR;
+    const sy = 0.5 + Math.sin(sourceAngle) * sourceR;
+    const tx0 = 0.5 + Math.cos(targetAngle) * targetR;
+    const ty0 = 0.5 + Math.sin(targetAngle) * targetR;
+    const t = clampPointToSphere(tx0, ty0, 0.03);
+    const dx = t.x - sx;
+    const dy = t.y - sy;
+    const d = Math.hypot(dx, dy);
+    if (d < 1e-5) return;
+
+    const jitter = 1 + (Math.random() * 2 - 1) * state.burstForceRandomness;
+    const speed = 0.9 + speedNorm * 2.1; // world units / second
+    const life = Math.min(0.75, 0.05 + duration * 0.18);
+    const forceScale = Math.max(0.15, (0.45 + state.burstForce * 1.5) * jitter);
+    const dyeScale = forceScale * (1.8 + width * 0.8); // intentionally dye-heavy
+    const radius = state.splatRadius * (0.95 + width * 3.4 + state.burstForce * 0.28);
+
+    burstShots.push({
+      x: sx,
+      y: sy,
+      vx: (dx / d) * speed,
+      vy: (dy / d) * speed,
+      life,
+      maxLife: life,
+      forceScale,
+      dyeScale,
+      radius,
+      colorOffset: sourceAngle * 0.17 + Math.random() * 0.2,
+    });
   }
 
   function updateBurstEmitters(dt) {
     const behavior = Math.max(0, Math.min(4, Math.round(state.burstBehavior)));
     const count = Math.max(0, Math.round(state.burstCount));
-    if (count === 0 || state.burstForce <= 0.001) return;
+    if (count === 0 || state.burstForce <= 0.001) {
+      burstShots.length = 0;
+      return;
+    }
 
     ensureBurstEmitters(count, behavior);
-    const speed = Math.max(0.01, state.burstSpeed);
-    const duration = Math.max(0.01, state.burstDuration);
-    const width = Math.max(0, Math.min(1, Number.isFinite(state.burstWidth) ? state.burstWidth : 0.3));
-    const cadence = Math.max(0.01, 0.09 - speed * 0.07);
-    const interval = Math.max(0.05, 0.95 - speed * 0.78); // slower->sparser, faster->denser
-    burstRotPhase += dt * (0.35 + speed * 3.0);
+    const speedNorm = Math.max(0, Math.min(1, state.burstSpeed / 2.0));
+    const duration = Math.max(0.05, Number.isFinite(state.burstDuration) ? state.burstDuration : 0.8);
+    const width = Math.max(0, Math.min(1, Number.isFinite(state.burstWidth) ? state.burstWidth : 0.25));
+    burstGlobalPhase = wrapAngle(burstGlobalPhase + dt * (0.15 + speedNorm * 1.5));
 
-    // Behavior 0: edge cannons (count controls number of cannons).
-    if (behavior === 0) {
-      for (let i = 0; i < count; i++) {
-        const e = burstEmitters[i];
-        if (e.active <= 0) e.timer -= dt;
-        if (e.active <= 0 && e.timer <= 0) {
-          e.angle = Math.random() * Math.PI * 2;
-          armBurstEmitter(e, duration * (0.75 + Math.random() * 0.45));
-          e.timer = interval * (0.85 + Math.random() * 0.45);
-        }
-        runBurstEmitter(e, dt, duration, cadence, 0.03, false, false, width);
+    const shotInterval = Math.max(0.16, (1.25 - speedNorm * 0.7) + Math.min(0.45, duration * 0.12));
+    for (let i = 0; i < burstEmitters.length; i++) {
+      const e = burstEmitters[i];
+      e.cooldown -= dt;
+      if (e.cooldown <= 0) {
+        spawnBurstShot(e, behavior, i, count, speedNorm, duration, width);
+        e.cooldown = shotInterval * (0.8 + Math.random() * 0.45);
       }
-      return;
     }
 
-    // Behavior 1: radial symmetry from edge toward center.
-    // Behavior 2: radial symmetry from center outward.
-    // Behavior 4: rotating radial ring from edge toward center.
-    if (behavior === 1 || behavior === 2 || behavior === 4) {
-      const outward = behavior === 2;
-      const fromCenter = behavior === 2;
-      const rotate = behavior === 4 ? burstRotPhase : 0;
-      const gate = burstEmitters[0];
-      const allIdle = burstEmitters.every(e => e.active <= 0);
-      if (allIdle) gate.timer -= dt;
-      if (allIdle && gate.timer <= 0) {
-        const step = (Math.PI * 2) / count;
-        for (let i = 0; i < count; i++) {
-          const e = burstEmitters[i];
-          e.angle = rotate + i * step;
-          armBurstEmitter(e, duration);
-        }
-        gate.timer = interval * (0.9 + Math.random() * 0.3);
-      }
-      for (let i = 0; i < count; i++) {
-        runBurstEmitter(burstEmitters[i], dt, duration, cadence, behavior === 4 ? 0.03 : 0.015, fromCenter, outward, width);
-      }
-      return;
-    }
+    for (let i = burstShots.length - 1; i >= 0; i--) {
+      const s = burstShots[i];
+      const prevX = s.x;
+      const prevY = s.y;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.life -= dt;
 
-    // Behavior 3: edge barrage — independent emitters that sweep around.
-    for (const e of burstEmitters) {
-      if (e.active <= 0) e.timer -= dt;
-      if (e.active <= 0 && e.timer <= 0) {
-        e.angle = Math.random() * Math.PI * 2;
-        armBurstEmitter(e, duration * (0.65 + Math.random() * 0.8));
-        e.timer = interval * (0.45 + Math.random() * 0.9);
+      const distC = Math.hypot(s.x - 0.5, s.y - 0.5);
+      if (s.life <= 0 || distC > SIM_SPHERE_RADIUS + 0.08) {
+        burstShots.splice(i, 1);
+        continue;
       }
-      e.angle += dt * (0.2 + speed * 1.2) * e.drift;
-      runBurstEmitter(e, dt, duration, cadence, 0.12, false, false, width);
+
+      const stepX = s.x - prevX;
+      const stepY = s.y - prevY;
+      if (Math.abs(stepX) + Math.abs(stepY) < 1e-6) continue;
+
+      const ageT = 1 - s.life / Math.max(1e-6, s.maxLife);
+      const fade = Math.max(0.25, 1 - ageT * 0.7);
+      const force = s.forceScale * fade;
+      const dye = s.dyeScale * (0.72 + fade * 0.38);
+      const col = palette(time * 0.13 + s.colorOffset + ageT * 0.3, 4);
+      const samples = 2;
+      for (let j = 1; j <= samples && splatCount < MAX_SPLATS; j++) {
+        const t = j / samples;
+        const px = prevX + stepX * t;
+        const py = prevY + stepY * t;
+        addSplat(
+          px,
+          py,
+          stepX * state.splatForce * force,
+          stepY * state.splatForce * force,
+          col[0] * dye,
+          col[1] * dye,
+          col[2] * dye,
+          s.radius * (1 - ageT * 0.22)
+        );
+      }
+
+      const drag = Math.max(0, 1 - dt * 2.2);
+      s.vx *= drag;
+      s.vy *= drag;
     }
   }
 
@@ -5130,7 +5151,6 @@ async function main() {
     return _palOut;
   }
   let time = 0;
-  let masterStepAccumulator = 0;
 
   // ─── Frame loop ─────────────────────────────────────────────────────────
   function frame() {
@@ -5146,15 +5166,6 @@ async function main() {
     pumpFaceTracker(nowMs);
     drawFaceDebugOverlay(nowMs);
 
-    // Master speed throttles full simulation ticks without changing solver dt.
-    // 1.0 = run every frame; 0.5 = run ~every other frame; 0.0 = paused.
-    const masterSpeed = Math.max(0, Math.min(1, Number.isFinite(state.masterSpeed) ? state.masterSpeed : 1.0));
-    masterStepAccumulator += masterSpeed;
-    if (masterStepAccumulator < 1.0) {
-      return;
-    }
-    masterStepAccumulator -= 1.0;
-
     // Cap GPU queue depth: skip frame if GPU is >2 frames behind
     if (gpuFramesPending > 2) {
       gpuFramesSkipped++;
@@ -5162,7 +5173,11 @@ async function main() {
     }
     gpuFramesPending++;
 
-    const dt = 0.016 * state.simSpeed;
+    // Continuous time scaling: render every frame, but advance simulation with smaller dt.
+    // This avoids the frame-skipping look while still slowing all calculations.
+    const masterSpeed = Math.max(0, Math.min(1, Number.isFinite(state.masterSpeed) ? state.masterSpeed : 1.0));
+    frameTimeScale = masterSpeed;
+    const dt = 0.016 * state.simSpeed * masterSpeed;
     time += dt;
 
     updateAutoMorph();
@@ -5231,10 +5246,11 @@ async function main() {
     displayUBData[17] = okTipCol[1];
     displayUBData[18] = okTipCol[2];
     displayUBData[19] = state.roughness;
-    displayUBData[20] = 0; // depth removed
+    // slots 20-23: display extras (20 carries symmetry behavior)
+    displayUBData[20] = Math.round(state.noiseBehavior || 0);
     displayUBData[21] = 0;
-    displayUBData[22] = 0; // pad
-    displayUBData[23] = 0; // pad
+    displayUBData[22] = 0;
+    displayUBData[23] = 0;
     device.queue.writeBuffer(displayUB, 0, displayUBData);
 
     // Collect splats into pre-allocated buffer
@@ -5394,7 +5410,7 @@ async function main() {
       noiseData[0] = time;
       // Keep low-end control but avoid over-damping the effect.
       const na = state.noiseAmount;
-      noiseData[1] = na * na;
+      noiseData[1] = na * na * frameTimeScale;
       noiseData[2] = SIM_RES;
       noiseData[3] = state.noiseFrequency;
       noiseData[4] = state.noiseSpeed;
@@ -5417,18 +5433,19 @@ async function main() {
     // ── Dye Noise (convergence dye + curl noise dye) ──
     const hasDyeNoise = state.dyeNoiseAmount > 0.001;
     const hasCurlDye = state.noiseDyeIntensity > 0.01 && state.noiseAmount > 0.01;
-    if (hasDyeNoise || hasCurlDye) {
+    const enforceNoiseSymmetry = state.noiseAmount > 0.01 && state.noiseBehavior > 0.5;
+    if (hasDyeNoise || hasCurlDye || enforceNoiseSymmetry) {
       const col = palette(time * 0.05, 4);
       dyeNoiseData[0] = time;
-      dyeNoiseData[1] = hasDyeNoise ? state.dyeNoiseAmount : 0;
+      dyeNoiseData[1] = hasDyeNoise ? state.dyeNoiseAmount * frameTimeScale : 0;
       dyeNoiseData[2] = SIM_RES;
       // noiseDyeIntensity controls how much dye the curl noise injects
       const ndi = state.noiseDyeIntensity;
-      dyeNoiseData[3] = hasCurlDye ? ndi * ndi : 0;
+      dyeNoiseData[3] = hasCurlDye ? ndi * ndi * frameTimeScale : 0;
       dyeNoiseData[4] = col[0];
       dyeNoiseData[5] = col[1];
       dyeNoiseData[6] = col[2];
-      dyeNoiseData[7] = 1;
+      dyeNoiseData[7] = Math.round(state.noiseBehavior || 0);
       device.queue.writeBuffer(dyeNoiseBuf, 0, dyeNoiseData);
       const p = enc.beginComputePass();
       p.setPipeline(dyeNoisePipe.pipeline);
@@ -5610,18 +5627,6 @@ async function main() {
         rp.end();
       }
     }
-
-    // ── Pass 14: Glass Shell (commented out) ──
-    // glassUBData[0] = canvas.width;
-    // glassUBData[1] = canvas.height;
-    // glassUBData[2] = time;
-    // glassUBData[4] = state.rimIntensity;
-    // glassUBData[5] = state.causticIntensity;
-    // device.queue.writeBuffer(glassUB, 0, glassUBData);
-    // { const rp = enc.beginRenderPass({ ... });
-    //   rp.setPipeline(glassShellPipeline);
-    //   rp.setBindGroup(0, glassShellBG);
-    //   rp.draw(3); rp.end(); }
 
     try {
       device.queue.submit([enc.finish()]);
@@ -5806,9 +5811,6 @@ async function main() {
   wireSlider('metallic', 'metallic');
   wireSlider('roughness', 'roughness');
   wireColor('sheenColor', 'sheenColor');
-  // wireSlider('rimIntensity', 'rimIntensity'); // glass marble
-  // wireSlider('chromaticStrength', 'chromaticStrength'); // glass marble
-  // wireSlider('causticIntensity', 'causticIntensity'); // glass marble
   wireSlider('clickSize', 'clickSize');
   wireSlider('clickStrength', 'clickStrength');
   wireSelect('burstBehavior', 'burstBehavior');
@@ -5822,19 +5824,19 @@ async function main() {
   wireSelect('noiseType', 'noiseType', v => applyNoiseTypeProfile(v, true));
   wireSelect('noiseMapping', 'noiseMapping');
   wireSelect('faceEffectorMode', 'faceEffectorMode', v => {
-    const mode = Math.max(0, Math.min(7, Math.round(v)));
+    const mode = Math.max(0, Math.min(1, Math.round(v)));
     state.faceEffectorMode = mode;
-    applyFaceModeProfile(mode, syncAllUI);
     if (faceEffectorModeSelect) faceEffectorModeSelect.value = String(mode);
     if (mode > 0 && !faceTracking.enabled) {
       startFaceTracking();
     }
+    if (mode <= 0 && state.faceDebugMode <= 0 && faceTracking.enabled) {
+      stopFaceTracking(true);
+      setFaceStatus('Face tracking idle');
+    }
   });
   wireSelect('faceDebugMode', 'faceDebugMode', v => {
     state.faceDebugMode = Math.max(0, Math.min(2, Math.round(v)));
-    if (state.faceDebugMode > 0 && !faceTracking.enabled) {
-      startFaceTracking();
-    }
   });
   wireSlider('noiseBehavior', 'noiseBehavior', formatNoiseBehavior);
   wireSlider('noiseFrequency', 'noiseFrequency');
@@ -5879,13 +5881,17 @@ async function main() {
   wireSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
   if (faceTrackingToggleBtn) {
     faceTrackingToggleBtn.addEventListener('click', () => {
-      if (faceTracking.enabled || faceTracking.initializing) {
+      if (faceTracking.initializing) {
+        return;
+      }
+      if (faceTracking.enabled) {
         stopFaceTracking();
       } else {
         startFaceTracking();
       }
     });
   }
+  syncFaceTrackingToggleButton();
   setFaceStatus('Face tracking idle');
   window.addEventListener('beforeunload', () => {
     if (faceTracking.enabled) stopFaceTracking();
@@ -5941,7 +5947,9 @@ async function main() {
     }
     {
       const faceModeSel = document.getElementById('faceEffectorMode');
-      if (faceModeSel) faceModeSel.value = String(Math.round(state.faceEffectorMode || 0));
+      const mode = Math.max(0, Math.min(1, Math.round(state.faceEffectorMode || 0)));
+      state.faceEffectorMode = mode;
+      if (faceModeSel) faceModeSel.value = String(mode);
     }
     {
       const faceDebugSel = document.getElementById('faceDebugMode');
@@ -6017,11 +6025,11 @@ async function main() {
     // Burst emitters
     state.burstBehavior = Math.round(randRange(0, 4));
     state.burstCount = Math.round(randRange(0, 8));
-    state.burstForce = snapTo(randRange(0, 4), 0.01);
+    state.burstForce = snapTo(randRange(0, 3.2), 0.01);
     state.burstForceRandomness = snapTo(randRange(0, 1), 0.01);
-    state.burstSpeed = snapTo(randRange(0, 1.2), 0.01);
-    state.burstDuration = snapTo(randRange(0, 2), 0.01);
-    state.burstWidth = snapTo(randRange(0, 1), 0.01);
+    state.burstSpeed = snapTo(randRange(0, 2.0), 0.01);
+    state.burstDuration = snapTo(randRange(0.1, 4.0), 0.01);
+    state.burstWidth = snapTo(randRange(0.05, 0.9), 0.01);
     // Noise
     state.noiseAmount = snapTo(randRange(0, 1), 0.01);
     state.noiseType = Math.round(randRange(0, 7));
@@ -6072,8 +6080,8 @@ async function main() {
     burstCount: { min: 0, max: 8, step: 1 },
     burstForce: { min: 0, max: 4, step: 0.01 },
     burstForceRandomness: { min: 0, max: 1, step: 0.01 },
-    burstSpeed: { min: 0, max: 1.2, step: 0.01 },
-    burstDuration: { min: 0, max: 2, step: 0.01 },
+    burstSpeed: { min: 0, max: 2.0, step: 0.01 },
+    burstDuration: { min: 0.05, max: 4.0, step: 0.01 },
     burstWidth: { min: 0, max: 1, step: 0.01 },
     noiseAmount: { min: 0, max: 1, step: 0.01 },
     noiseMapping: { min: 0, max: 1, step: 1 },
@@ -6356,7 +6364,7 @@ async function main() {
   }
   console.log(`Fluid simulation starting... (${(performance.now() - t0).toFixed(0)}ms)`);
   document.getElementById('loading').style.display = 'none';
-  if (state.faceEffectorMode > 0 || state.faceDebugMode > 0) {
+  if (state.faceEffectorMode > 0) {
     startFaceTracking();
   }
   requestAnimationFrame(frame);
