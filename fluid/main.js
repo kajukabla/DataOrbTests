@@ -357,13 +357,19 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let count = min(splatMeta.x, ${MAX_SPLATS}u);
   for (var i = 0u; i < count; i++) {
     let s = splats[i];
+    let radius = max(abs(s.radius), 1e-5);
     let diff = uv - vec2f(s.x, s.y);
     let dist2 = dot(diff, diff);
-    let strength = exp(-dist2 / (2.0 * s.radius * s.radius));
+    let strength = exp(-dist2 / (2.0 * radius * radius));
     let incoming = vec3f(s.r, s.g, s.b);
     if (incoming.x + incoming.y + incoming.z > 0.0) {
       let blend = min(strength * boundaryFade * p.splatX, 1.0);
-      dye = vec4f(mix(dye.rgb, incoming, blend), 1.0);
+      // Face dye marks splats with negative radius to request additive-only injection.
+      if (s.radius < 0.0) {
+        dye = vec4f(dye.rgb + incoming * blend, 1.0);
+      } else {
+        dye = vec4f(mix(dye.rgb, incoming, blend), 1.0);
+      }
     }
   }
   textureStore(dst, id.xy, dye);
@@ -4771,12 +4777,16 @@ async function main() {
     const radiusScale = stampSize * (0.72 + contribution * 0.4);
     const detailScale = Math.max(0.2, Math.min(1.0, maskDetail * (0.5 + contribution * 0.5)));
 
+    const additiveDye = true;
     const addFaceSplat = (x, y, dx, dy, r, g, b, radius) => {
+      const signedRadius = additiveDye
+        ? -Math.max(1e-5, radius * radiusScale)
+        : Math.max(1e-5, radius * radiusScale);
       addSplat(
         x, y,
         dx * forceScale, dy * forceScale,
         r * dyeScale, g * dyeScale, b * dyeScale,
-        radius * radiusScale
+        signedRadius
       );
     };
 
@@ -4806,9 +4816,9 @@ async function main() {
     const mouthCenter = [face.mouthCenterX, face.mouthCenterY];
     const flowX = faceTracking.centerVelX * FACE_SPLAT_FORCE_BASE * 0.0038;
     const flowY = faceTracking.centerVelY * FACE_SPLAT_FORCE_BASE * 0.0038;
-    const fillCol = palette(modeTime * (0.026 + smile * 0.018), 2);
-    const edgeCol = palette(modeTime * 0.072 + browLift * 0.08, 5);
-    const mouthCol = palette(modeTime * 0.11 + mouth * 0.22 + cheekPuff * 0.06, 1);
+    const fillCol = [...palette(modeTime * (0.026 + smile * 0.018), 2)];
+    const edgeCol = [...palette(modeTime * 0.072 + browLift * 0.08, 5)];
+    const mouthCol = [...palette(modeTime * 0.11 + mouth * 0.22 + cheekPuff * 0.06, 1)];
     const contourStep = detailScale > 0.72 ? 2 : (detailScale > 0.46 ? 3 : 4);
     const holeStep = detailScale > 0.68 ? 1 : 2;
     const fillTs = detailScale > 0.72
@@ -4874,6 +4884,7 @@ async function main() {
 
     // 3) Carve eye + mouth holes by blending these regions toward near-black dye.
     const carveToDark = (indices, openness, sizeMul = 1.0) => {
+      if (additiveDye) return;
       if (holeCarve <= 0.001) return;
       const closed = 1.0 - Math.max(0, Math.min(1, openness));
       const dark = 0.00005 + (0.0004 + closed * 0.0015) * holeCarve;
