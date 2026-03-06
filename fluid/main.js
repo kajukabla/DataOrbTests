@@ -79,10 +79,10 @@ const state = {
   // Face effector
   faceEffectorMode: 0,
   faceDyeContribution: 1.1,
-  faceDyeFill: 1.4,
+  faceDyeFill: 1.8,
   faceEdgeBoost: 0.9,
   faceFlowCarry: 0.12,
-  faceHoleCarve: 0.78,
+  faceHoleCarve: 0.45,
   faceMouthBoost: 1.0,
   faceMaskDetail: 0.68,
   faceStampSize: 1.35,
@@ -3772,7 +3772,7 @@ async function main() {
     smoothedEyeRight: 1,
     prevMouth: 0,
     lastFaceSeenAt: -1,
-    noFaceGraceMs: 3500,
+    noFaceGraceMs: 10000,
     lastMouthBurstTime: -999,
     droppedFrames: 0,
     errorStreak: 0,
@@ -4759,10 +4759,10 @@ async function main() {
     if (!face) return;
     const contribution = Math.max(0, Math.min(2, state.faceDyeContribution ?? 1));
     if (contribution <= 0.001) return;
-    const fillGain = Math.max(0, state.faceDyeFill ?? 1.4);
+    const fillGain = Math.max(0, state.faceDyeFill ?? 1.8);
     const edgeGain = Math.max(0, state.faceEdgeBoost ?? 0.9);
     const flowCarry = Math.max(0, Math.min(1.5, state.faceFlowCarry ?? 0.12));
-    const holeCarve = Math.max(0, Math.min(1.0, state.faceHoleCarve ?? 0.78));
+    const holeCarve = Math.max(0, Math.min(1.0, state.faceHoleCarve ?? 0.45));
     const mouthBoost = Math.max(0, state.faceMouthBoost ?? 1.0);
     const maskDetail = Math.max(0.2, Math.min(1.0, state.faceMaskDetail ?? 0.68));
     const stampSize = Math.max(0.5, Math.min(3.0, state.faceStampSize ?? 1.35));
@@ -4816,7 +4816,7 @@ async function main() {
       : (detailScale > 0.46 ? [0.24, 0.44, 0.64, 0.82] : [0.34, 0.58, 0.82]);
 
     // Stable anchor so face-dye remains visible even if expression-driven regions fluctuate.
-    const anchorGain = 0.02 + contribution * 0.018;
+    const anchorGain = 0.05 + contribution * 0.03;
     addFaceSplat(
       face.centerX, face.centerY,
       flowX * 0.5, flowY * 0.5,
@@ -4843,7 +4843,7 @@ async function main() {
         const x = face.centerX + (pt[0] - face.centerX) * t;
         const y = face.centerY + (pt[1] - face.centerY) * t;
         const radialFalloff = 1.0 - t * 0.72;
-        const g = 0.026 + radialFalloff * 0.04 + mouth * 0.018 + poseMotion * 0.012;
+        const g = 0.05 + radialFalloff * 0.08 + mouth * 0.03 + poseMotion * 0.02;
         const drift = 0.2 + (1.0 - t) * 0.3;
         addFaceSplat(
           x, y,
@@ -4861,7 +4861,7 @@ async function main() {
       const pt = getPoint(idx);
       if (!pt) continue;
       const [nx, ny] = direction(face.centerX, face.centerY, pt[0], pt[1]);
-      const edgeTint = edgeGain * (0.024 + smile * 0.02 + poseMotion * 0.014);
+      const edgeTint = edgeGain * (0.04 + smile * 0.03 + poseMotion * 0.02);
       const edgeNudge = FACE_SPLAT_FORCE_BASE * 0.0035 * edgeGain;
       addFaceSplat(
         pt[0], pt[1],
@@ -4876,16 +4876,16 @@ async function main() {
     const carveToDark = (indices, openness, sizeMul = 1.0) => {
       if (holeCarve <= 0.001) return;
       const closed = 1.0 - Math.max(0, Math.min(1, openness));
-      const dark = 0.00025 + (0.0014 + closed * 0.006) * holeCarve;
+      const dark = 0.00005 + (0.0004 + closed * 0.0015) * holeCarve;
       for (let i = 0; i < indices.length; i += holeStep) {
         const idx = indices[i];
         const pt = getPoint(idx);
         if (!pt) continue;
         addFaceSplat(
           pt[0], pt[1],
-          flowX * 0.12, flowY * 0.12,
+          flowX * 0.05, flowY * 0.05,
           dark, dark, dark,
-          state.splatRadius * (1.25 + sizeMul * (0.55 + closed * 0.55))
+          state.splatRadius * (0.6 + sizeMul * (0.35 + closed * 0.25))
         );
       }
     };
@@ -4901,7 +4901,7 @@ async function main() {
         const idx = FACE_IDX.mouthHole[i];
         const pt = getPoint(idx);
         if (!pt) continue;
-        const g = 0.018 + mouthDrive * 0.07 * mouthBoost;
+        const g = 0.04 + mouthDrive * 0.1 * mouthBoost;
         addFaceSplat(
           pt[0], pt[1],
           flowX * 0.62, flowY * 0.62,
@@ -4910,7 +4910,7 @@ async function main() {
         );
       }
       if (mouthBurst) {
-        const burstGain = 0.028 + mouthDrive * 0.12 * mouthBoost;
+        const burstGain = 0.05 + mouthDrive * 0.14 * mouthBoost;
         addFaceSplat(
           mouthCenter[0], mouthCenter[1],
           flowX * 0.75, flowY * 0.75,
