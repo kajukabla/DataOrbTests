@@ -21,8 +21,10 @@ export const SLIDER_SPACE = {
   burstCount:        { min: 0,    max: 8,     step: 1    },
   burstForce:        { min: 0,    max: 4,     step: 0.01 },
   burstForceRandomness:{ min: 0,  max: 1,     step: 0.01 },
-  burstSpeed:        { min: 0,    max: 1.2,   step: 0.01 },
-  burstDuration:     { min: 0,    max: 2,     step: 0.01 },
+  burstSpeed:        { min: 0,    max: 2.0,   step: 0.01 },
+  burstTravelSpeed:  { min: 0.25, max: 4.0,   step: 0.01 },
+  burstDuration:     { min: 0.05, max: 8.0,   step: 0.01 },
+  burstWidth:        { min: 0,    max: 2.0,   step: 0.01 },
   noiseAmount:       { min: 0,    max: 1,     step: 0.01 },
   noiseType:         { min: 0,    max: 7,     step: 1    },
   noiseBehavior:     { min: 0,    max: 8,     step: 1    },
@@ -86,6 +88,54 @@ export const COLOR_KEYS = [
   'glitterAccent', 'glitterTip', 'sheenColor'
 ];
 
+const NOISE_CONTROL_KEYS = ['noiseWarp', 'noiseSharpness', 'noiseAnisotropy', 'noiseBlend'];
+const NOISE_PROFILE_BY_TYPE = [
+  { noiseWarp: 0.22, noiseSharpness: 0.30, noiseAnisotropy: 0.25, noiseBlend: 0.24 }, // Classic
+  { noiseWarp: 0.76, noiseSharpness: 0.58, noiseAnisotropy: 0.40, noiseBlend: 0.52 }, // Domain-Warped
+  { noiseWarp: 0.42, noiseSharpness: 0.78, noiseAnisotropy: 0.30, noiseBlend: 0.48 }, // Ridged
+  { noiseWarp: 0.38, noiseSharpness: 0.55, noiseAnisotropy: 0.20, noiseBlend: 0.74 }, // Voronoi
+  { noiseWarp: 0.52, noiseSharpness: 0.46, noiseAnisotropy: 0.86, noiseBlend: 0.40 }, // Flow
+  { noiseWarp: 0.50, noiseSharpness: 0.62, noiseAnisotropy: 0.72, noiseBlend: 0.44 }, // Gabor
+  { noiseWarp: 0.66, noiseSharpness: 0.58, noiseAnisotropy: 0.60, noiseBlend: 0.64 }, // Hybrid
+  { noiseWarp: 0.78, noiseSharpness: 0.58, noiseAnisotropy: 0.70, noiseBlend: 0.62 }, // Jupiter
+];
+const NOISE_ACTIVE_BY_TYPE = [
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },  // Classic
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },  // Domain-Warped
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: false, noiseBlend: true }, // Ridged
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: false, noiseBlend: true }, // Voronoi
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },  // Flow
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },  // Gabor
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },  // Hybrid
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },  // Jupiter
+];
+
+function clampNoiseType(raw) {
+  const n = Math.round(Number.isFinite(raw) ? raw : 0);
+  return Math.max(0, Math.min(NOISE_PROFILE_BY_TYPE.length - 1, n));
+}
+
+function snapClamp(v, s, fallback) {
+  let out = Number.isFinite(v) ? v : fallback;
+  out = Math.round(out / s.step) * s.step;
+  if (out < s.min) out = s.min;
+  if (out > s.max) out = s.max;
+  return out;
+}
+
+function canonicalizeNoiseFields(params) {
+  const noiseType = clampNoiseType(params.noiseType);
+  params.noiseType = noiseType;
+  const profile = NOISE_PROFILE_BY_TYPE[noiseType];
+  const active = NOISE_ACTIVE_BY_TYPE[noiseType];
+  for (const key of NOISE_CONTROL_KEYS) {
+    const space = SLIDER_SPACE[key];
+    const fallback = profile[key];
+    const raw = active[key] ? params[key] : fallback;
+    params[key] = snapClamp(raw, space, fallback);
+  }
+}
+
 // ─── Parameter Group Indices ────────────────────────────────────────────────
 // Split SLIDER_KEYS into motion vs color for dual-GP training
 
@@ -123,11 +173,18 @@ function setStateVal(state, key, val) {
 
 /** Extract state → [0,1]^D normalized vector (Float64Array). */
 export function stateToNormalized(state) {
+  const canonical = {};
+  for (let i = 0; i < D; i++) {
+    const key = SLIDER_KEYS[i];
+    canonical[key] = getStateVal(state, key);
+  }
+  canonicalizeNoiseFields(canonical);
+
   const x = new Float64Array(D);
   for (let i = 0; i < D; i++) {
     const key = SLIDER_KEYS[i];
     const s = SLIDER_SPACE[key];
-    const val = getStateVal(state, key);
+    const val = canonical[key];
     if (val === undefined || val === null || Number.isNaN(val)) {
       x[i] = 0.5;
     } else {
@@ -152,6 +209,20 @@ export function normalizedToState(x, state, lockedKeys) {
     if (val < s.min) val = s.min;
     if (val > s.max) val = s.max;
     setStateVal(state, key, val);
+  }
+  // Keep noise control dimensions coherent with selected noise type.
+  const canonical = {};
+  for (let i = 0; i < D; i++) {
+    const key = SLIDER_KEYS[i];
+    canonical[key] = getStateVal(state, key);
+  }
+  canonicalizeNoiseFields(canonical);
+  for (const key of NOISE_CONTROL_KEYS) {
+    if (lockedKeys && lockedKeys.has(key)) continue;
+    setStateVal(state, key, canonical[key]);
+  }
+  if (!(lockedKeys && lockedKeys.has('noiseType'))) {
+    setStateVal(state, 'noiseType', canonical.noiseType);
   }
   // Clamp critical params so the sim is always visually active
   if (state.simSpeed < 0.2) state.simSpeed = 0.2;
@@ -226,11 +297,13 @@ function ratingsToMotionData(ratings) {
   const y = new Float64Array(N);
   for (let i = 0; i < N; i++) {
     const r = ratings[i];
+    const p = { ...r.params };
+    canonicalizeNoiseFields(p);
     for (let j = 0; j < D_MOTION; j++) {
       const key = SLIDER_KEYS[MOTION_INDICES[j]];
       const s = SLIDER_SPACE[key];
-      if (r.params[key] !== undefined) {
-        X[i * D_MOTION + j] = (r.params[key] - s.min) / (s.max - s.min);
+      if (p[key] !== undefined) {
+        X[i * D_MOTION + j] = (p[key] - s.min) / (s.max - s.min);
       } else {
         X[i * D_MOTION + j] = 0.5;
       }
@@ -247,11 +320,13 @@ function ratingsToColorData(ratings) {
   const y = new Float64Array(N);
   for (let i = 0; i < N; i++) {
     const r = ratings[i];
+    const p = { ...r.params };
+    canonicalizeNoiseFields(p);
     for (let j = 0; j < D_COLOR; j++) {
       const key = SLIDER_KEYS[COLOR_INDICES[j]];
       const s = SLIDER_SPACE[key];
-      if (r.params[key] !== undefined) {
-        X[i * D_COLOR + j] = (r.params[key] - s.min) / (s.max - s.min);
+      if (p[key] !== undefined) {
+        X[i * D_COLOR + j] = (p[key] - s.min) / (s.max - s.min);
       } else {
         X[i * D_COLOR + j] = 0.5;
       }
@@ -280,6 +355,20 @@ export class BOController {
     this._pendingColor = null;
     this._state = null;            // ref set by rate calls
     this._syncAllUI = null;
+    this._statePostNormalize = null;
+  }
+
+  setStatePostNormalize(fn) {
+    this._statePostNormalize = typeof fn === 'function' ? fn : null;
+  }
+
+  _runStatePostNormalize(state, source) {
+    if (!this._statePostNormalize || !state) return;
+    try {
+      this._statePostNormalize(state, source);
+    } catch (e) {
+      console.warn('BO: state post-normalize hook failed:', e);
+    }
   }
 
   static async create() {
@@ -322,6 +411,7 @@ export class BOController {
   async saveExample(name, state) {
     const params = {};
     for (const key of SLIDER_KEYS) params[key] = getStateVal(state, key);
+    canonicalizeNoiseFields(params);
     await fetch('/api/examples', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -351,6 +441,7 @@ export class BOController {
         setStateVal(state, key, example.params[key]);
       }
     }
+    this._runStatePostNormalize(state, 'load-example');
     if (syncAllUI) syncAllUI();
   }
 
@@ -549,6 +640,7 @@ export class BOController {
       // Snapshot current params
       const params = {};
       for (const key of SLIDER_KEYS) params[key] = getStateVal(state, key);
+      canonicalizeNoiseFields(params);
 
       // Store with dual ratings
       this.ratings.push({
@@ -578,6 +670,7 @@ export class BOController {
       }
 
       normalizedToState(nextX, state, this.lockedKeys);
+      this._runStatePostNormalize(state, 'rating-advance');
       if (syncAllUI) syncAllUI();
       this.updateOverlay();
 
@@ -588,6 +681,7 @@ export class BOController {
       this._pendingMovement = null;
       this._pendingColor = null;
       normalizedToState(randomNormalized(), this._state, this.lockedKeys);
+      this._runStatePostNormalize(this._state, 'commit-fallback');
       if (this._syncAllUI) this._syncAllUI();
     }
   }
@@ -713,7 +807,7 @@ export class BOController {
   /** Toggle locking motion/dynamics params. */
   toggleLockMotion() {
     const motionKeys = SLIDER_KEYS.filter(k =>
-      ['simSpeed', 'burstBehavior', 'burstCount', 'burstForce', 'burstForceRandomness', 'burstSpeed', 'burstDuration',
+      ['simSpeed', 'burstBehavior', 'burstCount', 'burstForce', 'burstForceRandomness', 'burstSpeed', 'burstTravelSpeed', 'burstDuration', 'burstWidth',
         'noiseAmount', 'noiseType', 'noiseBehavior', 'noiseFrequency', 'noiseSpeed',
         'noiseWarp', 'noiseSharpness', 'noiseAnisotropy', 'noiseBlend',
         'curlStrength', 'dyeNoiseAmount'].includes(k));

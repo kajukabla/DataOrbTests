@@ -42,8 +42,9 @@ const state = {
   burstForce: 0.8,
   burstForceRandomness: 0.25,
   burstSpeed: 0.6,
+  burstTravelSpeed: 1.2,
   burstDuration: 0.8,
-  burstWidth: 0.25,
+  burstWidth: 0.35,
   sheenColor: [1.0, 0.9, 0.7],
   splatForce: 6000,
   curlStrength: 15,
@@ -73,6 +74,7 @@ const state = {
   paletteIndex: -1,
   // Face effector
   faceEffectorMode: 0,
+  faceDyeContribution: 1.1,
   faceDebugMode: 0,
 };
 
@@ -349,7 +351,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let strength = exp(-dist2 / (2.0 * s.radius * s.radius));
     let incoming = vec3f(s.r, s.g, s.b);
     if (incoming.x + incoming.y + incoming.z > 0.0) {
-      dye = vec4f(mix(dye.rgb, incoming, min(strength * boundaryFade, 1.0)), 1.0);
+      let blend = min(strength * boundaryFade * p.splatX, 1.0);
+      dye = vec4f(mix(dye.rgb, incoming, blend), 1.0);
     }
   }
   textureStore(dst, id.xy, dye);
@@ -787,108 +790,191 @@ fn applyNoiseMapping(uvRaw: vec2f, t: f32) -> vec2f {
   return vec2f(a01 * (1.0 + np.anisotropy * 3.0), radialScroll + twist);
 }
 
+fn fbm4(pIn: vec2f, t: f32) -> f32 {
+  let n1 = vnoise(pIn + vec2f(t * 0.31, t * 0.19));
+  let n2 = vnoise(rot2(pIn * 2.03, 1.11) + vec2f(-t * 0.47, t * 0.36));
+  let n3 = vnoise(rot2(pIn * 4.02, -0.74) + vec2f(t * 0.63, -t * 0.41));
+  let n4 = vnoise(rot2(pIn * 8.01, 0.41) + vec2f(-t * 0.85, t * 0.77));
+  return n1 * 0.5 + n2 * 0.27 + n3 * 0.15 + n4 * 0.08;
+}
+
+fn noiseClassicCurlField(uvRaw: vec2f, t: f32) -> f32 {
+  let uv = applyNoiseMapping(uvRaw, t);
+  let p = uv * (2.0 + np.frequency * 13.0);
+  let warp = (vec2f(
+    vnoise(p * 0.82 + vec2f(t * 0.17, -t * 0.13)),
+    vnoise(p * 0.82 + vec2f(-t * 0.11, t * 0.19))
+  ) * 2.0 - 1.0) * (0.2 + np.warp * 1.8);
+  let q = p + warp;
+  let base = vnoise(q + vec2f(t * 0.28, t * 0.18));
+  let octave2 = vnoise(rot2(q * 2.08, 0.45 + np.anisotropy * 1.2) + vec2f(-t * 0.43, t * 0.29));
+  let octave3 = vnoise(rot2(q * 4.01, -0.75 - np.anisotropy * 0.6) + vec2f(t * 0.67, -t * 0.38));
+  let micro = (vnoise(q * 6.4 + vec2f(-t * 0.75, t * 0.61)) - 0.5) * 2.0;
+  var s = base * (0.55 - np.sharpness * 0.25) + octave2 * 0.3 + octave3 * (0.15 + np.sharpness * 0.22);
+  s += micro * (0.07 + np.blend * 0.16);
+  return s;
+}
+
+fn noiseDomainWarpedField(uvRaw: vec2f, t: f32) -> f32 {
+  let uv = applyNoiseMapping(uvRaw, t);
+  let p = uv * (2.4 + np.frequency * 11.5);
+  let warp1 = (vec2f(
+    vnoise(p * 0.58 + vec2f(t * 0.24, -t * 0.17)),
+    vnoise(p * 0.58 + vec2f(-t * 0.22, t * 0.21))
+  ) * 2.0 - 1.0) * (0.5 + np.warp * 3.3);
+  let p1 = p + warp1;
+  let warp2 = (vec2f(
+    vnoise(rot2(p1 * 1.62, 0.91) + vec2f(-t * 0.36, t * 0.27)),
+    vnoise(rot2(p1 * 1.62, -0.53) + vec2f(t * 0.29, -t * 0.31))
+  ) * 2.0 - 1.0) * (0.2 + np.sharpness * 2.6);
+  let q = p1 + warp2;
+  let base = fbm4(q, t);
+  let ridged = 1.0 - abs(base * 2.0 - 1.0);
+  let ribbons = 0.5 + 0.5 * sin((q.x + q.y * 0.6) * (4.0 + np.anisotropy * 9.0) + t * (0.8 + np.speed * 2.4));
+  var s = mix(base, ridged, 0.2 + np.blend * 0.5);
+  s = mix(s, ribbons, 0.12 + np.sharpness * 0.38);
+  return s;
+}
+
+fn noiseRidgedField(uvRaw: vec2f, t: f32) -> f32 {
+  let uv = applyNoiseMapping(uvRaw, t);
+  let p = uv * (2.8 + np.frequency * 16.0);
+  let base = fbm4(p, t);
+  let ridge0 = 1.0 - abs(base * 2.0 - 1.0);
+  let ridge1 = 1.0 - abs(vnoise(rot2(p * 2.7, 1.2) + vec2f(t * 0.32, -t * 0.27)) * 2.0 - 1.0);
+  let spine = pow(max(ridge0, 0.0), 1.1 + np.sharpness * 3.2);
+  let spikes = pow(max(ridge1, 0.0), 1.8 + np.warp * 2.5);
+  var s = spine * (0.65 + np.blend * 0.45) + spikes * 0.35;
+  let detail = (vnoise(p * 5.8 + vec2f(-t * 0.66, t * 0.71)) - 0.5) * 2.0;
+  s += detail * (0.05 + np.blend * 0.22);
+  return s;
+}
+
+fn noiseVoronoiField(uvRaw: vec2f, t: f32) -> f32 {
+  let uv = applyNoiseMapping(uvRaw, t);
+  let p = uv * (3.5 + np.frequency * 21.0 + np.warp * 10.0);
+  let jitter = (vec2f(
+    vnoise(p * 0.7 + vec2f(t * 0.2, -t * 0.18)),
+    vnoise(p * 0.7 + vec2f(-t * 0.21, t * 0.16))
+  ) * 2.0 - 1.0);
+  let cellA = worleyLite(p + jitter * (0.2 + np.sharpness * 1.8));
+  let cellB = worleyLite(rot2(p * 1.9, 0.9) + jitter.yx * (0.15 + np.sharpness * 1.2));
+  let plateau = smoothstep(0.2, 0.9, cellA);
+  let edge = abs(cellA - cellB);
+  let crack = pow(1.0 - clamp(edge * (1.4 + np.blend * 2.6), 0.0, 1.0), 0.9 + np.blend * 2.3);
+  let debris = (vnoise(p * 4.6 + vec2f(t * 0.27, t * 0.31)) - 0.5) * 2.0;
+  var s = mix(plateau, crack, 0.35 + np.blend * 0.5);
+  s += debris * (0.05 + np.warp * 0.18);
+  return s;
+}
+
+fn noiseFlowField(uvRaw: vec2f, t: f32) -> f32 {
+  let uv = applyNoiseMapping(uvRaw, t);
+  let p = uv * (2.2 + np.frequency * 15.0);
+  let heading = (vnoise(p * 0.35 + vec2f(t * 0.11, -t * 0.16)) * 2.0 - 1.0) * PI * (0.2 + np.warp * 1.7);
+  let dir = vec2f(cos(heading), sin(heading));
+  let shear = (vnoise(rot2(p * 0.85, 1.05) + vec2f(-t * 0.28, t * 0.22)) - 0.5) * (0.4 + np.sharpness * 2.6);
+  let streamCoord = dot(p, dir) * (2.0 + np.anisotropy * 12.0) + shear + t * (0.65 + np.speed * 2.6);
+  let crossCoord = dot(p, vec2f(-dir.y, dir.x)) * (1.4 + np.blend * 8.0) - t * 0.45;
+  let stream = 0.5 + 0.5 * sin(streamCoord);
+  let cross = 0.5 + 0.5 * sin(crossCoord);
+  let eddy = fbm4(rot2(p * 1.1, 0.6 + heading * 0.12), t);
+  return mix(stream, eddy, 0.22 + np.blend * 0.4) * mix(1.0, cross, 0.2 + np.sharpness * 0.45);
+}
+
+fn noiseGaborField(uvRaw: vec2f, t: f32) -> f32 {
+  let uv = applyNoiseMapping(uvRaw, t);
+  let p = uv * (1.7 + np.frequency * 10.0);
+  let orient = (vnoise(p * 0.42 + vec2f(1.7, -2.9)) * 2.0 - 1.0) * PI * (0.15 + np.sharpness * 0.95);
+  let dir = vec2f(cos(orient), sin(orient));
+  let freq = 8.0 + np.frequency * 22.0 + np.warp * 26.0;
+  let carrier = sin(dot(p, dir) * freq + t * (0.45 + np.speed * 2.2));
+  let gateN = vnoise(rot2(p * (0.9 + np.blend * 1.5), 1.1) + vec2f(-t * 0.3, t * 0.24));
+  let envelope = pow(smoothstep(0.15, 0.95, gateN), 0.6 + np.blend * 2.5);
+  let secondary = sin(dot(p, vec2f(-dir.y, dir.x)) * (3.0 + np.anisotropy * 12.0) - t * 0.65);
+  let grain = (vnoise(p * 5.5 + vec2f(t * 0.7, -t * 0.62)) - 0.5) * 2.0;
+  var s = 0.5 + 0.5 * carrier * envelope;
+  s = mix(s, 0.5 + 0.5 * secondary, 0.16 + np.anisotropy * 0.34);
+  s += grain * (0.05 + np.blend * 0.2);
+  return s;
+}
+
+fn noiseHybridField(uvRaw: vec2f, t: f32) -> f32 {
+  let uv = applyNoiseMapping(uvRaw, t);
+  let p = uv * (2.3 + np.frequency * 14.0);
+  let fractal = fbm4(p, t);
+  let ridge = pow(max(1.0 - abs(fractal * 2.0 - 1.0), 0.0), 1.0 + np.anisotropy * 2.8);
+  let cell = worleyLite(rot2(p * (1.2 + np.warp * 1.6), 0.9) + vec2f(t * 0.12, -t * 0.1));
+  let flow = 0.5 + 0.5 * sin(dot(p, normalize(vec2f(0.8, 0.6))) * (6.0 + np.sharpness * 18.0) + t * (0.8 + np.speed * 1.9));
+  var s = mix(fractal, ridge, 0.2 + np.anisotropy * 0.55);
+  s = mix(s, cell, 0.15 + np.blend * 0.5);
+  s = mix(s, flow, 0.1 + np.warp * 0.45);
+  s += (vnoise(p * 6.3 + vec2f(-t * 0.81, t * 0.74)) - 0.5) * 2.0 * (0.04 + np.blend * 0.18);
+  return s;
+}
+
+fn noiseJupiterField(uvRaw: vec2f, t: f32) -> f32 {
+  let pPlanet = uvRaw - SPHERE_CENTER;
+  let latNorm = pPlanet.y / max(SPHERE_RADIUS, 1e-5);
+  let lon = (atan2(pPlanet.y, pPlanet.x) + PI) / TAU;
+
+  let jetShear = np.warp;
+  let stormDensity = np.sharpness;
+  let vortexStrength = np.anisotropy;
+  let bandContrast = np.blend;
+
+  let bandFreq = 14.0 + np.frequency * 30.0 + bandContrast * 18.0;
+  let shear = (vnoise(vec2f(latNorm * (2.5 + jetShear * 4.0) + 17.0, t * 0.12)) - 0.5) * (0.6 + jetShear * 2.8);
+  let bandPhase = latNorm * bandFreq + shear * 4.8 + t * (0.22 + np.speed * 1.3);
+  let bands = 0.5 + 0.5 * sin(bandPhase);
+  let jets = 0.5 + 0.5 * sin(latNorm * (28.0 + jetShear * 30.0) + t * 0.37 + shear * 1.7);
+  let storms = vnoise(vec2f(lon * (8.0 + stormDensity * 16.0) + t * 0.21, latNorm * (7.0 + stormDensity * 9.0) - t * 0.18));
+  let stormMask = smoothstep(0.45 - stormDensity * 0.25, 0.98, storms);
+
+  let grsCenter = vec2f(0.76, 0.44);
+  let grsScale = vec2f(max(0.045, 0.10 - vortexStrength * 0.03), max(0.028, 0.065 - vortexStrength * 0.02));
+  let grsDelta = (uvRaw - grsCenter) / grsScale;
+  let grsMask = exp(-dot(grsDelta, grsDelta));
+  let grsSwirl = 0.5 + 0.5 * sin(atan2(grsDelta.y, grsDelta.x) * (4.0 + vortexStrength * 5.0) + t * (1.4 + vortexStrength * 1.7));
+
+  let turbulence = (vnoise(vec2f(lon * 22.0 - t * 0.4, latNorm * 18.0 + t * 0.31)) - 0.5) * 2.0;
+  var s = mix(bands, jets, 0.22 + jetShear * 0.33);
+  s = mix(s, storms, 0.18 + stormDensity * 0.42);
+  s = mix(s, grsSwirl, grsMask * (0.35 + vortexStrength * 0.55));
+  s += (stormMask - 0.5) * (0.1 + stormDensity * 0.32);
+  s += turbulence * (0.04 + bandContrast * 0.14);
+  s = mix(0.5, s, 0.62 + bandContrast * 0.36);
+  return s;
+}
+
 fn scalarFieldCore(uvRaw: vec2f) -> f32 {
   let t = np.time * (0.1 + np.speed * 2.0);
-  let uv = applyNoiseMapping(uvRaw, t);
-  let baseScale = 2.0 + np.frequency * 14.0;
-  var p = uv * baseScale;
-
-  // Profile defaults by type.
   let ty = floor(np.noiseType + 0.5);
-  var pWarp = 0.20;
-  var pSharp = 0.25;
-  var pAniso = 0.15;
-  var pBlend = 0.20;
+
+  var s = 0.0;
   if (ty < 0.5) { // Classic Curl
-    pWarp = 0.20; pSharp = 0.20; pAniso = 0.10; pBlend = 0.20;
+    s = noiseClassicCurlField(uvRaw, t);
   } else if (ty < 1.5) { // Domain-Warped Curl
-    pWarp = 0.95; pSharp = 0.35; pAniso = 0.30; pBlend = 0.40;
+    s = noiseDomainWarpedField(uvRaw, t);
   } else if (ty < 2.5) { // Ridged Fractal
-    pWarp = 0.40; pSharp = 1.00; pAniso = 0.35; pBlend = 0.35;
+    s = noiseRidgedField(uvRaw, t);
   } else if (ty < 3.5) { // Voronoi / Cell
-    pWarp = 0.35; pSharp = 0.55; pAniso = 0.20; pBlend = 1.00;
+    s = noiseVoronoiField(uvRaw, t);
   } else if (ty < 4.5) { // Flow / Rotated
-    pWarp = 0.55; pSharp = 0.35; pAniso = 0.95; pBlend = 0.35;
+    s = noiseFlowField(uvRaw, t);
   } else if (ty < 5.5) { // Gabor-like
-    pWarp = 0.25; pSharp = 0.75; pAniso = 1.00; pBlend = 0.50;
+    s = noiseGaborField(uvRaw, t);
   } else if (ty < 6.5) { // Hybrid
-    pWarp = 0.80; pSharp = 0.70; pAniso = 0.65; pBlend = 0.75;
+    s = noiseHybridField(uvRaw, t);
   } else { // Jupiter
-    pWarp = 0.88; pSharp = 0.62; pAniso = 0.95; pBlend = 0.58;
+    s = noiseJupiterField(uvRaw, t);
   }
 
-  // Shared sliders nudge profile defaults.
-  let warpW = clamp(mix(pWarp, np.warp, 0.65), 0.0, 1.0);
-  let sharpW = clamp(mix(pSharp, np.sharpness, 0.65), 0.0, 1.0);
-  let anisoW = clamp(mix(pAniso, np.anisotropy, 0.65), 0.0, 1.0);
-  let blendW = clamp(mix(pBlend, np.blend, 0.65), 0.0, 1.0);
-
-  // Domain warp.
-  let w = vec2f(
-    vnoise(p * 0.65 + vec2f(t * 0.23, -t * 0.17)),
-    vnoise(p * 0.65 + vec2f(-t * 0.19, t * 0.21))
-  ) * 2.0 - 1.0;
-  p += w * warpW * 2.4;
-
-  // Multi-scale base field.
-  let p2 = rot2(p * 2.0, 0.35 + anisoW * 1.2);
-  let p3 = rot2(p * 4.0, -0.5 - anisoW * 0.9);
-  let n1 = vnoise(p + vec2f(t * 0.30, t * 0.20));
-  let n2 = vnoise(p2 + vec2f(-t * 0.50, t * 0.40));
-  let n3 = vnoise(p3 + vec2f(t * 0.70, -t * 0.30));
-  let fbm = n1 * 0.5 + n2 * 0.3 + n3 * 0.2;
-
-  // Ridged multifractal feel.
-  let ridged = pow(1.0 - abs(fbm * 2.0 - 1.0), 1.0 + sharpW * 2.0);
-
-  // Banded/anisotropic streaking.
-  let lat = (uv.y - 0.5) * (10.0 + np.frequency * 38.0);
-  let jets = 0.5 + 0.5 * sin(lat + t * (0.6 + np.speed * 1.8) + (n1 - 0.5) * 3.2);
-  let dirTheta = (vnoise(uv * 0.6 + vec2f(9.0, 4.0)) * 2.0 - 1.0) * PI;
-  let dir = vec2f(cos(dirTheta), sin(dirTheta));
-  let streak = 0.5 + 0.5 * sin(dot(uv - SPHERE_CENTER, dir) * (18.0 + np.frequency * 30.0) + t * 1.2);
-  let banded = mix(fbm, fbm * mix(1.0, pow(jets, 1.7), anisoW), 0.6) * mix(1.0, streak, anisoW * 0.5);
-
-  // Cellular breakup + micro detail.
-  let cell = worleyLite(p * (1.4 + np.frequency * 1.6));
-  let micro = (vnoise(p * 7.0 + vec2f(t * 0.9, -t * 0.8)) - 0.5) * 2.0;
-
-  var s = mix(banded, ridged, sharpW);
-  s += (cell - 0.5) * blendW * 0.8;
-  s += micro * (0.15 + 0.12 * blendW);
-
-  // Type accents.
-  if (ty >= 6.5) {
-    // Jupiter: banded gas giant flow with storm cells and a red-spot style vortex.
-    let pPlanet = uvRaw - SPHERE_CENTER;
-    let latNorm = pPlanet.y / max(SPHERE_RADIUS, 1e-5);
-    let lon = (atan2(pPlanet.y, pPlanet.x) + PI) / TAU;
-    let shear = (vnoise(vec2f(latNorm * 3.0 + 17.0, t * 0.15)) - 0.5) * (0.8 + np.warp);
-    let bandPhase = latNorm * (18.0 + np.frequency * 22.0) + shear * 4.0 + t * (0.2 + np.speed * 1.2);
-    let bands = 0.5 + 0.5 * sin(bandPhase);
-    let storms = vnoise(vec2f(lon * 12.0 + t * 0.22, latNorm * 9.0 - t * 0.18));
-    let grsCenter = vec2f(0.76, 0.44);
-    let grsDelta = (uvRaw - grsCenter) / vec2f(0.09, 0.055);
-    let grsMask = exp(-dot(grsDelta, grsDelta));
-    let grsSwirl = 0.5 + 0.5 * sin(atan2(grsDelta.y, grsDelta.x) * 5.0 + t * 1.8);
-    var jupiter = mix(bands, storms, 0.35 + 0.2 * blendW);
-    jupiter = mix(jupiter, grsSwirl, grsMask * (0.55 + 0.3 * blendW));
-    s = mix(s, jupiter, 0.72);
-  } else if (ty >= 5.5) {
-    let hybridCell = worleyLite(rot2(p * 1.8, 0.9) + vec2f(t * 0.2, -t * 0.14));
-    s = mix(s, s + (hybridCell - 0.5) * 0.8, 0.35);
-  } else if (ty >= 4.5 && ty < 5.5) {
-    s = mix(s, streak, 0.45 + 0.3 * anisoW);
-  } else if (ty >= 3.5 && ty < 4.5) {
-    s = mix(s, cell, 0.55);
-  }
-
-  // Additional radial feel when radial mapping is enabled.
   if (np.mapping > 0.5) {
     let pRad = uvRaw - SPHERE_CENTER;
     let r = length(pRad) / max(SPHERE_RADIUS, 1e-5);
     let radialPulse = 0.5 + 0.5 * sin(r * (26.0 + np.frequency * 20.0) - t * (2.6 + np.speed * 4.2));
-    s = mix(s, radialPulse, 0.38 + 0.22 * np.blend);
+    s = mix(s, radialPulse, 0.28 + 0.25 * np.blend);
   }
   return s;
 }
@@ -1247,7 +1333,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let dist2 = dot(diff, diff);
     let strength = exp(-dist2 / (2.0 * s.radius * s.radius));
     let dyeIntensity = (s.r + s.g + s.b) / 3.0;
-    temp += strength * boundaryFade * dyeIntensity * 0.5;
+    temp += strength * boundaryFade * dyeIntensity * 0.5 * p.splatX;
   }
   temp = clamp(temp, 0.0, 1.0);
   textureStore(tempDst, id.xy, vec4f(temp, 0.0, 0.0, 1.0));
@@ -1398,8 +1484,10 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let shearX = curlData.y;
   let shearY = curlData.z;
 
-  // Update angular velocity with curl (damped for slower, smoother shimmer)
-  part.angularVel = part.angularVel * 0.92 + curl * 1.0;
+  // Update angular velocity with dt-aware damping/drive so master-speed scaling remains consistent.
+  let stepNorm = clamp(dt / 0.016, 0.0, 4.0);
+  let angDamp = pow(0.92, stepNorm);
+  part.angularVel = part.angularVel * angDamp + curl * stepNorm;
 
   // Rotate normal around Z-axis (spin)
   let spinAngle = part.angularVel * dt;
@@ -2248,8 +2336,8 @@ async function requestAdapterAdaptive(loadStatus) {
       ]
       : [
         { label: 'default', options: {} },
-        { label: 'low-power', options: { powerPreference: 'low-power' } },
         { label: 'high-performance', options: { powerPreference: 'high-performance' } },
+        { label: 'low-power', options: { powerPreference: 'low-power' } },
       ];
 
   const fast = attempts[0];
@@ -2497,7 +2585,7 @@ async function requestDeviceAdaptive(primaryAdapter, primaryMode, loadStatus, re
       console.warn('Init: device still pending...', snap);
     }, GPU_INIT_DIAG_SAMPLE_MS);
 
-    const fallbackModes = ['default', 'low-power', 'high-performance'].filter(m => m !== primaryMode);
+    const fallbackModes = ['default', 'high-performance', 'low-power'].filter(m => m !== primaryMode);
     const fallbackRace = await tryFallbackModesSequential(fallbackModes, 'fallback-race', GPU_DEVICE_RACE_TIMEOUT_MS, true);
     if (fallbackRace) {
       if (fallbackRace.mode === 'fallback-software') {
@@ -2532,7 +2620,7 @@ async function requestDeviceAdaptive(primaryAdapter, primaryMode, loadStatus, re
       console.warn(`Init: wake event '${wakeReason}' detected while device pending; retrying device acquisition...`);
       setStatusStage(`Retrying GPU device (${wakeReason})...`);
       const wakeRace = await tryFallbackModesSequential(
-        ['default', 'low-power', 'high-performance'],
+        ['default', 'high-performance', 'low-power'],
         `wake-${wakeReason}`,
         GPU_DEVICE_WAKE_RACE_TIMEOUT_MS,
         true
@@ -3614,11 +3702,9 @@ async function main() {
     }
 
     // Master-speed scaling for impulse-style effectors so slowdown is uniform.
+    // Velocity impulse is additive per simulation tick, so scale it by time-scale.
     dx *= frameTimeScale;
     dy *= frameTimeScale;
-    r *= frameTimeScale;
-    g *= frameTimeScale;
-    b *= frameTimeScale;
 
     if (splatCount >= MAX_SPLATS) return;
     const off = splatCount * 8;
@@ -3754,6 +3840,28 @@ async function main() {
     if (!blend) return fallback;
     const v = blend[key];
     return Number.isFinite(v) ? v : fallback;
+  }
+
+  function faceTrackingTargetFps() {
+    const modeOn = Math.round(state.faceEffectorMode || 0) > 0;
+    const dbg = Math.round(state.faceDebugMode || 0);
+    if (modeOn) return dbg >= 2 ? 30 : 34;
+    if (dbg >= 2) return 18;
+    if (dbg === 1) return 16;
+    return 12;
+  }
+
+  function faceTrackingMinFrameMs() {
+    return 1000 / Math.max(1, faceTrackingTargetFps());
+  }
+
+  function rebalanceFaceTrackingCadence(forceReset = false) {
+    const minMs = faceTrackingMinFrameMs();
+    if (forceReset || !Number.isFinite(faceTracking.frameEveryMs) || faceTracking.frameEveryMs <= 0) {
+      faceTracking.frameEveryMs = minMs;
+      return;
+    }
+    faceTracking.frameEveryMs = Math.max(minMs, faceTracking.frameEveryMs);
   }
 
   function syncFaceDebugCanvasSize() {
@@ -4317,6 +4425,7 @@ async function main() {
       await initMainThreadLandmarker();
       if (!faceTracking.enabled) return;
       faceTracking.ready = true;
+      rebalanceFaceTrackingCadence(true);
       faceTracking.nextFrameAt = 0;
       setFaceStatus('Face tracking active (main-cpu)');
     } catch (err) {
@@ -4388,6 +4497,7 @@ async function main() {
       faceTracking.enabled = true;
       faceTracking.ready = false;
       faceTracking.engine = 'worker';
+      rebalanceFaceTrackingCadence(true);
       faceTracking.frameInFlight = false;
       faceTracking.frameInFlightSince = 0;
       faceTracking.droppedFrames = 0;
@@ -4441,8 +4551,10 @@ async function main() {
           faceTracking.frameInFlightSince = 0;
           const infMs = msg.inferenceMs || 0;
           if (infMs > 0) {
-            const target = Math.max(1000 / 30, Math.min(1000 / 55, infMs * 1.2));
+            const minMs = faceTrackingMinFrameMs();
+            const target = Math.max(minMs, Math.min(1000 / 42, infMs * 1.35 + 2.0));
             faceTracking.frameEveryMs = faceTracking.frameEveryMs * 0.82 + target * 0.18;
+            faceTracking.frameEveryMs = Math.max(minMs, faceTracking.frameEveryMs);
           }
           const lm = msg.landmarks ? new Float32Array(msg.landmarks) : null;
           applyFaceLandmarkResult(lm, infMs, msg.error || '', {
@@ -4553,6 +4665,7 @@ async function main() {
     if (!faceTracking.enabled || !faceTracking.ready) return;
     const v = faceTracking.video;
     if (!v || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
+    rebalanceFaceTrackingCadence(false);
 
     if (faceTracking.engine === 'main') {
       if (!faceTracking.mainLandmarker) return;
@@ -4633,6 +4746,21 @@ async function main() {
     if (Math.round(state.faceEffectorMode || 0) <= 0) return;
     const face = faceTracking.face;
     if (!face) return;
+    const contribution = Math.max(0, Math.min(2, state.faceDyeContribution ?? 1));
+    if (contribution <= 0.001) return;
+    const forceScale = contribution;
+    const dyeScale = contribution;
+    const radiusScale = 0.75 + contribution * 0.45;
+    const detailScale = Math.max(0.25, Math.min(1.0, contribution));
+
+    const addFaceSplat = (x, y, dx, dy, r, g, b, radius) => {
+      addSplat(
+        x, y,
+        dx * forceScale, dy * forceScale,
+        r * dyeScale, g * dyeScale, b * dyeScale,
+        radius * radiusScale
+      );
+    };
 
     if (!faceTracking.prevMapped || faceTracking.prevMapped.length !== face.count * 2) {
       faceTracking.prevMapped = new Float32Array(face.count * 2);
@@ -4662,16 +4790,21 @@ async function main() {
     const flowY = faceTracking.centerVelY * state.splatForce * 0.012;
     const fillCol = palette(modeTime * (0.03 + smile * 0.015), 2);
     const rimCol = palette(modeTime * 0.09 + browLift * 0.07, 5);
+    const rimStep = detailScale < 0.45 ? 4 : (detailScale < 0.75 ? 3 : 2);
+    const fillStep = detailScale < 0.45 ? 7 : (detailScale < 0.75 ? 5 : 4);
+    const holeStep = detailScale < 0.45 ? 2 : 1;
+    const mouthStep = detailScale < 0.45 ? 3 : 2;
+    const wakeStep = detailScale < 0.45 ? 7 : 5;
 
     const carveLoop = (indices, openness, sizeMul = 1.0) => {
       const closed = 1.0 - Math.max(0, Math.min(1, openness));
-      for (let i = 0; i < indices.length; i++) {
+      for (let i = 0; i < indices.length; i += holeStep) {
         const idx = indices[i];
         const pt = getPoint(idx);
         if (!pt) continue;
         const [ix, iy] = direction(pt[0], pt[1], face.centerX, face.centerY);
         const force = state.splatForce * (0.03 + closed * 0.2 + poseMotion * 0.08);
-        addSplat(
+        addFaceSplat(
           pt[0], pt[1],
           ix * force + flowX * 0.3,
           iy * force + flowY * 0.3,
@@ -4684,7 +4817,7 @@ async function main() {
     };
 
     // 1) Rim silhouette: bright edge to make head outline unmistakable.
-    for (let i = 0; i < FACE_IDX.contour.length; i += 2) {
+    for (let i = 0; i < FACE_IDX.contour.length; i += rimStep) {
       const idx = FACE_IDX.contour[i];
       const pt = getPoint(idx);
       if (!pt) continue;
@@ -4694,7 +4827,7 @@ async function main() {
       const tangential = Math.sin(modeTime * 5.0 + i * 0.37);
       const force = state.splatForce * (0.055 + mouth * 0.14 + poseMotion * 0.12);
       const tint = 0.045 + smile * 0.04;
-      addSplat(
+      addFaceSplat(
         pt[0], pt[1],
         rx * force + tx * force * 0.18 * tangential + flowX,
         ry * force + ty * force * 0.18 * tangential + flowY,
@@ -4704,7 +4837,7 @@ async function main() {
     }
 
     // 2) Interior fill: paint a recognizable face volume instead of sparse points.
-    for (let i = 0; i < FACE_IDX.contour.length; i += 4) {
+    for (let i = 0; i < FACE_IDX.contour.length; i += fillStep) {
       const idx = FACE_IDX.contour[i];
       const pt = getPoint(idx);
       if (!pt) continue;
@@ -4712,7 +4845,7 @@ async function main() {
         const x = face.centerX + (pt[0] - face.centerX) * t;
         const y = face.centerY + (pt[1] - face.centerY) * t;
         const g = 0.03 + mouth * 0.045 + poseMotion * 0.04;
-        addSplat(
+        addFaceSplat(
           x, y,
           flowX * (0.6 + t * 0.3), flowY * (0.6 + t * 0.3),
           fillCol[0] * g, fillCol[1] * g, fillCol[2] * g,
@@ -4729,14 +4862,14 @@ async function main() {
     // 4) Mouth jets driven by jaw + funnel/pucker blendshapes.
     const mouthDrive = Math.max(0, Math.min(1, mouth * 0.72 + pucker * 0.18 + funnel * 0.15));
     if (mouthDrive > 0.16) {
-      for (let i = 0; i < FACE_IDX.mouthHole.length; i += 2) {
+      for (let i = 0; i < FACE_IDX.mouthHole.length; i += mouthStep) {
         const idx = FACE_IDX.mouthHole[i];
         const pt = getPoint(idx);
         if (!pt) continue;
         const [mx, my] = direction(mouthCenter[0], mouthCenter[1], pt[0], pt[1]);
         const burst = state.splatForce * (0.06 + mouthDrive * 0.35);
         const g = 0.03 + mouthDrive * 0.08;
-        addSplat(
+        addFaceSplat(
           pt[0], pt[1],
           mx * burst + flowX * 0.5, my * burst + flowY * 0.5,
           fillCol[0] * g, fillCol[1] * g, fillCol[2] * g,
@@ -4747,12 +4880,12 @@ async function main() {
 
     // 5) Matrix-driven motion wake.
     if (poseMotion > 0.05) {
-      for (let i = 1; i < FACE_IDX.contour.length; i += 5) {
+      for (let i = 1; i < FACE_IDX.contour.length; i += wakeStep) {
         const idx = FACE_IDX.contour[i];
         const pt = getPoint(idx);
         if (!pt) continue;
         const wake = state.splatForce * (0.045 + poseMotion * 0.18);
-        addSplat(
+        addFaceSplat(
           pt[0], pt[1],
           flowX * (1.1 + poseMotion * 0.7), flowY * (1.1 + poseMotion * 0.7),
           0, 0, 0,
@@ -4760,7 +4893,7 @@ async function main() {
         );
         if (mouthBurst) {
           const [rx, ry] = direction(face.centerX, face.centerY, pt[0], pt[1]);
-          addSplat(
+          addFaceSplat(
             pt[0], pt[1],
             rx * wake * 0.7, ry * wake * 0.7,
             -0.05, -0.05, -0.05,
@@ -4820,14 +4953,17 @@ async function main() {
     return { x: 0.5 + dx, y: 0.5 + dy };
   }
 
-  function spawnBurstShot(e, behavior, idx, count, speedNorm, duration, width) {
+  function spawnBurstShot(e, behavior, idx, count, travelSpeed, duration, width) {
     if (burstShots.length > 160) return;
     const TAU = Math.PI * 2;
     const slot = idx / Math.max(1, count);
+    const widthN = Math.max(0, Math.min(2, width));
+    const width01 = Math.min(1, widthN);
+    const widthBoost = Math.max(0, widthN - 1);
     const edgeSourceR = SIM_SPHERE_RADIUS + 0.012;
-    const centerSourceR = 0.02 + width * 0.05;
-    const innerTargetMin = 0.03 + width * 0.05;
-    const innerTargetMax = Math.max(innerTargetMin + 0.02, SIM_SPHERE_RADIUS - 0.09);
+    const centerSourceR = 0.018 + width01 * 0.06 + widthBoost * 0.03;
+    const innerTargetMin = 0.03 + width01 * 0.06;
+    const innerTargetMax = Math.max(innerTargetMin + 0.02, SIM_SPHERE_RADIUS - (0.09 - widthBoost * 0.03));
 
     let sourceAngle = e.angle;
     let sourceR = edgeSourceR;
@@ -4837,26 +4973,26 @@ async function main() {
     if (behavior === 1) {
       sourceAngle = slot * TAU + burstGlobalPhase * 0.15;
       sourceR = edgeSourceR;
-      targetAngle = sourceAngle + Math.PI + (Math.random() * 2 - 1) * (0.16 + width * 0.3);
-      targetR = 0.02 + Math.random() * (0.08 + width * 0.08);
+      targetAngle = sourceAngle + Math.PI + (Math.random() * 2 - 1) * (0.18 + widthN * 0.45);
+      targetR = 0.015 + Math.random() * (0.09 + widthN * 0.12);
     } else if (behavior === 2) {
       sourceAngle = slot * TAU + burstGlobalPhase * 0.3;
       sourceR = centerSourceR;
-      targetAngle = sourceAngle + (Math.random() * 2 - 1) * (0.2 + width * 0.25);
-      targetR = SIM_SPHERE_RADIUS - (0.045 + width * 0.05) - Math.random() * 0.03;
+      targetAngle = sourceAngle + (Math.random() * 2 - 1) * (0.18 + widthN * 0.32);
+      targetR = SIM_SPHERE_RADIUS - (0.05 + width01 * 0.04) - Math.random() * 0.04;
     } else if (behavior === 3) {
-      e.angle = wrapAngle(e.angle + (0.2 + speedNorm * 0.9) * e.drift);
+      e.angle = wrapAngle(e.angle + 0.42 * e.drift);
       sourceAngle = e.angle;
       sourceR = edgeSourceR;
-      targetAngle = sourceAngle + Math.PI * (0.65 + Math.random() * 0.6) * e.drift;
-      targetR = 0.08 + Math.random() * (SIM_SPHERE_RADIUS - 0.13);
+      targetAngle = sourceAngle + e.drift * (0.65 + Math.random() * 0.5);
+      targetR = 0.14 + Math.random() * (SIM_SPHERE_RADIUS - 0.17);
     } else if (behavior === 4) {
-      sourceAngle = slot * TAU + burstGlobalPhase * (0.8 + speedNorm * 1.0);
+      sourceAngle = slot * TAU + burstGlobalPhase;
       sourceR = edgeSourceR;
-      targetAngle = burstGlobalPhase * 1.2 + slot * TAU * 0.6 + (Math.random() * 2 - 1) * 0.2;
-      targetR = 0.07 + Math.random() * 0.14;
+      targetAngle = burstGlobalPhase * 1.6 + slot * TAU * 0.45 + (Math.random() * 2 - 1) * 0.2;
+      targetR = 0.06 + Math.random() * (0.09 + width01 * 0.06);
     } else {
-      e.angle = wrapAngle(e.angle + (Math.random() * 2 - 1) * 0.45 + e.drift * (0.12 + speedNorm * 0.35));
+      e.angle = wrapAngle(e.angle + (Math.random() * 2 - 1) * 0.45 + e.drift * 0.22);
       sourceAngle = e.angle;
       sourceR = edgeSourceR;
       targetAngle = Math.random() * TAU;
@@ -4874,11 +5010,11 @@ async function main() {
     if (d < 1e-5) return;
 
     const jitter = 1 + (Math.random() * 2 - 1) * state.burstForceRandomness;
-    const speed = 0.9 + speedNorm * 2.1; // world units / second
-    const life = Math.min(0.75, 0.05 + duration * 0.18);
+    const speed = 0.35 + Math.max(0.25, travelSpeed) * 1.15; // world units / second
+    const life = Math.min(1.3, 0.07 + duration * 0.16);
     const forceScale = Math.max(0.15, (0.45 + state.burstForce * 1.5) * jitter);
-    const dyeScale = forceScale * (1.8 + width * 0.8); // intentionally dye-heavy
-    const radius = state.splatRadius * (0.95 + width * 3.4 + state.burstForce * 0.28);
+    const dyeScale = forceScale * (1.8 + widthN * 0.8); // intentionally dye-heavy
+    const radius = state.splatRadius * (0.9 + width01 * 2.8 + widthBoost * 2.2 + state.burstForce * 0.2);
 
     burstShots.push({
       x: sx,
@@ -4903,17 +5039,20 @@ async function main() {
     }
 
     ensureBurstEmitters(count, behavior);
-    const speedNorm = Math.max(0, Math.min(1, state.burstSpeed / 2.0));
+    const findSpeed = Math.max(0, Number.isFinite(state.burstSpeed) ? state.burstSpeed : 0);
+    const findNorm = Math.pow(Math.max(0, Math.min(1, findSpeed / 2.0)), 1.35);
+    const travelSpeed = Math.max(0.25, Number.isFinite(state.burstTravelSpeed) ? state.burstTravelSpeed : 1.2);
     const duration = Math.max(0.05, Number.isFinite(state.burstDuration) ? state.burstDuration : 0.8);
-    const width = Math.max(0, Math.min(1, Number.isFinite(state.burstWidth) ? state.burstWidth : 0.25));
-    burstGlobalPhase = wrapAngle(burstGlobalPhase + dt * (0.15 + speedNorm * 1.5));
+    const width = Math.max(0, Math.min(2, Number.isFinite(state.burstWidth) ? state.burstWidth : 0.35));
+    burstGlobalPhase = wrapAngle(burstGlobalPhase + dt * 0.42);
 
-    const shotInterval = Math.max(0.16, (1.25 - speedNorm * 0.7) + Math.min(0.45, duration * 0.12));
+    // Find speed only controls how often new shots are launched.
+    const shotInterval = Math.max(0.24, (2.8 - findNorm * 2.45) + Math.min(0.95, duration * 0.18));
     for (let i = 0; i < burstEmitters.length; i++) {
       const e = burstEmitters[i];
       e.cooldown -= dt;
       if (e.cooldown <= 0) {
-        spawnBurstShot(e, behavior, i, count, speedNorm, duration, width);
+        spawnBurstShot(e, behavior, i, count, travelSpeed, duration, width);
         e.cooldown = shotInterval * (0.8 + Math.random() * 0.45);
       }
     }
@@ -5178,6 +5317,11 @@ async function main() {
     const masterSpeed = Math.max(0, Math.min(1, Number.isFinite(state.masterSpeed) ? state.masterSpeed : 1.0));
     frameTimeScale = masterSpeed;
     const dt = 0.016 * state.simSpeed * masterSpeed;
+    const decayScale = masterSpeed;
+    const effectivePressureDecay = Math.pow(state.pressureDecay, decayScale);
+    const effectiveVelDissipation = Math.pow(state.velDissipation, decayScale);
+    const effectiveDyeDissipation = Math.pow(state.dyeDissipation, decayScale);
+    const effectiveTempDissipation = Math.pow(state.tempDissipation, decayScale);
     time += dt;
 
     updateAutoMorph();
@@ -5283,7 +5427,15 @@ async function main() {
     if (splatCount > 0) {
       device.queue.writeBuffer(splatBuf, 0, splatArrayData, 0, splatCount * 8);
     }
-    writeParams({ dt, time });
+    writeParams({
+      dt,
+      time,
+      // Reuse legacy splatX slot as per-frame source scale for splat dye/temperature injection.
+      splatX: frameTimeScale,
+      pressureDecay: effectivePressureDecay,
+      velDissipation: effectiveVelDissipation,
+      dyeDissipation: effectiveDyeDissipation,
+    });
 
     // ── Single encoder for all passes ──
     const enc = device.createCommandEncoder();
@@ -5380,7 +5532,7 @@ async function main() {
       tempParamData[0] = dt;
       tempParamData[1] = 1.0 / SIM_RES;
       tempParamData[2] = SIM_RES;
-      tempParamData[3] = state.tempDissipation;
+      tempParamData[3] = effectiveTempDissipation;
       device.queue.writeBuffer(tempParamBuf, 0, tempParamData);
       const p = enc.beginComputePass();
       p.setPipeline(tempAdvectPipe.pipeline);
@@ -5760,17 +5912,194 @@ async function main() {
   wireColor('glitterTip', 'glitterTip');
   wireSlider('colorBlend', 'colorBlend', v => v.toFixed(2));
 
-  const NOISE_TYPE_PROFILES = [
-    // Each noise type ships with a curated preset so mode changes are immediately visible.
-    { amount: 0.20, behavior: 0, mapping: 0, warp: 0.20, sharpness: 0.20, anisotropy: 0.10, blend: 0.20, frequency: 0.50, speed: 0.45 }, // Classic Curl
-    { amount: 0.28, behavior: 0, mapping: 0, warp: 0.95, sharpness: 0.35, anisotropy: 0.30, blend: 0.40, frequency: 0.48, speed: 0.52 }, // Domain-Warped
-    { amount: 0.24, behavior: 2, mapping: 0, warp: 0.40, sharpness: 1.00, anisotropy: 0.35, blend: 0.35, frequency: 0.56, speed: 0.46 }, // Ridged
-    { amount: 0.30, behavior: 0, mapping: 0, warp: 0.35, sharpness: 0.55, anisotropy: 0.20, blend: 1.00, frequency: 0.62, speed: 0.42 }, // Voronoi
-    { amount: 0.26, behavior: 1, mapping: 0, warp: 0.55, sharpness: 0.35, anisotropy: 0.95, blend: 0.35, frequency: 0.52, speed: 0.58 }, // Flow
-    { amount: 0.23, behavior: 3, mapping: 0, warp: 0.25, sharpness: 0.75, anisotropy: 1.00, blend: 0.50, frequency: 0.60, speed: 0.52 }, // Gabor-like
-    { amount: 0.32, behavior: 0, mapping: 0, warp: 0.80, sharpness: 0.70, anisotropy: 0.65, blend: 0.75, frequency: 0.55, speed: 0.55 }, // Hybrid
-    { amount: 0.42, behavior: 0, mapping: 1, warp: 0.88, sharpness: 0.62, anisotropy: 0.95, blend: 0.58, frequency: 0.53, speed: 0.60 }, // Jupiter
+  const NOISE_CONTROL_IDS = ['noiseWarp', 'noiseSharpness', 'noiseAnisotropy', 'noiseBlend'];
+  const NOISE_CONTROL_STATE_KEYS = {
+    noiseWarp: 'noiseWarp',
+    noiseSharpness: 'noiseSharpness',
+    noiseAnisotropy: 'noiseAnisotropy',
+    noiseBlend: 'noiseBlend',
+  };
+  const noiseControlRuntime = Object.create(null);
+
+  function makeNoiseControl(label, min = 0, max = 1, step = 0.01) {
+    return { label, min, max, step };
+  }
+
+  const NOISE_TYPE_DEFS = [
+    {
+      profile: { amount: 0.20, behavior: 0, mapping: 0, warp: 0.22, sharpness: 0.30, anisotropy: 0.25, blend: 0.24, frequency: 0.50, speed: 0.45 },
+      controls: {
+        noiseWarp: makeNoiseControl('Octave Warp'),
+        noiseSharpness: makeNoiseControl('Octave Contrast'),
+        noiseAnisotropy: makeNoiseControl('Swirl Bias'),
+        noiseBlend: makeNoiseControl('Micro Turbulence'),
+      },
+    }, // Classic Curl
+    {
+      profile: { amount: 0.30, behavior: 0, mapping: 0, warp: 0.76, sharpness: 0.58, anisotropy: 0.40, blend: 0.52, frequency: 0.52, speed: 0.56 },
+      controls: {
+        noiseWarp: makeNoiseControl('Primary Warp'),
+        noiseSharpness: makeNoiseControl('Secondary Warp'),
+        noiseAnisotropy: makeNoiseControl('Ribbon Flow'),
+        noiseBlend: makeNoiseControl('Ridge Mix'),
+      },
+    }, // Domain-Warped Curl
+    {
+      profile: { amount: 0.24, behavior: 2, mapping: 0, warp: 0.42, sharpness: 0.78, anisotropy: 0.30, blend: 0.48, frequency: 0.56, speed: 0.46 },
+      controls: {
+        noiseWarp: makeNoiseControl('Ridge Width'),
+        noiseSharpness: makeNoiseControl('Ridge Exponent'),
+        noiseAnisotropy: null,
+        noiseBlend: makeNoiseControl('Detail Grain'),
+      },
+    }, // Ridged Fractal
+    {
+      profile: { amount: 0.32, behavior: 0, mapping: 0, warp: 0.38, sharpness: 0.55, anisotropy: 0.20, blend: 0.74, frequency: 0.66, speed: 0.42 },
+      controls: {
+        noiseWarp: makeNoiseControl('Cell Scale'),
+        noiseSharpness: makeNoiseControl('Seed Jitter'),
+        noiseAnisotropy: null,
+        noiseBlend: makeNoiseControl('Crack Contrast'),
+      },
+    }, // Voronoi Cellular
+    {
+      profile: { amount: 0.28, behavior: 1, mapping: 0, warp: 0.52, sharpness: 0.46, anisotropy: 0.86, blend: 0.40, frequency: 0.52, speed: 0.58 },
+      controls: {
+        noiseWarp: makeNoiseControl('Heading Rotation'),
+        noiseSharpness: makeNoiseControl('Shear Strength'),
+        noiseAnisotropy: makeNoiseControl('Stream Stretch'),
+        noiseBlend: makeNoiseControl('Crossflow Mix'),
+      },
+    }, // Flow Rotated
+    {
+      profile: { amount: 0.25, behavior: 3, mapping: 0, warp: 0.50, sharpness: 0.62, anisotropy: 0.72, blend: 0.44, frequency: 0.60, speed: 0.52 },
+      controls: {
+        noiseWarp: makeNoiseControl('Band Frequency'),
+        noiseSharpness: makeNoiseControl('Orientation Chaos'),
+        noiseAnisotropy: makeNoiseControl('Crossbands'),
+        noiseBlend: makeNoiseControl('Envelope Grain'),
+      },
+    }, // Gabor-like
+    {
+      profile: { amount: 0.34, behavior: 0, mapping: 0, warp: 0.66, sharpness: 0.58, anisotropy: 0.60, blend: 0.64, frequency: 0.58, speed: 0.56 },
+      controls: {
+        noiseWarp: makeNoiseControl('Flow Mix'),
+        noiseSharpness: makeNoiseControl('Band Driver'),
+        noiseAnisotropy: makeNoiseControl('Ridge Mix'),
+        noiseBlend: makeNoiseControl('Cell Mix'),
+      },
+    }, // Hybrid Fractal
+    {
+      profile: { amount: 0.44, behavior: 0, mapping: 1, warp: 0.78, sharpness: 0.58, anisotropy: 0.70, blend: 0.62, frequency: 0.55, speed: 0.60 },
+      controls: {
+        noiseWarp: makeNoiseControl('Jet Shear'),
+        noiseSharpness: makeNoiseControl('Storm Density'),
+        noiseAnisotropy: makeNoiseControl('Vortex Strength'),
+        noiseBlend: makeNoiseControl('Band Contrast'),
+      },
+    }, // Jupiter Bands
   ];
+
+  function clamp01Range(v, lo, hi) {
+    return Math.min(hi, Math.max(lo, v));
+  }
+
+  function formatNoiseControlValue(id, v) {
+    const cfg = noiseControlRuntime[id];
+    if (cfg?.format) return cfg.format(v);
+    const step = Number(cfg?.step ?? 0.01);
+    if (!Number.isFinite(step) || step <= 0) return Number(v).toFixed(2);
+    const decimals = Math.max(0, Math.min(4, Math.ceil(-Math.log10(step))));
+    return Number(v).toFixed(decimals);
+  }
+
+  function setNoiseControlLabel(id, labelText) {
+    const slider = document.getElementById(id);
+    if (!slider) return;
+    const group = slider.closest('.setting-group');
+    const label = group?.querySelector('label');
+    if (!label) return;
+    const valSpan = label.querySelector('.val');
+    if (!valSpan) {
+      label.textContent = labelText;
+      return;
+    }
+    label.textContent = '';
+    label.appendChild(document.createTextNode(`${labelText} `));
+    label.appendChild(valSpan);
+  }
+
+  function applyNoiseControlSchema(type, syncUI = false) {
+    const idx = Math.max(0, Math.min(NOISE_TYPE_DEFS.length - 1, Math.round(type)));
+    const def = NOISE_TYPE_DEFS[idx];
+    if (!def) return;
+    for (const id of NOISE_CONTROL_IDS) {
+      const slider = document.getElementById(id);
+      const group = slider?.closest('.setting-group');
+      if (!slider || !group) continue;
+      const cfg = def.controls[id];
+      const stateKey = NOISE_CONTROL_STATE_KEYS[id];
+      if (!cfg) {
+        group.style.display = 'none';
+        continue;
+      }
+      group.style.display = '';
+      slider.min = String(cfg.min);
+      slider.max = String(cfg.max);
+      slider.step = String(cfg.step);
+      setNoiseControlLabel(id, cfg.label);
+      noiseControlRuntime[id] = { step: cfg.step, format: cfg.format || null };
+      state[stateKey] = clamp01Range(state[stateKey], cfg.min, cfg.max);
+      if (syncUI) {
+        syncSlider(id, stateKey, v => formatNoiseControlValue(id, v));
+      }
+    }
+  }
+
+  function snapToSliderBounds(v, min, max, step, fallback) {
+    let out = Number.isFinite(v) ? v : fallback;
+    out = Math.round(out / step) * step;
+    if (out < min) out = min;
+    if (out > max) out = max;
+    return out;
+  }
+
+  function applyNoiseTypeAssociations(targetState, opts = {}) {
+    const { resetHidden = true, updateSchema = false } = opts;
+    const idx = Math.max(0, Math.min(NOISE_TYPE_DEFS.length - 1, Math.round(targetState.noiseType || 0)));
+    targetState.noiseType = idx;
+    const def = NOISE_TYPE_DEFS[idx];
+    if (!def) return;
+    if (updateSchema) {
+      applyNoiseControlSchema(idx, false);
+    }
+    for (const id of NOISE_CONTROL_IDS) {
+      const key = NOISE_CONTROL_STATE_KEYS[id];
+      const cfg = def.controls[id];
+      if (!cfg) {
+        if (resetHidden) {
+          const profileKey = key === 'noiseWarp'
+            ? 'warp'
+            : key === 'noiseSharpness'
+              ? 'sharpness'
+              : key === 'noiseAnisotropy'
+                ? 'anisotropy'
+                : 'blend';
+          targetState[key] = def.profile[profileKey];
+        }
+        continue;
+      }
+      targetState[key] = snapToSliderBounds(targetState[key], cfg.min, cfg.max, cfg.step, def.profile[
+        key === 'noiseWarp'
+          ? 'warp'
+          : key === 'noiseSharpness'
+            ? 'sharpness'
+            : key === 'noiseAnisotropy'
+              ? 'anisotropy'
+              : 'blend'
+      ]);
+    }
+  }
 
   function formatNoiseBehavior(v) {
     const n = Math.round(v);
@@ -5780,8 +6109,11 @@ async function main() {
   }
 
   function applyNoiseTypeProfile(type, syncUI = false) {
-    const p = NOISE_TYPE_PROFILES[Math.max(0, Math.min(NOISE_TYPE_PROFILES.length - 1, Math.round(type)))];
-    if (!p) return;
+    const idx = Math.max(0, Math.min(NOISE_TYPE_DEFS.length - 1, Math.round(type)));
+    const def = NOISE_TYPE_DEFS[idx];
+    if (!def) return;
+    const p = def.profile;
+    state.noiseType = idx;
     state.noiseAmount = p.amount;
     state.noiseBehavior = p.behavior;
     state.noiseMapping = p.mapping;
@@ -5791,6 +6123,7 @@ async function main() {
     state.noiseBlend = p.blend;
     state.noiseFrequency = p.frequency;
     state.noiseSpeed = p.speed;
+    applyNoiseControlSchema(idx, syncUI);
     if (syncUI) {
       syncSlider('noiseAmount', 'noiseAmount');
       syncSlider('noiseBehavior', 'noiseBehavior', formatNoiseBehavior);
@@ -5798,10 +6131,10 @@ async function main() {
         const noiseMappingSel = document.getElementById('noiseMapping');
         if (noiseMappingSel) noiseMappingSel.value = String(Math.round(state.noiseMapping || 0));
       }
-      syncSlider('noiseWarp', 'noiseWarp');
-      syncSlider('noiseSharpness', 'noiseSharpness');
-      syncSlider('noiseAnisotropy', 'noiseAnisotropy');
-      syncSlider('noiseBlend', 'noiseBlend');
+      syncSlider('noiseWarp', 'noiseWarp', v => formatNoiseControlValue('noiseWarp', v));
+      syncSlider('noiseSharpness', 'noiseSharpness', v => formatNoiseControlValue('noiseSharpness', v));
+      syncSlider('noiseAnisotropy', 'noiseAnisotropy', v => formatNoiseControlValue('noiseAnisotropy', v));
+      syncSlider('noiseBlend', 'noiseBlend', v => formatNoiseControlValue('noiseBlend', v));
       syncSlider('noiseFrequency', 'noiseFrequency');
       syncSlider('noiseSpeed', 'noiseSpeed');
     }
@@ -5818,6 +6151,7 @@ async function main() {
   wireSlider('burstForce', 'burstForce');
   wireSlider('burstForceRandomness', 'burstForceRandomness');
   wireSlider('burstSpeed', 'burstSpeed');
+  wireSlider('burstTravelSpeed', 'burstTravelSpeed');
   wireSlider('burstDuration', 'burstDuration');
   wireSlider('burstWidth', 'burstWidth');
   wireSlider('noiseAmount', 'noiseAmount', v => v.toFixed(2));
@@ -5830,22 +6164,47 @@ async function main() {
     if (mode > 0 && !faceTracking.enabled) {
       startFaceTracking();
     }
-    if (mode <= 0 && state.faceDebugMode <= 0 && faceTracking.enabled) {
+    if (mode <= 0 && state.faceDebugMode <= 0 && (faceTracking.enabled || faceTracking.initializing)) {
       stopFaceTracking(true);
       setFaceStatus('Face tracking idle');
+      return;
+    }
+    if (faceTracking.enabled) {
+      rebalanceFaceTrackingCadence(true);
     }
   });
+  wireSlider('faceDyeContribution', 'faceDyeContribution', v => v.toFixed(2));
   wireSelect('faceDebugMode', 'faceDebugMode', v => {
     state.faceDebugMode = Math.max(0, Math.min(2, Math.round(v)));
+    if ((state.faceDebugMode > 0 || state.faceEffectorMode > 0) && !faceTracking.enabled) {
+      startFaceTracking();
+      return;
+    }
+    if (state.faceDebugMode <= 0 && state.faceEffectorMode <= 0 && (faceTracking.enabled || faceTracking.initializing)) {
+      stopFaceTracking(true);
+      setFaceStatus('Face tracking idle');
+      return;
+    }
+    if (faceTracking.enabled) {
+      rebalanceFaceTrackingCadence(true);
+    }
   });
   wireSlider('noiseBehavior', 'noiseBehavior', formatNoiseBehavior);
   wireSlider('noiseFrequency', 'noiseFrequency');
   wireSlider('noiseSpeed', 'noiseSpeed');
-  wireSlider('noiseWarp', 'noiseWarp');
-  wireSlider('noiseSharpness', 'noiseSharpness');
-  wireSlider('noiseAnisotropy', 'noiseAnisotropy');
-  wireSlider('noiseBlend', 'noiseBlend');
+  wireSlider('noiseWarp', 'noiseWarp', v => formatNoiseControlValue('noiseWarp', v));
+  wireSlider('noiseSharpness', 'noiseSharpness', v => formatNoiseControlValue('noiseSharpness', v));
+  wireSlider('noiseAnisotropy', 'noiseAnisotropy', v => formatNoiseControlValue('noiseAnisotropy', v));
+  wireSlider('noiseBlend', 'noiseBlend', v => formatNoiseControlValue('noiseBlend', v));
   applyNoiseTypeProfile(state.noiseType, true);
+  if (typeof bo.setStatePostNormalize === 'function') {
+    bo.setStatePostNormalize((targetState) => {
+      applyNoiseTypeAssociations(targetState, {
+        resetHidden: true,
+        updateSchema: targetState === state,
+      });
+    });
+  }
   wireSlider('curlStrength', 'curlStrength', v => Math.round(v));
   wireSlider('splatForce', 'splatForce', v => Math.round(v));
   wireSlider('velDissipation', 'velDissipation', v => v.toFixed(3));
@@ -5927,16 +6286,18 @@ async function main() {
     syncSlider('burstForce', 'burstForce');
     syncSlider('burstForceRandomness', 'burstForceRandomness');
     syncSlider('burstSpeed', 'burstSpeed');
+    syncSlider('burstTravelSpeed', 'burstTravelSpeed');
     syncSlider('burstDuration', 'burstDuration');
     syncSlider('burstWidth', 'burstWidth');
     syncSlider('noiseAmount', 'noiseAmount', v => v.toFixed(2));
     syncSlider('noiseBehavior', 'noiseBehavior', formatNoiseBehavior);
     syncSlider('noiseFrequency', 'noiseFrequency');
     syncSlider('noiseSpeed', 'noiseSpeed');
-    syncSlider('noiseWarp', 'noiseWarp');
-    syncSlider('noiseSharpness', 'noiseSharpness');
-    syncSlider('noiseAnisotropy', 'noiseAnisotropy');
-    syncSlider('noiseBlend', 'noiseBlend');
+    applyNoiseControlSchema(state.noiseType, false);
+    syncSlider('noiseWarp', 'noiseWarp', v => formatNoiseControlValue('noiseWarp', v));
+    syncSlider('noiseSharpness', 'noiseSharpness', v => formatNoiseControlValue('noiseSharpness', v));
+    syncSlider('noiseAnisotropy', 'noiseAnisotropy', v => formatNoiseControlValue('noiseAnisotropy', v));
+    syncSlider('noiseBlend', 'noiseBlend', v => formatNoiseControlValue('noiseBlend', v));
     {
       const noiseTypeSel = document.getElementById('noiseType');
       if (noiseTypeSel) noiseTypeSel.value = String(Math.round(state.noiseType || 0));
@@ -5951,6 +6312,7 @@ async function main() {
       state.faceEffectorMode = mode;
       if (faceModeSel) faceModeSel.value = String(mode);
     }
+    syncSlider('faceDyeContribution', 'faceDyeContribution', v => v.toFixed(2));
     {
       const faceDebugSel = document.getElementById('faceDebugMode');
       if (faceDebugSel) faceDebugSel.value = String(Math.round(state.faceDebugMode || 0));
@@ -6028,18 +6390,24 @@ async function main() {
     state.burstForce = snapTo(randRange(0, 3.2), 0.01);
     state.burstForceRandomness = snapTo(randRange(0, 1), 0.01);
     state.burstSpeed = snapTo(randRange(0, 2.0), 0.01);
-    state.burstDuration = snapTo(randRange(0.1, 4.0), 0.01);
-    state.burstWidth = snapTo(randRange(0.05, 0.9), 0.01);
+    state.burstTravelSpeed = snapTo(randRange(0.35, 3.8), 0.01);
+    state.burstDuration = snapTo(randRange(0.1, 8.0), 0.01);
+    state.burstWidth = snapTo(randRange(0.05, 2.0), 0.01);
     // Noise
     state.noiseAmount = snapTo(randRange(0, 1), 0.01);
     state.noiseType = Math.round(randRange(0, 7));
     applyNoiseTypeProfile(state.noiseType);
     state.noiseMapping = Math.random() < 0.35 ? 1 : 0;
     state.noiseBehavior = Math.random() < 0.45 ? 0 : (Math.random() < 0.7 ? 1 : Math.round(randRange(2, 8)));
-    state.noiseWarp = snapTo(randRange(0, 1), 0.01);
-    state.noiseSharpness = snapTo(randRange(0, 1), 0.01);
-    state.noiseAnisotropy = snapTo(randRange(0, 1), 0.01);
-    state.noiseBlend = snapTo(randRange(0, 1), 0.01);
+    {
+      const def = NOISE_TYPE_DEFS[Math.max(0, Math.min(NOISE_TYPE_DEFS.length - 1, Math.round(state.noiseType || 0)))];
+      for (const id of NOISE_CONTROL_IDS) {
+        const cfg = def?.controls?.[id];
+        if (!cfg) continue;
+        const key = NOISE_CONTROL_STATE_KEYS[id];
+        state[key] = snapTo(randRange(cfg.min, cfg.max), cfg.step);
+      }
+    }
     state.noiseFrequency = snapTo(randRange(0, 1), 0.01);
     state.noiseSpeed = snapTo(randRange(0, 1), 0.01);
     // Fluid sim
@@ -6081,9 +6449,12 @@ async function main() {
     burstForce: { min: 0, max: 4, step: 0.01 },
     burstForceRandomness: { min: 0, max: 1, step: 0.01 },
     burstSpeed: { min: 0, max: 2.0, step: 0.01 },
-    burstDuration: { min: 0.05, max: 4.0, step: 0.01 },
-    burstWidth: { min: 0, max: 1, step: 0.01 },
+    burstTravelSpeed: { min: 0.25, max: 4.0, step: 0.01 },
+    burstDuration: { min: 0.05, max: 8.0, step: 0.01 },
+    burstWidth: { min: 0, max: 2.0, step: 0.01 },
     noiseAmount: { min: 0, max: 1, step: 0.01 },
+    noiseType: { min: 0, max: 7, step: 1 },
+    noiseBehavior: { min: 0, max: 8, step: 1 },
     noiseMapping: { min: 0, max: 1, step: 1 },
     noiseFrequency: { min: 0, max: 1, step: 0.01 },
     noiseSpeed: { min: 0, max: 1, step: 0.01 },
@@ -6174,6 +6545,8 @@ async function main() {
       }
     }
 
+    applyNoiseTypeAssociations(state, { resetHidden: true, updateSchema: false });
+
     // Lerp colors
     for (const key of morphColors) {
       const target = morphTargets[key];
@@ -6240,6 +6613,7 @@ async function main() {
   boBestBtn.addEventListener('click', () => {
     const x = bo.getBestParams();
     normalizedToState(x, state, bo.lockedKeys);
+    applyNoiseTypeAssociations(state, { resetHidden: true, updateSchema: true });
     syncAllUI();
   });
 
@@ -6364,7 +6738,7 @@ async function main() {
   }
   console.log(`Fluid simulation starting... (${(performance.now() - t0).toFixed(0)}ms)`);
   document.getElementById('loading').style.display = 'none';
-  if (state.faceEffectorMode > 0) {
+  if (state.faceEffectorMode > 0 || state.faceDebugMode > 0) {
     startFaceTracking();
   }
   requestAnimationFrame(frame);

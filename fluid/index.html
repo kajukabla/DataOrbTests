@@ -258,20 +258,6 @@
         <label>Sheen Color</label>
         <input type="color" id="sheenColor" value="#ffe6b3">
       </div>
-      <!-- Glass marble sliders (commented out)
-      <div class="setting-group">
-        <label>Rim Intensity <span class="val" id="rimIntensityVal">0.5</span></label>
-        <input type="range" id="rimIntensity" min="0.0" max="2.0" step="0.01" value="0.5">
-      </div>
-      <div class="setting-group">
-        <label>Chromatic Strength <span class="val" id="chromaticStrengthVal">1.0</span></label>
-        <input type="range" id="chromaticStrength" min="0.0" max="2.0" step="0.01" value="1.0">
-      </div>
-      <div class="setting-group">
-        <label>Caustic Intensity <span class="val" id="causticIntensityVal">0.2</span></label>
-        <input type="range" id="causticIntensity" min="0.0" max="1.0" step="0.01" value="0.2">
-      </div>
-      -->
       <div class="setting-group">
         <label>Click Size <span class="val" id="clickSizeVal">0.5</span></label>
         <input type="range" id="clickSize" min="0.0" max="1.0" step="0.01" value="0.5">
@@ -281,53 +267,55 @@
         <input type="range" id="clickStrength" min="0.0" max="1.0" step="0.01" value="0.5">
       </div>
       <div class="setting-group">
-        <label>Burst Behavior</label>
+        <label>Jet Pattern</label>
         <select id="burstBehavior">
-          <option value="0" selected>Edge Cannons</option>
-          <option value="1">Radial Inward (Edge)</option>
-          <option value="2">Radial Outward (Center)</option>
-          <option value="3">Sweep Barrage (Edge)</option>
-          <option value="4">Rotating Ring (Edge)</option>
+          <option value="0" selected>Edge Jets (Wander)</option>
+          <option value="1">Inward Ring Jets</option>
+          <option value="2">Outward Ring Jets</option>
+          <option value="3">Sweep Jets</option>
+          <option value="4">Rotating Hunters</option>
         </select>
       </div>
       <div class="setting-group">
-        <label>Burst Count <span class="val" id="burstCountVal">0</span></label>
+        <label>Jet Count <span class="val" id="burstCountVal">0</span></label>
         <input type="range" id="burstCount" min="0" max="8" step="1" value="0">
       </div>
       <div class="setting-group">
-        <label>Burst Force <span class="val" id="burstForceVal">1.0</span></label>
-        <input type="range" id="burstForce" min="0.0" max="4.0" step="0.01" value="1.0">
+        <label>Jet Force <span class="val" id="burstForceVal">0.8</span></label>
+        <input type="range" id="burstForce" min="0.0" max="4.0" step="0.01" value="0.8">
       </div>
       <div class="setting-group">
-        <label>Burst Force Random <span class="val" id="burstForceRandomnessVal">0.25</span></label>
+        <label>Jet Force Jitter <span class="val" id="burstForceRandomnessVal">0.25</span></label>
         <input type="range" id="burstForceRandomness" min="0.0" max="1.0" step="0.01" value="0.25">
       </div>
       <div class="setting-group">
-        <label>Burst Speed <span class="val" id="burstSpeedVal">0.4</span></label>
-        <input type="range" id="burstSpeed" min="0.0" max="1.2" step="0.01" value="0.4">
+        <label>Target Find Speed <span class="val" id="burstSpeedVal">0.6</span></label>
+        <input type="range" id="burstSpeed" min="0.0" max="2.0" step="0.01" value="0.6">
       </div>
       <div class="setting-group">
-        <label>Burst Duration <span class="val" id="burstDurationVal">0.25</span></label>
-        <input type="range" id="burstDuration" min="0.0" max="2.0" step="0.01" value="0.25">
+        <label>Jet Speed <span class="val" id="burstTravelSpeedVal">1.2</span></label>
+        <input type="range" id="burstTravelSpeed" min="0.25" max="4.0" step="0.01" value="1.2">
       </div>
       <div class="setting-group">
-        <label>Burst Width <span class="val" id="burstWidthVal">0.30</span></label>
-        <input type="range" id="burstWidth" min="0.0" max="1.0" step="0.01" value="0.30">
+        <label>Jet Trail Duration <span class="val" id="burstDurationVal">0.8</span></label>
+        <input type="range" id="burstDuration" min="0.05" max="8.0" step="0.01" value="0.8">
+      </div>
+      <div class="setting-group">
+        <label>Jet Width <span class="val" id="burstWidthVal">0.35</span></label>
+        <input type="range" id="burstWidth" min="0.0" max="2.0" step="0.01" value="0.35">
       </div>
 
       <div style="margin:12px 0 6px; color:#777; font-size:10px; text-transform:uppercase; letter-spacing:0.5px;">Face Effector</div>
       <div class="setting-group">
-        <label>Face Mode</label>
+        <label>Face Dye</label>
         <select id="faceEffectorMode">
           <option value="0" selected>Off</option>
-          <option value="1">Vertex Burst Jets</option>
-          <option value="2">Mesh Noise Mask</option>
-          <option value="3">Mouth Shockwave</option>
-          <option value="4">Jawline Vortex</option>
-          <option value="5">Brow Shear Fans</option>
-          <option value="6">Cheek Pulse Emitters</option>
-          <option value="7">Fluid Texture Mesh</option>
+          <option value="1">Face Dye Mode</option>
         </select>
+      </div>
+      <div class="setting-group">
+        <label>Face Dye Contribution <span class="val" id="faceDyeContributionVal">1.10</span></label>
+        <input type="range" id="faceDyeContribution" min="0.0" max="2.0" step="0.01" value="1.10">
       </div>
       <div class="setting-group">
         <button id="faceTrackingToggle" style="width:100%;">Start Webcam Face Tracking</button>
@@ -336,8 +324,8 @@
         <label>Face Debug</label>
         <select id="faceDebugMode">
           <option value="0" selected>Off</option>
-          <option value="1">Mesh Overlay</option>
-          <option value="2">Camera + Mesh</option>
+          <option value="1">Mesh + Streams</option>
+          <option value="2">Camera + Mesh + Streams</option>
         </select>
       </div>
       <div id="faceTrackingStatus" style="color:#666; font-size:10px; line-height:1.35; margin:0 0 8px 0;">Face tracking idle</div>
