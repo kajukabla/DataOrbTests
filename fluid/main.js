@@ -101,7 +101,6 @@ const state = {
   faceDyeFill: 1.8,
   faceEdgeBoost: 0.9,
   faceFlowCarry: 0.12,
-  faceHoleCarve: 0.45,
   faceEyeOpenSize: 1.0,
   faceMouthOpenSize: 1.0,
   faceMouthClosedSize: 1.0,
@@ -5133,7 +5132,7 @@ async function main() {
     const fillGain = Math.max(0, state.faceDyeFill ?? 1.8);
     const edgeGain = Math.max(0, state.faceEdgeBoost ?? 0.9);
     const flowCarry = Math.max(0, Math.min(1.5, state.faceFlowCarry ?? 0.12));
-    const holeCarve = Math.max(0, Math.min(1.0, state.faceHoleCarve ?? 0.45));
+    const holeCarve = 1.0;
     const mouthBoost = Math.max(0, state.faceMouthBoost ?? 1.0);
     const maskDetail = Math.max(0.2, Math.min(1.0, state.faceMaskDetail ?? 0.68));
     const stampSize = Math.max(0.5, Math.min(3.0, state.faceStampSize ?? 1.35));
@@ -5501,9 +5500,9 @@ async function main() {
     const eyeVoidL = holeCarve * eyeOpenGateL;
     const eyeVoidR = holeCarve * eyeOpenGateR;
     const mouthVoid = 0.05 + holeCarve * (0.18 + mouthDrive * 0.95);
-    carveFeatureVoid(leftEyeFeature, eyeVoidL, 2.45 + stampSize * 0.85, 0.12 + eyeOpenGateL * 1.08);
-    carveFeatureVoid(rightEyeFeature, eyeVoidR, 2.45 + stampSize * 0.85, 0.12 + eyeOpenGateR * 1.08);
-    carveFeatureVoid(mouthFeature, mouthVoid, 2.2 + stampSize * 0.82 + mouthDrive * 1.05, 0.16 + mouthDrive * 1.16);
+    carveFeatureVoid(leftEyeFeature, eyeVoidL, (2.45 + stampSize * 0.85) * eyeSizeScale, 0.12 + eyeOpenGateL * 1.08);
+    carveFeatureVoid(rightEyeFeature, eyeVoidR, (2.45 + stampSize * 0.85) * eyeSizeScale, 0.12 + eyeOpenGateR * 1.08);
+    carveFeatureVoid(mouthFeature, mouthVoid, (2.2 + stampSize * 0.82 + mouthDrive * 1.05) * mouthSizeScale, (0.16 + mouthDrive * 1.16) * mouthSizeScale);
 
     for (let i = 0; i < face.count; i++) {
       const off = i * 2;
@@ -6864,7 +6863,6 @@ async function main() {
   wireSlider('faceDyeFill', 'faceDyeFill', v => v.toFixed(2));
   wireSlider('faceEdgeBoost', 'faceEdgeBoost', v => v.toFixed(2));
   wireSlider('faceFlowCarry', 'faceFlowCarry', v => v.toFixed(2));
-  wireSlider('faceHoleCarve', 'faceHoleCarve', v => v.toFixed(2));
   wireSlider('faceEyeOpenSize', 'faceEyeOpenSize', v => v.toFixed(2));
   wireSlider('faceMouthOpenSize', 'faceMouthOpenSize', v => v.toFixed(2));
   wireSlider('faceMouthClosedSize', 'faceMouthClosedSize', v => v.toFixed(2));
@@ -7021,7 +7019,6 @@ async function main() {
     syncSlider('faceDyeFill', 'faceDyeFill', v => v.toFixed(2));
     syncSlider('faceEdgeBoost', 'faceEdgeBoost', v => v.toFixed(2));
     syncSlider('faceFlowCarry', 'faceFlowCarry', v => v.toFixed(2));
-    syncSlider('faceHoleCarve', 'faceHoleCarve', v => v.toFixed(2));
     syncSlider('faceEyeOpenSize', 'faceEyeOpenSize', v => v.toFixed(2));
     syncSlider('faceMouthOpenSize', 'faceMouthOpenSize', v => v.toFixed(2));
     syncSlider('faceMouthClosedSize', 'faceMouthClosedSize', v => v.toFixed(2));
