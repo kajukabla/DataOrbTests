@@ -2022,7 +2022,7 @@ fn frag(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let uv = pos.xy / texSize;
   let scene = textureSampleLevel(sceneTex, samp, uv, 0.0).rgb;
   let particles = textureSampleLevel(particleTex, samp, uv, 0.0).rgb;
-  let capped = min(particles, vec3f(cap));
+  let capped = vec3f(cap) * (1.0 - exp(-particles / vec3f(cap)));
   return vec4f(scene + capped, 1.0);
 }
 `;
