@@ -325,12 +325,16 @@
         <input type="range" id="burstForceRandomness" min="0.0" max="1.0" step="0.01" value="0.25">
       </div>
       <div class="setting-group">
+        <label>Jet Intensity <span class="val" id="burstDyeIntensityVal">1.0</span></label>
+        <input type="range" id="burstDyeIntensity" min="0.0" max="3.0" step="0.01" value="1.0">
+      </div>
+      <div class="setting-group">
         <label>Jet Wait (s) <span class="val" id="burstSpeedVal">0.4</span></label>
         <input type="range" id="burstSpeed" min="0.0" max="10.0" step="0.01" value="0.4">
       </div>
       <div class="setting-group">
         <label>Jet Speed <span class="val" id="burstTravelSpeedVal">1.2</span></label>
-        <input type="range" id="burstTravelSpeed" min="0.25" max="8.0" step="0.01" value="1.2">
+        <input type="range" id="burstTravelSpeed" min="0.25" max="3.0" step="0.01" value="1.2">
       </div>
       <div class="setting-group">
         <label>Jet Trail Duration <span class="val" id="burstDurationVal">0.8</span></label>
@@ -487,15 +491,27 @@
       </div>
       <div class="setting-group">
         <label>Temp Buoyancy <span class="val" id="tempBuoyancyVal">0.50</span></label>
-        <input type="range" id="tempBuoyancy" min="0.0" max="1.0" step="0.01" value="0.5">
+        <input type="range" id="tempBuoyancy" min="0.0" max="3.0" step="0.01" value="0.5">
       </div>
       <div class="setting-group">
         <label>Temp Dissipation <span class="val" id="tempDissipationVal">0.990</span></label>
         <input type="range" id="tempDissipation" min="0.95" max="1.0" step="0.001" value="0.99">
       </div>
       <div class="setting-group">
-        <label>Temp Dye Tint <span class="val" id="tempDyeTintVal">0.00</span></label>
-        <input type="range" id="tempDyeTint" min="0.0" max="1.0" step="0.01" value="0.0">
+        <label>Dye &rarr; Heat <span class="val" id="tempDyeHeatVal">0.00</span></label>
+        <input type="range" id="tempDyeHeat" min="0.0" max="3.0" step="0.01" value="0.0">
+      </div>
+      <div class="setting-group">
+        <label>Edge Cooling <span class="val" id="tempEdgeCoolVal">0.00</span></label>
+        <input type="range" id="tempEdgeCool" min="0.0" max="3.0" step="0.01" value="0.0">
+      </div>
+      <div class="setting-group">
+        <label>Radial Buoyancy <span class="val" id="tempRadialMixVal">0.00</span></label>
+        <input type="range" id="tempRadialMix" min="0.0" max="1.0" step="0.01" value="0.0">
+      </div>
+      <div class="setting-group">
+        <label>Heat Color Shift <span class="val" id="tempColorShiftVal">0.00</span></label>
+        <input type="range" id="tempColorShift" min="0.0" max="3.0" step="0.01" value="0.0">
       </div>
       <!-- Mood Lighting -->
       <div class="setting-group">

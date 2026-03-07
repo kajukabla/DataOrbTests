@@ -10,7 +10,7 @@ const SIM_SPHERE_RADIUS = 0.3665;
 const VISIBLE_SPHERE_RADIUS = SIM_SPHERE_RADIUS;
 // Screen projection scale for the sphere (1.0 = current size, lower = larger on-screen).
 // Targets roughly a 1cm edge buffer on a typical desktop viewport without altering simulation math.
-const VIEW_EDGE_BUFFER_PX = 38;
+const VIEW_EDGE_BUFFER_PX = 6;
 const VIEWPORT_REF_HEIGHT = (typeof window !== 'undefined' && Number.isFinite(window.innerHeight) && window.innerHeight > 0)
   ? window.innerHeight
   : 1080;
@@ -25,6 +25,7 @@ const SIM_VIEW_SCALE = Math.max(
 const MOUSE_SPLAT_FORCE_BASE = 6000;
 const BURST_SPLAT_FORCE_BASE = 6000;
 const FACE_SPLAT_FORCE_BASE = 6000;
+const FACE_MIRROR_X = true;
 
 const state = {
   particleCount: 4194304,   // 4M default
@@ -58,6 +59,7 @@ const state = {
   burstBehavior: 0,
   burstForce: 0.8,
   burstForceRandomness: 0.25,
+  burstDyeIntensity: 1.0,
   burstSpeed: 0.4,
   burstTravelSpeed: 1.2,
   burstDuration: 0.8,
@@ -83,7 +85,10 @@ const state = {
   tempAmount: 0,
   tempBuoyancy: 0.5,
   tempDissipation: 0.99,
-  tempDyeTint: 0,
+  tempDyeHeat: 0,        // dye brightness → heat (0=off)
+  tempEdgeCool: 0,        // extra cooling at sphere edges (0=off)
+  tempRadialMix: 0,       // 0=upward buoyancy, 1=radial outward
+  tempColorShift: 0,      // warm/cool color tinting in display (0=off)
   // Mood lighting
   moodAmount: 0,
   moodSpeed: 0.3,
@@ -134,6 +139,22 @@ const FACE_IDX = {
   rightEye: [263, 387, 385, 362, 380, 373],
   nose: [1, 4, 6, 168, 195, 5, 98, 327],
   cheeks: [50, 123, 117, 346, 352, 280],
+  fill: [
+    // Forehead
+    151, 9, 8, 108, 337, 69, 299,
+    // Between brows / eyes
+    168, 6, 197, 195,
+    // Nose sides
+    45, 275, 48, 278, 2,
+    // Upper cheeks
+    116, 345, 36, 266, 205, 425,
+    // Lower cheeks
+    187, 411, 147, 376,
+    // Nasolabial / philtrum
+    164, 393, 167, 391,
+    // Chin area
+    18, 200, 175, 208, 428, 171, 396,
+  ],
 };
 
 function uniqueIndices(...groups) {
@@ -158,7 +179,8 @@ const FACE_DENSE_INDICES = uniqueIndices(
   FACE_IDX.leftBrow,
   FACE_IDX.rightBrow,
   FACE_IDX.nose,
-  FACE_IDX.cheeks
+  FACE_IDX.cheeks,
+  FACE_IDX.fill
 );
 
 const FACE_DEBUG_PATHS = [
@@ -1247,6 +1269,10 @@ struct TempParams {
   dx: f32,
   simRes: f32,
   dissipation: f32,
+  dyeHeat: f32,
+  edgeCool: f32,
+  pad1: f32,
+  pad2: f32,
 };
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
@@ -1257,6 +1283,7 @@ const SPHERE_RADIUS: f32 = ${SIM_SPHERE_RADIUS};
 @group(0) @binding(2) var tempSrc: texture_2d<f32>;
 @group(0) @binding(3) var sampl: sampler;
 @group(0) @binding(4) var tempDst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var dyeTex: texture_2d<f32>;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -1266,7 +1293,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let toCenter = uv - SPHERE_CENTER;
   let dist = length(toCenter);
   if (dist > SPHERE_RADIUS) {
-    textureStore(tempDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+    textureStore(tempDst, id.xy, vec4f(0.5, 0.0, 0.0, 1.0));
     return;
   }
   let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.04, dist);
@@ -1280,7 +1307,21 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   }
   let clamped = clamp(sampUV, vec2f(0.5 / tp.simRes), vec2f(1.0 - 0.5 / tp.simRes));
   let advected = textureSampleLevel(tempSrc, sampl, clamped, 0.0).r;
-  let temp = advected * tp.dissipation * edgeFade;
+  // Decay toward 0.5 (neutral) instead of toward 0
+  var temp = mix(0.5, advected, tp.dissipation);
+  // Edge fade: blend toward neutral at sphere boundary
+  temp = mix(0.5, temp, edgeFade);
+  // Edge cooling: actively cool below neutral near edges
+  let edgeCoolAmount = (1.0 - edgeFade) * tp.edgeCool * 0.3;
+  temp -= edgeCoolAmount;
+  // Gentle ambient cooling so dye-absent areas drift below neutral (→ blue)
+  temp -= 0.008 * edgeFade;
+  // Dye-driven heat: bright dye warms above neutral
+  if (tp.dyeHeat > 0.0) {
+    let dyeBrightness = dot(textureLoad(dyeTex, id.xy, 0).rgb, vec3f(0.3, 0.6, 0.1));
+    temp += dyeBrightness * tp.dyeHeat * 0.1 * edgeFade;
+  }
+  temp = clamp(temp, 0.0, 1.0);
   textureStore(tempDst, id.xy, vec4f(temp, 0.0, 0.0, 1.0));
 }
 `;
@@ -1290,7 +1331,7 @@ struct BuoyancyParams {
   simRes: f32,
   dt: f32,
   buoyancy: f32,
-  pad: f32,
+  radialMix: f32,
 };
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
@@ -1315,7 +1356,12 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.04, dist);
   let temp = textureLoad(tempTex, id.xy, 0).r;
   var vel = textureLoad(velSrc, id.xy, 0).xy;
-  vel.y += bp.buoyancy * (temp - 0.5) * bp.dt * edgeFade;
+  // Blend between upward and radial-outward buoyancy
+  let heatForce = bp.buoyancy * (temp - 0.5) * bp.dt * edgeFade;
+  let upDir = vec2f(0.0, 1.0);
+  let radialDir = toCenter / max(dist, 0.001);
+  let dir = mix(upDir, radialDir, bp.radialMix);
+  vel += dir * heatForce;
   vel *= edgeFade;
   if (dist > SPHERE_RADIUS - 0.04) {
     let normal = toCenter / max(dist, 1e-5);
@@ -1948,9 +1994,10 @@ struct DisplayUniforms {
   accentColor: vec4f, // xyz=accentColor RGB, w=colorBlend
   sheenColor: vec4f,  // xyz=sheenColor RGB, w=metallic
   tipColor: vec4f,    // xyz=tipColor RGB, w=roughness
-  _pad1: vec4f,
+  tempParams: vec4f,  // x=symmetryFlag, y=tempColorShift
 };
 @group(0) @binding(2) var<uniform> du: DisplayUniforms;
+@group(0) @binding(3) var tempTex: texture_2d<f32>;
 
 ${hdr ? `fn tonemap(x: vec3f) -> vec3f {
   let peak = 4.0;
@@ -2027,7 +2074,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let gradLen = length(grad);
   let sheenDir = normalize(vec2f(0.4, 0.6));
   var spec = max(dot(normalize(grad + vec2f(0.001)), sheenDir), 0.0);
-  if (du._pad1.x >= 0.5) {
+  if (du.tempParams.x >= 0.5) {
     // Keep symmetry modes visually symmetric by removing directional bias.
     spec = smoothstep(0.002, 0.08, gradLen);
   }
@@ -2049,6 +2096,21 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let specColor = mix(du.sheenColor.rgb, color, metallic);
   let sheen = (sharpSheen * 0.6 + broadSpec * 0.3 + rimFactor * 0.15) * sheenStrength;
   color += color * sheen * specColor * headroom;
+
+  // Temperature color shift — hot areas tint warm, cool areas tint blue
+  let tcs = du.tempParams.y;
+  if (tcs > 0.001) {
+    let temp = textureSampleLevel(tempTex, samp, uv, 0.0).r;
+    let heatBias = (temp - 0.5) * 2.0; // -1 to +1
+    // Warm/cool tinting with separate colors for better vibrancy
+    let warmTint = vec3f(0.5, 0.08, -0.35) * max(heatBias, 0.0);
+    let coolTint = vec3f(-0.25, 0.05, 0.5) * max(-heatBias, 0.0);
+    let tint = (warmTint + coolTint) * tcs;
+    // Fade the intensity floor toward the sphere edge so color shift
+    // doesn't bleed into the empty outer ring
+    let tintFloor = 0.2 * smoothstep(screenRadius, screenRadius * 0.55, screenDist);
+    color += tint * max(intensity, tintFloor);
+  }
 
   // Tone mapping
   color = ${hdr ? 'tonemap(color * 1.6)' : 'aces(color * 1.6)'};
@@ -3109,14 +3171,14 @@ async function main() {
   device.queue.writeBuffer(cleanupBuf, 0, cleanupData);
 
   // ─── Temperature/Buoyancy pipelines ─────────────────────────────────────
-  // Temperature advect: custom BGL (uniform, texture(vel), texture(temp), sampler, storage(tempDst))
+  // Temperature advect: BGL (uniform, texture(vel), texture(temp), sampler, storage(tempDst), texture(dye))
   const tempAdvectPipe = buildPipeline(temperatureAdvectShader, 'tempAdvect',
-    ['uniform', 'texture', 'texture', 'sampler', 'storage']);
+    ['uniform', 'texture', 'texture', 'sampler', 'storage', 'texture']);
 
   const tempParamBuf = device.createBuffer({
-    size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const tempParamData = new Float32Array(4); // [dt, dx, simRes, dissipation]
+  const tempParamData = new Float32Array(8); // [dt, dx, simRes, dissipation, dyeHeat, edgeCool, pad, pad]
 
   // Buoyancy: custom BGL (uniform, texture(temp), texture(vel), storage(velDst))
   const buoyancyPipe = buildPipeline(buoyancyShader, 'buoyancy',
@@ -3142,6 +3204,7 @@ async function main() {
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
       { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
       { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
     ],
   });
 
@@ -3670,12 +3733,16 @@ async function main() {
     bg(batchSplatBGL, [ubuf(paramBuf), tview(tempA), tview(tempB), ubuf(splatBuf), ubuf(splatCountBuf)]),
     bg(batchSplatBGL, [ubuf(paramBuf), tview(tempB), tview(tempA), ubuf(splatBuf), ubuf(splatCountBuf)]),
   ];
-  // tempAdvect: reads vel[cur] + temp[cur], writes temp[1-cur] — 4 variants [velFlip][tempFlip]
+  // tempAdvect: reads vel[cur] + temp[cur] + dye[cur], writes temp[1-cur] — 8 variants [velFlip][tempFlip][dyeFlip]
   const tempAdvectBGs = [
-    [bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velA), tview(tempA), linearSampler, tview(tempB)]),
-     bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velA), tview(tempB), linearSampler, tview(tempA)])],
-    [bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velB), tview(tempA), linearSampler, tview(tempB)]),
-     bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velB), tview(tempB), linearSampler, tview(tempA)])],
+    [[bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velA), tview(tempA), linearSampler, tview(tempB), tview(dyeA)]),
+      bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velA), tview(tempA), linearSampler, tview(tempB), tview(dyeB)])],
+     [bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velA), tview(tempB), linearSampler, tview(tempA), tview(dyeA)]),
+      bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velA), tview(tempB), linearSampler, tview(tempA), tview(dyeB)])]],
+    [[bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velB), tview(tempA), linearSampler, tview(tempB), tview(dyeA)]),
+      bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velB), tview(tempA), linearSampler, tview(tempB), tview(dyeB)])],
+     [bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velB), tview(tempB), linearSampler, tview(tempA), tview(dyeA)]),
+      bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velB), tview(tempB), linearSampler, tview(tempA), tview(dyeB)])]],
   ];
   // buoyancy: reads temp[cur] + vel[cur], writes vel[1-cur] — 4 variants [tempFlip][velFlip]
   const buoyancyBGs = [
@@ -3685,9 +3752,12 @@ async function main() {
      bg(buoyancyPipe.layout, [ubuf(buoyancyBuf), tview(tempB), tview(velB), tview(velA)])],
   ];
   // display: reads dye[cur]
+  // displayBGs[dyeFlip][tempFlip]
   const displayBGs = [
-    bg(displayBGL, [tview(dyeA), linearSampler, ubuf(displayUB)]),
-    bg(displayBGL, [tview(dyeB), linearSampler, ubuf(displayUB)]),
+    [bg(displayBGL, [tview(dyeA), linearSampler, ubuf(displayUB), tview(tempA)]),
+     bg(displayBGL, [tview(dyeA), linearSampler, ubuf(displayUB), tview(tempB)])],
+    [bg(displayBGL, [tview(dyeB), linearSampler, ubuf(displayUB), tview(tempA)]),
+     bg(displayBGL, [tview(dyeB), linearSampler, ubuf(displayUB), tview(tempB)])],
   ];
   // particleUpdate: reads vel[cur] + dye[cur] + curlTex — 4 variants [velFlip][dyeFlip]
   function makeParticleUpdateBGs(pBuf, cBuf) {
@@ -3798,7 +3868,39 @@ async function main() {
     inferenceMs: 0,
     initWatchdog: 0,
     mainFallbackAttempted: false,
+    stampDebugData: new Float32Array(1024 * 8), // x,y,dx,dy,radius,kind,strength,pad
+    stampDebugCount: 0,
+    stampDebugDropped: 0,
+    stampFlowX: 0,
+    stampFlowY: 0,
   };
+
+  function resetFaceStampDebug() {
+    faceTracking.stampDebugCount = 0;
+    faceTracking.stampDebugDropped = 0;
+    faceTracking.stampFlowX = 0;
+    faceTracking.stampFlowY = 0;
+  }
+
+  function pushFaceStampDebug(kind, x, y, dx, dy, radius, strength = 1.0) {
+    const i = faceTracking.stampDebugCount;
+    const data = faceTracking.stampDebugData;
+    const cap = Math.floor(data.length / 8);
+    if (i >= cap) {
+      faceTracking.stampDebugDropped++;
+      return;
+    }
+    const off = i * 8;
+    data[off] = x;
+    data[off + 1] = y;
+    data[off + 2] = dx;
+    data[off + 3] = dy;
+    data[off + 4] = radius;
+    data[off + 5] = kind;
+    data[off + 6] = strength;
+    data[off + 7] = 0;
+    faceTracking.stampDebugCount = i + 1;
+  }
 
   function setFaceStatus(text, error = false) {
     if (!faceTrackingStatusEl) return;
@@ -4017,6 +4119,12 @@ async function main() {
 
     const face = faceTracking.face;
     const blend = faceTracking.blendshapeScores;
+    const vis = face?.visibility || null;
+    const visAt = (idx) => {
+      if (!vis || idx < 0 || idx >= face.count) return 1;
+      const v = vis[idx];
+      return Number.isFinite(v) ? v : 1;
+    };
     const streamLabel = `L${faceTracking.rawLandmarkCount || 0}  B${faceTracking.blendshapeCount || 0}  M${faceTracking.transformMatrix ? 16 : 0}`;
     ctx2d.fillStyle = 'rgba(255,255,255,0.82)';
     ctx2d.font = '11px system-ui, sans-serif';
@@ -4037,6 +4145,7 @@ async function main() {
       ctx2d.beginPath();
       for (const idx of indices) {
         if (idx >= face.count) continue;
+        if (visAt(idx) < 0.12) continue;
         const [sx, sy] = simUVToScreen(face.mapped[idx * 2], face.mapped[idx * 2 + 1]);
         if (!started) {
           ctx2d.moveTo(sx, sy);
@@ -4075,6 +4184,7 @@ async function main() {
       const a = parseInt(key.slice(0, sep), 10);
       const b = parseInt(key.slice(sep + 1), 10);
       if (a >= face.count || b >= face.count) continue;
+      if (Math.min(visAt(a), visAt(b)) < 0.12) continue;
       const [ax, ay] = simUVToScreen(face.mapped[a * 2], face.mapped[a * 2 + 1]);
       const [bx, by] = simUVToScreen(face.mapped[b * 2], face.mapped[b * 2 + 1]);
       ctx2d.moveTo(ax, ay);
@@ -4091,6 +4201,7 @@ async function main() {
       ctx2d.beginPath();
       for (const idx of path.points) {
         if (idx >= face.count) continue;
+        if (visAt(idx) < 0.12) continue;
         const [sx, sy] = simUVToScreen(face.mapped[idx * 2], face.mapped[idx * 2 + 1]);
         if (!started) {
           ctx2d.moveTo(sx, sy);
@@ -4110,8 +4221,88 @@ async function main() {
     for (let i = 0; i < FACE_DENSE_INDICES.length; i += 1) {
       const idx = FACE_DENSE_INDICES[i];
       if (idx >= face.count) continue;
+      if (visAt(idx) < 0.12) continue;
       const [sx, sy] = simUVToScreen(face.mapped[idx * 2], face.mapped[idx * 2 + 1]);
       ctx2d.fillRect(sx - 1, sy - 1, 2, 2);
+    }
+
+    // Face effector stamp debug: actual injection points + local stream vectors.
+    const stampCount = faceTracking.stampDebugCount | 0;
+    if (stampCount > 0) {
+      const stampData = faceTracking.stampDebugData;
+      const baseRadius = Math.max(1e-6, state.splatRadius || 1e-6);
+
+      // Draw vector trails first so point markers remain readable.
+      ctx2d.lineWidth = 1;
+      ctx2d.strokeStyle = 'rgba(110, 255, 220, 0.5)';
+      for (let i = 0; i < stampCount; i++) {
+        const off = i * 8;
+        const kind = stampData[off + 5];
+        if (kind >= 0.5) continue; // carve stamps are static; no flow arrow
+        const x = stampData[off];
+        const y = stampData[off + 1];
+        const dx = stampData[off + 2];
+        const dy = stampData[off + 3];
+        const mag = Math.hypot(dx, dy);
+        if (mag < 1e-4) continue;
+        const dirLen = Math.min(0.06, 0.006 + Math.log1p(mag) * 0.0045);
+        const tx = x + (dx / mag) * dirLen;
+        const ty = y + (dy / mag) * dirLen;
+        const [sx, sy] = simUVToScreen(x, y);
+        const [ex2, ey2] = simUVToScreen(tx, ty);
+        ctx2d.beginPath();
+        ctx2d.moveTo(sx, sy);
+        ctx2d.lineTo(ex2, ey2);
+        ctx2d.stroke();
+      }
+
+      // Draw stamp points.
+      for (let i = 0; i < stampCount; i++) {
+        const off = i * 8;
+        const x = stampData[off];
+        const y = stampData[off + 1];
+        const radius = Math.abs(stampData[off + 4]);
+        const kind = stampData[off + 5];
+        const strength = Math.max(0, stampData[off + 6]);
+        const [sx, sy] = simUVToScreen(x, y);
+        const rp = Math.max(1.2, Math.min(6.5, (radius / baseRadius) * 0.34));
+
+        if (kind >= 0.5) {
+          ctx2d.fillStyle = 'rgba(255, 90, 150, 0.32)';
+          ctx2d.strokeStyle = 'rgba(255, 110, 170, 0.75)';
+        } else {
+          const a = Math.max(0.25, Math.min(0.85, 0.22 + strength * 0.6));
+          ctx2d.fillStyle = `rgba(60, 255, 190, ${Math.max(0.2, a * 0.45)})`;
+          ctx2d.strokeStyle = `rgba(120, 255, 220, ${a})`;
+        }
+        ctx2d.beginPath();
+        ctx2d.arc(sx, sy, rp, 0, Math.PI * 2);
+        ctx2d.fill();
+        ctx2d.stroke();
+      }
+
+      // Net face stream direction used by effectors.
+      const flowX = faceTracking.stampFlowX;
+      const flowY = faceTracking.stampFlowY;
+      const flowMag = Math.hypot(flowX, flowY);
+      if (flowMag > 1e-5) {
+        const [cxFlow, cyFlow] = simUVToScreen(face.centerX, face.centerY);
+        const dirLen = Math.min(0.08, 0.012 + Math.log1p(flowMag) * 0.006);
+        const fx = face.centerX + (flowX / flowMag) * dirLen;
+        const fy = face.centerY + (flowY / flowMag) * dirLen;
+        const [exFlow, eyFlow] = simUVToScreen(fx, fy);
+        ctx2d.strokeStyle = 'rgba(255, 210, 120, 0.9)';
+        ctx2d.lineWidth = 2;
+        ctx2d.beginPath();
+        ctx2d.moveTo(cxFlow, cyFlow);
+        ctx2d.lineTo(exFlow, eyFlow);
+        ctx2d.stroke();
+      }
+
+      const dropped = faceTracking.stampDebugDropped | 0;
+      ctx2d.fillStyle = 'rgba(180,255,220,0.9)';
+      ctx2d.font = '11px system-ui, sans-serif';
+      ctx2d.fillText(`stamps ${stampCount}${dropped > 0 ? ` (+${dropped} clipped)` : ''}`, 18, vh - 24);
     }
 
     // Pose axes from the facial transformation matrix.
@@ -4171,9 +4362,15 @@ async function main() {
     return [landmarks[off], landmarks[off + 1], landmarks[off + 2]];
   }
 
-  function mapFaceLandmarksToSim(rawLandmarks, blendScores = null) {
+  function mapFaceLandmarksToSim(rawLandmarks, blendScores = null, poseScale = 1) {
     const count = Math.floor(rawLandmarks.length / 3);
     if (count < 200) return null;
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    const smooth01 = (v) => {
+      const t = clamp01(v);
+      return t * t * (3 - 2 * t);
+    };
+    const mapX = (x) => FACE_MIRROR_X ? (1.0 - x) : x;
 
     const nose = getRawLandmark(rawLandmarks, count, 1);
     const mouthTop = getRawLandmark(rawLandmarks, count, 13);
@@ -4185,19 +4382,39 @@ async function main() {
     const eyeL = getRawLandmark(rawLandmarks, count, 33);
     const eyeR = getRawLandmark(rawLandmarks, count, 263);
 
-    const centerCamX = (nose[0] + mouthTop[0] + mouthBot[0]) / 3;
+    const noseX = mapX(nose[0]);
+    const mouthTopX = mapX(mouthTop[0]);
+    const mouthBotX = mapX(mouthBot[0]);
+    const cheekLX = mapX(cheekL[0]);
+    const cheekRX = mapX(cheekR[0]);
+    const eyeLX = mapX(eyeL[0]);
+    const eyeRX = mapX(eyeR[0]);
+    const centerCamX = (noseX + mouthTopX + mouthBotX) / 3;
     const centerCamY = (nose[1] + mouthTop[1] + mouthBot[1]) / 3;
-    const faceW = Math.hypot(cheekR[0] - cheekL[0], cheekR[1] - cheekL[1]);
+    const faceW = Math.hypot(cheekRX - cheekLX, cheekR[1] - cheekL[1]);
     const faceH = Math.hypot(chin[0] - brow[0], chin[1] - brow[1]);
     const spread = Math.max(faceW, faceH, 0.08);
+    const spreadNorm = smooth01((spread - 0.11) / 0.31);
+    const poseNorm = Number.isFinite(poseScale) ? smooth01((poseScale - 0.86) / 0.62) : spreadNorm;
+    const proximity = Math.max(0, Math.min(1, spreadNorm * 0.72 + poseNorm * 0.28));
+    const depthSign = nose[2] < ((cheekL[2] + cheekR[2]) * 0.5) ? -1 : 1;
+    const toDepth = (z) => z * depthSign;
 
-    const targetRadius = Math.max(0.1, Math.min(SIM_SPHERE_RADIUS - 0.045, 0.085 + spread * 0.86));
-    let offsetX = (centerCamX - 0.5) * 0.52;
-    let offsetY = -(centerCamY - 0.5) * 0.52;
+    const targetRadius = Math.max(
+      0.096,
+      Math.min(SIM_SPHERE_RADIUS - 0.03, 0.094 + Math.pow(proximity, 0.78) * 0.23)
+    );
+    let offsetX = (centerCamX - 0.5) * 0.8;
+    let offsetY = -(centerCamY - 0.5) * 0.76;
     const offsetR = Math.hypot(offsetX, offsetY);
-    const offsetLimit = Math.max(0, SIM_SPHERE_RADIUS - targetRadius - 0.01);
-    if (offsetR > offsetLimit) {
-      const s = offsetLimit / Math.max(offsetR, 1e-6);
+    const offsetLimit = Math.max(0.03, SIM_SPHERE_RADIUS - targetRadius * 0.44 - 0.006);
+    const offsetSoft = offsetLimit * 0.82;
+    if (offsetR > offsetSoft) {
+      const over = offsetR - offsetSoft;
+      const softSpan = Math.max(1e-4, offsetLimit - offsetSoft);
+      const curved = offsetSoft + softSpan * (1.0 - Math.exp(-over / softSpan));
+      const clamped = Math.min(offsetLimit, curved);
+      const s = clamped / Math.max(offsetR, 1e-6);
       offsetX *= s;
       offsetY *= s;
     }
@@ -4207,26 +4424,37 @@ async function main() {
     let maxLocalR = 0;
     for (let i = 0; i < count; i++) {
       const off = i * 3;
-      const lx = rawLandmarks[off] - centerCamX;
+      const lx = mapX(rawLandmarks[off]) - centerCamX;
       const ly = rawLandmarks[off + 1] - centerCamY;
       maxLocalR = Math.max(maxLocalR, Math.hypot(lx, ly));
     }
-    const scale = targetRadius / Math.max(maxLocalR, 1e-6);
+    const scale = targetRadius / Math.max(maxLocalR * 0.94, 1e-6);
 
     const mapped = new Float32Array(count * 2);
+    const visibility = new Float32Array(count);
+    const camXByPoint = new Float32Array(count);
+    const depthByPoint = new Float32Array(count);
+    let depthMin = Infinity;
+    let depthMax = -Infinity;
     for (let i = 0; i < count; i++) {
       const off = i * 3;
-      const lx = rawLandmarks[off] - centerCamX;
+      const camX = mapX(rawLandmarks[off]);
+      const lx = camX - centerCamX;
       const ly = rawLandmarks[off + 1] - centerCamY;
       const simX = centerX + lx * scale;
       const simY = centerY - ly * scale;
       const [cx, cy] = clampFacePointToCircle(simX, simY, 0.006);
       mapped[i * 2] = cx;
       mapped[i * 2 + 1] = cy;
+      camXByPoint[i] = camX;
+      const depth = toDepth(rawLandmarks[off + 2]);
+      depthByPoint[i] = depth;
+      depthMin = Math.min(depthMin, depth);
+      depthMax = Math.max(depthMax, depth);
     }
 
     const mouthW = Math.hypot(
-      getRawLandmark(rawLandmarks, count, 291)[0] - getRawLandmark(rawLandmarks, count, 61)[0],
+      mapX(getRawLandmark(rawLandmarks, count, 291)[0]) - mapX(getRawLandmark(rawLandmarks, count, 61)[0]),
       getRawLandmark(rawLandmarks, count, 291)[1] - getRawLandmark(rawLandmarks, count, 61)[1]
     );
     const mouthGap = Math.hypot(mouthBot[0] - mouthTop[0], mouthBot[1] - mouthTop[1]);
@@ -4240,7 +4468,7 @@ async function main() {
       getRawLandmark(rawLandmarks, count, 159)[1] - getRawLandmark(rawLandmarks, count, 145)[1]
     );
     const eyeLeftW = Math.hypot(
-      getRawLandmark(rawLandmarks, count, 33)[0] - getRawLandmark(rawLandmarks, count, 133)[0],
+      mapX(getRawLandmark(rawLandmarks, count, 33)[0]) - mapX(getRawLandmark(rawLandmarks, count, 133)[0]),
       getRawLandmark(rawLandmarks, count, 33)[1] - getRawLandmark(rawLandmarks, count, 133)[1]
     );
     const eyeRightH = Math.hypot(
@@ -4248,29 +4476,58 @@ async function main() {
       getRawLandmark(rawLandmarks, count, 386)[1] - getRawLandmark(rawLandmarks, count, 374)[1]
     );
     const eyeRightW = Math.hypot(
-      getRawLandmark(rawLandmarks, count, 263)[0] - getRawLandmark(rawLandmarks, count, 362)[0],
+      mapX(getRawLandmark(rawLandmarks, count, 263)[0]) - mapX(getRawLandmark(rawLandmarks, count, 362)[0]),
       getRawLandmark(rawLandmarks, count, 263)[1] - getRawLandmark(rawLandmarks, count, 362)[1]
     );
     const eyeOpenLandmarkL = Math.max(0, Math.min(1, (eyeLeftH / Math.max(eyeLeftW, 1e-6) - 0.1) / 0.26));
     const eyeOpenLandmarkR = Math.max(0, Math.min(1, (eyeRightH / Math.max(eyeRightW, 1e-6) - 0.1) / 0.26));
     const blinkL = blendScore(blendScores, 'eyeBlinkLeft', 1 - eyeOpenLandmarkL);
     const blinkR = blendScore(blendScores, 'eyeBlinkRight', 1 - eyeOpenLandmarkR);
-    const eyeLeftOpen = Math.max(0, Math.min(1, eyeOpenLandmarkL * (1 - blinkL * 0.9)));
-    const eyeRightOpen = Math.max(0, Math.min(1, eyeOpenLandmarkR * (1 - blinkR * 0.9)));
+    const eyeLeftOpen = clamp01(
+      Math.pow(eyeOpenLandmarkL, 0.9) * (1 - Math.max(blinkL * 0.94, (1 - eyeOpenLandmarkL) * 0.68))
+    );
+    const eyeRightOpen = clamp01(
+      Math.pow(eyeOpenLandmarkR, 0.9) * (1 - Math.max(blinkR * 0.94, (1 - eyeOpenLandmarkR) * 0.68))
+    );
 
     const mouthTopMappedX = mapped[13 * 2];
     const mouthTopMappedY = mapped[13 * 2 + 1];
     const mouthBotMappedX = mapped[14 * 2];
     const mouthBotMappedY = mapped[14 * 2 + 1];
-    const eyeMidX = (eyeL[0] + eyeR[0]) * 0.5;
+    const eyeMidX = (eyeLX + eyeRX) * 0.5;
     const eyeMidY = (eyeL[1] + eyeR[1]) * 0.5;
-    const roll = Math.atan2(eyeR[1] - eyeL[1], eyeR[0] - eyeL[0]);
-    const yaw = Math.max(-1, Math.min(1, (nose[0] - eyeMidX) * 7.5));
+    const roll = Math.atan2(eyeR[1] - eyeL[1], eyeRX - eyeLX);
+    const yaw = Math.max(-1, Math.min(1, (noseX - eyeMidX) * 7.5));
     const pitch = Math.max(-1, Math.min(1, (nose[1] - eyeMidY) * 7.0));
+
+    const yawMag = Math.min(1, Math.abs(yaw));
+    const occlusionAmt = smooth01((yawMag - 0.12) / 0.56);
+    const depthRange = Math.max(1e-6, depthMax - depthMin);
+    const depthCut = 0.03 + occlusionAmt * 0.44;
+    const depthFeather = 0.32 - occlusionAmt * 0.15;
+    const cheekLDepth = toDepth(cheekL[2]);
+    const cheekRDepth = toDepth(cheekR[2]);
+    const farSide = Math.abs(cheekLDepth - cheekRDepth) < 1e-6
+      ? 0
+      : (cheekLDepth < cheekRDepth ? -1 : 1);
+    const sideDen = Math.max(faceW * 0.72, 1e-4);
+    for (let i = 0; i < count; i++) {
+      const near01 = (depthByPoint[i] - depthMin) / depthRange;
+      let vis = occlusionAmt <= 0.001
+        ? 1.0
+        : clamp01((near01 - depthCut) / Math.max(depthFeather, 0.05));
+      if (farSide !== 0 && occlusionAmt > 0.001) {
+        const side = (camXByPoint[i] - centerCamX) / sideDen;
+        const far01 = smooth01((farSide * side - 0.02) / 0.96);
+        vis *= (1.0 - far01 * occlusionAmt * 0.95);
+      }
+      visibility[i] = clamp01(vis);
+    }
 
     return {
       count,
       mapped,
+      visibility,
       centerX,
       centerY,
       radius: targetRadius,
@@ -4280,6 +4537,7 @@ async function main() {
       roll,
       yaw,
       pitch,
+      occlusion: occlusionAmt,
       mouthCenterX: (mouthTopMappedX + mouthBotMappedX) * 0.5,
       mouthCenterY: (mouthTopMappedY + mouthBotMappedY) * 0.5,
     };
@@ -4329,8 +4587,10 @@ async function main() {
       faceTracking.transformMatrix = matrix;
       const ax = Math.hypot(matrix[0], matrix[1], matrix[2]);
       const ay = Math.hypot(matrix[4], matrix[5], matrix[6]);
-      faceTracking.poseScale = Math.max(0.001, (ax + ay) * 0.5);
-      faceTracking.poseRoll = Math.atan2(matrix[1], matrix[0]) || faceTracking.poseRoll || 0;
+      const rawPoseScale = Math.max(0.001, (ax + ay) * 0.5);
+      faceTracking.poseScale = faceTracking.poseScale * 0.74 + rawPoseScale * 0.26;
+      const rawRoll = Math.atan2(matrix[1], matrix[0]) || faceTracking.poseRoll || 0;
+      faceTracking.poseRoll = FACE_MIRROR_X ? -rawRoll : rawRoll;
     } else {
       faceTracking.matrixMotion *= 0.92;
       if (!faceTracking.face) {
@@ -4378,7 +4638,11 @@ async function main() {
 
     faceTracking.rawLandmarks = landmarks;
     faceTracking.rawLandmarkCount = landmarks.length / 3;
-    const mappedFace = mapFaceLandmarksToSim(landmarks, faceTracking.blendshapeScores);
+    const mappedFace = mapFaceLandmarksToSim(
+      landmarks,
+      faceTracking.blendshapeScores,
+      faceTracking.poseScale
+    );
     if (!mappedFace) {
       faceTracking.face = null;
       if (faceTracking.prevMapped) faceTracking.prevMapped.fill(NaN);
@@ -4386,8 +4650,10 @@ async function main() {
     }
     faceTracking.lastFaceSeenAt = performance.now();
     faceTracking.smoothedMouth = faceTracking.smoothedMouth * 0.72 + mappedFace.mouthOpen * 0.28;
-    faceTracking.smoothedEyeLeft = faceTracking.smoothedEyeLeft * 0.74 + mappedFace.eyeLeftOpen * 0.26;
-    faceTracking.smoothedEyeRight = faceTracking.smoothedEyeRight * 0.74 + mappedFace.eyeRightOpen * 0.26;
+    const eyeCloseAlphaL = mappedFace.eyeLeftOpen < faceTracking.smoothedEyeLeft ? 0.62 : 0.34;
+    const eyeCloseAlphaR = mappedFace.eyeRightOpen < faceTracking.smoothedEyeRight ? 0.62 : 0.34;
+    faceTracking.smoothedEyeLeft = faceTracking.smoothedEyeLeft * (1 - eyeCloseAlphaL) + mappedFace.eyeLeftOpen * eyeCloseAlphaL;
+    faceTracking.smoothedEyeRight = faceTracking.smoothedEyeRight * (1 - eyeCloseAlphaR) + mappedFace.eyeRightOpen * eyeCloseAlphaR;
     mappedFace.mouthOpen = faceTracking.smoothedMouth;
     mappedFace.eyeLeftOpen = faceTracking.smoothedEyeLeft;
     mappedFace.eyeRightOpen = faceTracking.smoothedEyeRight;
@@ -4663,6 +4929,7 @@ async function main() {
     faceTracking.lastMouthBurstTime = -999;
     faceTracking.errorStreak = 0;
     faceTracking.mainFallbackAttempted = false;
+    resetFaceStampDebug();
     if (faceTracking.initWatchdog) {
       clearTimeout(faceTracking.initWatchdog);
       faceTracking.initWatchdog = 0;
@@ -4773,6 +5040,7 @@ async function main() {
   }
 
   function applyFaceEffectors(dt, modeTime) {
+    resetFaceStampDebug();
     if (Math.round(state.faceEffectorMode || 0) <= 0) return;
     const face = faceTracking.face;
     if (!face) return;
@@ -4787,20 +5055,30 @@ async function main() {
     const stampSize = Math.max(0.5, Math.min(3.0, state.faceStampSize ?? 1.35));
     const forceScale = contribution * flowCarry;
     const dyeScale = contribution * fillGain;
-    const radiusScale = stampSize * (0.72 + contribution * 0.4);
-    const detailScale = Math.max(0.2, Math.min(1.0, maskDetail * (0.5 + contribution * 0.5)));
+    const detailScale = maskDetail;
+    const detail01 = Math.max(0, Math.min(1, (detailScale - 0.2) / 0.8));
+    const radiusScale = stampSize * (0.88 + detail01 * 0.22);
 
     const additiveDye = true;
     const addFaceSplat = (x, y, dx, dy, r, g, b, radius) => {
       const signedRadius = additiveDye
         ? -Math.max(1e-5, radius * radiusScale)
         : Math.max(1e-5, radius * radiusScale);
+      const vx = dx * forceScale;
+      const vy = dy * forceScale;
+      const cr = r * dyeScale;
+      const cg = g * dyeScale;
+      const cb = b * dyeScale;
       addSplat(
         x, y,
-        dx * forceScale, dy * forceScale,
-        r * dyeScale, g * dyeScale, b * dyeScale,
+        vx, vy,
+        cr, cg, cb,
         signedRadius
       );
+      if (Math.round(state.faceDebugMode || 0) > 0) {
+        const strength = Math.max(cr, Math.max(cg, cb));
+        pushFaceStampDebug(0, x, y, vx, vy, signedRadius, strength);
+      }
     };
 
     if (!faceTracking.prevMapped || faceTracking.prevMapped.length !== face.count * 2) {
@@ -4818,21 +5096,32 @@ async function main() {
     const browLift = blendScore(blend, 'browInnerUp', 0);
     const cheekPuff = blendScore(blend, 'cheekPuff', 0);
 
-    const eyeLeftOpen = Math.max(0, Math.min(1, (face.eyeLeftOpen ?? 0.5) * (1 - blinkL * 0.9)));
-    const eyeRightOpen = Math.max(0, Math.min(1, (face.eyeRightOpen ?? 0.5) * (1 - blinkR * 0.9)));
+    const eyeLeftOpen = Math.max(0, Math.min(1, face.eyeLeftOpen ?? (1 - blinkL)));
+    const eyeRightOpen = Math.max(0, Math.min(1, face.eyeRightOpen ?? (1 - blinkR)));
+    const eyeOpenAvg = (eyeLeftOpen + eyeRightOpen) * 0.5;
     const mouth = Math.max(face.mouthOpen, jaw * 0.95);
     const mouthDrive = Math.max(0, Math.min(1, mouth * 0.72 + pucker * 0.18 + funnel * 0.15));
+    const mouthBoostN = Math.max(0, mouthBoost - 1.0);
+    const mouthFlowBoost = 1.0 + mouthBoostN * (0.55 + mouthDrive * 1.35);
     const poseMotion = Math.max(0, Math.min(1.25, faceTracking.matrixMotion * 1.85 + Math.hypot(faceTracking.centerVelX, faceTracking.centerVelY) * 6.5));
-    const getPoint = (idx) => facePoint(face, idx);
+    const vis = face.visibility || null;
+    const pointVisibility = (idx) => {
+      if (!vis || idx < 0 || idx >= face.count) return 1;
+      return Number.isFinite(vis[idx]) ? vis[idx] : 1;
+    };
+    const getPoint = (idx, minVis = 0.12) => {
+      if (idx < 0 || idx >= face.count) return null;
+      if (pointVisibility(idx) < minVis) return null;
+      return facePoint(face, idx);
+    };
     const mouthCenter = [face.mouthCenterX, face.mouthCenterY];
     const flowX = faceTracking.centerVelX * FACE_SPLAT_FORCE_BASE * 0.0038;
     const flowY = faceTracking.centerVelY * FACE_SPLAT_FORCE_BASE * 0.0038;
+    faceTracking.stampFlowX = flowX * forceScale;
+    faceTracking.stampFlowY = flowY * forceScale;
     const fillCol = [...palette(modeTime * (0.026 + smile * 0.018), 2)];
     const edgeCol = [...palette(modeTime * 0.072 + browLift * 0.08, 5)];
     const mouthCol = [...palette(modeTime * 0.11 + mouth * 0.22 + cheekPuff * 0.06, 1)];
-    const fillTs = detailScale > 0.72
-      ? [0.18, 0.34, 0.5, 0.66, 0.82]
-      : (detailScale > 0.46 ? [0.24, 0.44, 0.64, 0.82] : [0.34, 0.58, 0.82]);
     const clamp01 = (v) => Math.max(0, Math.min(1, v));
     const smooth01 = (v) => {
       const t = clamp01(v);
@@ -4846,6 +5135,7 @@ async function main() {
       const dy = y - cy;
       return [dx * cosR + dy * sinR, -dx * sinR + dy * cosR];
     };
+    const toWorldFromLocal = (lx, ly, cx, cy) => [cx + lx * cosR - ly * sinR, cy + lx * sinR + ly * cosR];
     const buildFeatureEllipse = (indices, sx = 1.0, sy = 1.0, inflate = 0.0) => {
       let cx = 0;
       let cy = 0;
@@ -4923,7 +5213,7 @@ async function main() {
       return Math.hypot(lx / Math.max(feature.rx, 1e-5), ly / Math.max(feature.ry, 1e-5));
     };
     const eyeInflate = (0.0028 + (1.0 - detailScale) * 0.0022) * stampSize;
-    const mouthInflate = (0.0035 + (1.0 - detailScale) * 0.0032) * stampSize;
+    const mouthInflate = (0.0017 + (1.0 - detailScale) * 0.0018) * stampSize * (0.5 + mouthDrive * 0.9);
     const leftEyeFeature = buildFeatureEllipse(
       FACE_IDX.leftEye,
       1.4 + eyeLeftOpen * 0.25,
@@ -4939,20 +5229,22 @@ async function main() {
     const mouthFeature = buildFeatureEllipse(
       FACE_IDX.mouthHole,
       1.35 + smile * 0.12,
-      1.2 + mouthDrive * 0.85,
+      0.42 + mouthDrive * 0.78,
       mouthInflate
     );
-    const contourSamples = sampleClosedLoop(FACE_IDX.contour, detailScale > 0.72 ? 48 : (detailScale > 0.46 ? 36 : 26));
-    const leftEyeSamples = sampleClosedLoop(FACE_IDX.leftEye, detailScale > 0.68 ? 20 : 14);
-    const rightEyeSamples = sampleClosedLoop(FACE_IDX.rightEye, detailScale > 0.68 ? 20 : 14);
-    const mouthHoleSamples = sampleClosedLoop(FACE_IDX.mouthHole, detailScale > 0.68 ? 26 : 18);
-    const lipSamples = sampleClosedLoop(FACE_IDX.lips, detailScale > 0.72 ? 34 : 24);
+    const contourSamples = sampleClosedLoop(FACE_IDX.contour, Math.round(42 + detail01 * 118));
+    const leftEyeSamples = sampleClosedLoop(FACE_IDX.leftEye, Math.round(12 + detail01 * 20));
+    const rightEyeSamples = sampleClosedLoop(FACE_IDX.rightEye, Math.round(12 + detail01 * 20));
+    const mouthHoleSamples = sampleClosedLoop(FACE_IDX.mouthHole, Math.round(14 + detail01 * 26));
+    const lipSamples = sampleClosedLoop(FACE_IDX.lips, Math.round(18 + detail01 * 30));
     const holeFeather = 0.1 + (1.0 - detailScale) * 0.14;
-    const eyeOpenGateL = Math.pow(smooth01((eyeLeftOpen - 0.12) / 0.42), 1.35);
-    const eyeOpenGateR = Math.pow(smooth01((eyeRightOpen - 0.12) / 0.42), 1.35);
+    const blinkGateL = 1.0 - Math.pow(clamp01(blinkL), 1.2);
+    const blinkGateR = 1.0 - Math.pow(clamp01(blinkR), 1.2);
+    const eyeOpenGateL = Math.pow(smooth01((eyeLeftOpen - 0.03) / 0.3), 1.15) * Math.pow(clamp01(blinkGateL), 1.75);
+    const eyeOpenGateR = Math.pow(smooth01((eyeRightOpen - 0.03) / 0.3), 1.15) * Math.pow(clamp01(blinkGateR), 1.75);
     const eyeHoleL = holeCarve * eyeOpenGateL;
     const eyeHoleR = holeCarve * eyeOpenGateR;
-    const mouthHole = holeCarve * (0.3 + mouthDrive * 1.32);
+    const mouthHole = holeCarve * (0.06 + mouthDrive * 1.24);
     const holeMaskAt = (x, y) => {
       if (holeCarve <= 0.001) return 1.0;
       const cutFrom = (feature, weight) => {
@@ -4969,12 +5261,27 @@ async function main() {
       );
       return clamp01(1.0 - Math.min(1.0, cut * 1.16));
     };
-    const carveReserve = 34;
+    const isInsideFeatureVoid = (x, y) => {
+      if (holeCarve <= 0.001) return false;
+      const eyeVoidQ = 1.18 + holeFeather * 0.45 + holeCarve * 0.18;
+      const mouthVoidQ = 1.24 + holeFeather * 0.5 + holeCarve * 0.22;
+      const eyeCutL = eyeHoleL > 0.02 && leftEyeFeature
+        ? ellipseQ(leftEyeFeature, x, y) < eyeVoidQ
+        : false;
+      const eyeCutR = eyeHoleR > 0.02 && rightEyeFeature
+        ? ellipseQ(rightEyeFeature, x, y) < eyeVoidQ
+        : false;
+      const mouthCut = mouthHole > 0.02 && mouthFeature
+        ? ellipseQ(mouthFeature, x, y) < mouthVoidQ
+        : false;
+      return eyeCutL || eyeCutR || mouthCut;
+    };
+    const carveReserve = Math.max(16, Math.min(32, Math.round(30 - detail01 * 14)));
     const activeBudget = Math.max(0, MAX_SPLATS - carveReserve);
     const anchorBudget = Math.max(1, Math.min(2, activeBudget));
-    const fillBudget = Math.max(16, Math.floor(activeBudget * 0.58));
-    const edgeBudget = Math.max(8, Math.floor(activeBudget * 0.16));
-    const rimBudget = Math.max(8, activeBudget - anchorBudget - fillBudget - edgeBudget);
+    const edgeBudget = Math.max(12, Math.floor(activeBudget * (0.24 + detail01 * 0.03)));
+    const rimBudget = Math.max(9, Math.floor(activeBudget * (0.17 - detail01 * 0.03)));
+    const fillBudget = Math.max(16, activeBudget - anchorBudget - edgeBudget - rimBudget);
     const anchorStageCap = Math.min(MAX_SPLATS, splatCount + anchorBudget);
     const fillStageCap = Math.min(MAX_SPLATS, anchorStageCap + fillBudget);
     const edgeStageCap = Math.min(MAX_SPLATS, fillStageCap + edgeBudget);
@@ -4986,7 +5293,7 @@ async function main() {
 
     // Stable anchor so face-dye remains visible even if expression-driven regions fluctuate.
     const anchorGain = 0.05 + contribution * 0.03;
-    if (splatCount < anchorStageCap) {
+    if (splatCount < anchorStageCap && !isInsideFeatureVoid(face.centerX, face.centerY)) {
       addFaceSplat(
         face.centerX, face.centerY,
         flowX * 0.5, flowY * 0.5,
@@ -4995,7 +5302,7 @@ async function main() {
       );
     }
     const nosePt = getPoint(1);
-    if (nosePt && splatCount < anchorStageCap) {
+    if (nosePt && splatCount < anchorStageCap && !isInsideFeatureVoid(nosePt[0], nosePt[1])) {
       addFaceSplat(
         nosePt[0], nosePt[1],
         flowX * 0.45, flowY * 0.45,
@@ -5004,52 +5311,49 @@ async function main() {
       );
     }
 
-    // 1) Dye-fill the whole facial surface.
-    const fillContourCount = Math.max(6, Math.min(
-      contourSamples.length,
-      Math.floor(Math.max(0, fillStageCap - splatCount) / Math.max(1, fillTs.length))
-    ));
-    for (let i = 0; i < fillContourCount; i++) {
+    // 1) Landmark-based interior fill — points track the face surface.
+    const fillIndices = FACE_IDX.fill;
+    for (let i = 0; i < fillIndices.length; i++) {
       if (splatCount >= fillStageCap) break;
-      const idx = pickLoopIndex(contourSamples.length, i, fillContourCount);
-      if (idx < 0) continue;
-      const pt = contourSamples[idx];
+      const idx = fillIndices[i];
+      const pt = getPoint(idx, 0.12);
+      if (!pt) continue;
+      if (isInsideFeatureVoid(pt[0], pt[1])) continue;
+      const holeMask = holeMaskAt(pt[0], pt[1]);
+      if (holeMask <= 0.065) continue;
       const [rx, ry] = direction(face.centerX, face.centerY, pt[0], pt[1]);
-      for (const t of fillTs) {
-        if (splatCount >= fillStageCap) break;
-        const x = face.centerX + (pt[0] - face.centerX) * t;
-        const y = face.centerY + (pt[1] - face.centerY) * t;
-        const holeMask = holeMaskAt(x, y);
-        if (holeMask <= 0.012) continue;
-        const radialFalloff = 1.0 - t * 0.72;
-        const g = (0.05 + radialFalloff * 0.08 + mouth * 0.03 + poseMotion * 0.02) * holeMask;
-        const drift = (0.2 + (1.0 - t) * 0.3) * (0.7 + holeMask * 0.3);
-        addFaceSplat(
-          x, y,
-          flowX * drift + rx * FACE_SPLAT_FORCE_BASE * 0.0014 * (1.0 - t),
-          flowY * drift + ry * FACE_SPLAT_FORCE_BASE * 0.0014 * (1.0 - t),
-          fillCol[0] * g, fillCol[1] * g, fillCol[2] * g,
-          state.splatRadius * (2.3 + radialFalloff * 2.1 + smile * 0.3) * (0.86 + holeMask * 0.24)
-        );
-      }
+      const distToCenter = Math.hypot(pt[0] - face.centerX, pt[1] - face.centerY);
+      const edgeness = clamp01(distToCenter / Math.max(face.radius, 1e-6));
+      const g = (0.032 + edgeness * 0.044 + mouth * 0.018 + poseMotion * 0.018) * holeMask;
+      const drift = 0.11 + edgeness * 0.25;
+      const outflow = 0.2 + edgeness * 0.8;
+      const stampMul = 1.8 + edgeness * 0.9 + smile * 0.22;
+      addFaceSplat(
+        pt[0], pt[1],
+        flowX * drift + rx * FACE_SPLAT_FORCE_BASE * 0.0012 * outflow,
+        flowY * drift + ry * FACE_SPLAT_FORCE_BASE * 0.0012 * outflow,
+        fillCol[0] * g, fillCol[1] * g, fillCol[2] * g,
+        state.splatRadius * stampMul * (0.86 + holeMask * 0.24)
+      );
     }
 
     // 2) Add a controlled contour accent so the head boundary reads clearly.
-    const edgePointCount = Math.max(6, Math.min(contourSamples.length, Math.max(0, edgeStageCap - splatCount)));
+    const edgePointCount = Math.max(12, Math.min(contourSamples.length, Math.max(0, edgeStageCap - splatCount)));
     for (let i = 0; i < edgePointCount; i++) {
       if (splatCount >= edgeStageCap) break;
       const idx = pickLoopIndex(contourSamples.length, i, edgePointCount);
       if (idx < 0) continue;
       const pt = contourSamples[idx];
       const [nx, ny] = direction(face.centerX, face.centerY, pt[0], pt[1]);
-      const edgeTint = edgeGain * (0.04 + smile * 0.03 + poseMotion * 0.02);
-      const edgeNudge = FACE_SPLAT_FORCE_BASE * 0.0035 * edgeGain;
+      const upperBoost = 1.0 + Math.max(0, (pt[1] - face.centerY) / Math.max(face.radius, 1e-6)) * 0.3;
+      const edgeTint = edgeGain * (0.052 + smile * 0.032 + poseMotion * 0.02) * upperBoost;
+      const edgeNudge = FACE_SPLAT_FORCE_BASE * 0.0041 * edgeGain;
       addFaceSplat(
         pt[0], pt[1],
-        flowX * 0.95 + nx * edgeNudge * 0.35,
-        flowY * 0.95 + ny * edgeNudge * 0.35,
+        flowX * 1.05 + nx * edgeNudge * 0.36,
+        flowY * 1.05 + ny * edgeNudge * 0.36,
         edgeCol[0] * edgeTint, edgeCol[1] * edgeTint, edgeCol[2] * edgeTint,
-        state.splatRadius * (2.4 + edgeGain * 1.5 + cheekPuff * 0.4)
+        state.splatRadius * (2.55 + edgeGain * 1.6 + cheekPuff * 0.42)
       );
     }
 
@@ -5115,15 +5419,15 @@ async function main() {
     );
 
     // 4) Keep mouth as a soft lip rim injector instead of center bursts.
-    const mouthRimGain = (0.035 + mouthDrive * 0.11 * mouthBoost + smile * 0.025) * (0.68 + holeCarve * 0.75);
+    const mouthRimGain = (0.008 + mouthDrive * 0.12 * mouthBoost + smile * 0.02) * (0.6 + holeCarve * 0.68);
     loopRim(
       mouthHoleSamples,
       mouthCenterForRim,
       mouthCol,
       mouthRimGain,
       2.85 + stampSize * 0.7 + mouthDrive * 1.85 * mouthBoost,
-      0.6,
-      1.1,
+      0.6 * mouthFlowBoost,
+      1.1 * mouthFlowBoost,
       mouthRimPts
     );
     loopRim(
@@ -5132,8 +5436,8 @@ async function main() {
       mouthCol,
       mouthRimGain * 0.62,
       2.55 + stampSize * 0.65 + mouthDrive * 1.35,
-      0.55,
-      0.85,
+      0.55 * (1.0 + mouthBoostN * 0.9),
+      0.85 * (1.0 + mouthBoostN * 1.1),
       lipRimPts
     );
 
@@ -5143,12 +5447,16 @@ async function main() {
       if (amount <= 0.0005 || splatCount >= MAX_SPLATS) return;
       const a = clamp01(amount);
       const dark = 0.00008 + (1.0 - a) * 0.00006;
+      const carveRadius = Math.max(1e-5, state.splatRadius * radiusMul * (0.78 + a * 1.18));
       addSplat(
         x, y,
         0, 0,
         dark, dark, dark,
-        Math.max(1e-5, state.splatRadius * radiusMul * (0.78 + a * 1.18))
+        carveRadius
       );
+      if (Math.round(state.faceDebugMode || 0) > 0) {
+        pushFaceStampDebug(1, x, y, 0, 0, carveRadius, a);
+      }
     };
     const carveFeatureVoid = (feature, amount, radiusMul, openY = 1.0) => {
       if (!feature || amount <= 0.001 || splatCount >= MAX_SPLATS) return;
@@ -5183,10 +5491,10 @@ async function main() {
 
     const eyeVoidL = holeCarve * eyeOpenGateL;
     const eyeVoidR = holeCarve * eyeOpenGateR;
-    const mouthVoid = 0.26 + holeCarve * (0.8 + mouthDrive * 0.35);
+    const mouthVoid = 0.05 + holeCarve * (0.18 + mouthDrive * 0.95);
     carveFeatureVoid(leftEyeFeature, eyeVoidL, 2.45 + stampSize * 0.85, 0.12 + eyeOpenGateL * 1.08);
     carveFeatureVoid(rightEyeFeature, eyeVoidR, 2.45 + stampSize * 0.85, 0.12 + eyeOpenGateR * 1.08);
-    carveFeatureVoid(mouthFeature, mouthVoid, 3.1 + stampSize * 1.05, 0.85 + mouthDrive * 0.55);
+    carveFeatureVoid(mouthFeature, mouthVoid, 2.2 + stampSize * 0.82 + mouthDrive * 1.05, 0.16 + mouthDrive * 1.16);
 
     for (let i = 0; i < face.count; i++) {
       const off = i * 2;
@@ -5217,11 +5525,13 @@ async function main() {
     burstEmitterStamp = stamp;
     burstVolleyCooldown = 0;
     burstEmitters.length = 0;
+    const initialWait = Math.max(0, Math.min(10, Number.isFinite(state.burstSpeed) ? state.burstSpeed : 0.4));
     for (let i = 0; i < wanted; i++) {
       const angle = (i / Math.max(1, wanted)) * Math.PI * 2;
+      const stagger = wanted > 0 ? (initialWait * i) / wanted : 0;
       burstEmitters.push({
         angle,
-        cooldown: Math.random() * 0.25,
+        cooldown: stagger,
         drift: (Math.random() < 0.5 ? -1 : 1) * (0.7 + Math.random() * 0.8),
       });
     }
@@ -5240,17 +5550,46 @@ async function main() {
     return { x: 0.5 + dx, y: 0.5 + dy };
   }
 
+  function pointAlongRayInSphere(sx, sy, dirX, dirY, reach, margin = 0.02) {
+    const len = Math.hypot(dirX, dirY);
+    if (len < 1e-6) return null;
+    const nx = dirX / len;
+    const ny = dirY / len;
+    const ox = sx - 0.5;
+    const oy = sy - 0.5;
+    const r = Math.max(0.02, SIM_SPHERE_RADIUS - margin);
+    const b = 2 * (ox * nx + oy * ny);
+    const c = ox * ox + oy * oy - r * r;
+    const disc = b * b - 4 * c;
+    if (disc < 0) {
+      return clampPointToSphere(sx + nx * reach, sy + ny * reach, margin);
+    }
+    const sqrtDisc = Math.sqrt(disc);
+    let t0 = (-b - sqrtDisc) / 2;
+    let t1 = (-b + sqrtDisc) / 2;
+    if (t0 > t1) {
+      const tmp = t0;
+      t0 = t1;
+      t1 = tmp;
+    }
+    if (t1 <= 1e-5) return null;
+    const tMax = Math.max(1e-5, t1 - 1e-4);
+    const t = Math.min(Math.max(1e-4, reach), tMax);
+    if (t <= 1e-5) return null;
+    return { x: sx + nx * t, y: sy + ny * t };
+  }
+
   function spawnBurstShot(e, behavior, idx, count, travelSpeed, duration, width) {
     if (burstShots.length > 160) return;
     const TAU = Math.PI * 2;
     const slot = idx / Math.max(1, count);
+    const slotAngle = slot * TAU;
     const widthN = Math.max(0, Math.min(12, width));
     const width01 = Math.min(1, widthN);
     const widthBoost = Math.max(0, widthN - 1);
-    const edgeSourceR = SIM_SPHERE_RADIUS + 0.012;
-    const centerSourceR = 0.018 + width01 * 0.06 + widthBoost * 0.03;
-    const innerTargetMin = 0.03 + width01 * 0.06;
-    const innerTargetMax = Math.max(innerTargetMin + 0.02, SIM_SPHERE_RADIUS - (0.09 - widthBoost * 0.03));
+    const edgeSourceR = Math.max(0, SIM_SPHERE_RADIUS - 0.012);
+    const innerTargetMin = 0.05;
+    const innerTargetMax = Math.max(innerTargetMin + 0.02, SIM_SPHERE_RADIUS - 0.08);
 
     let sourceAngle = e.angle;
     let sourceR = edgeSourceR;
@@ -5261,20 +5600,27 @@ async function main() {
 
     if (behavior === 1) {
       // Inward ring: emit from edge, aimed exactly at center.
-      sourceAngle = slot * TAU + burstGlobalPhase * 0.15;
+      sourceAngle = slotAngle;
       sourceR = edgeSourceR;
       explicitTargetX = 0.5;
       explicitTargetY = 0.5;
     } else if (behavior === 2) {
       // Outward ring: emit from center, aimed exactly outward.
-      sourceAngle = slot * TAU + burstGlobalPhase * 0.3;
+      sourceAngle = slotAngle;
       sourceR = 0;
       targetAngle = sourceAngle;
-      targetR = SIM_SPHERE_RADIUS - (0.03 + width01 * 0.03);
+      targetR = SIM_SPHERE_RADIUS - 0.03;
     } else if (behavior === 3) {
-      // Radial jets: outer-wall sources, inward radial direction rotated by angle slider.
-      sourceAngle = slot * TAU + burstGlobalPhase * 0.18;
-      sourceR = edgeSourceR;
+      // Radial jets:
+      // - single jet: source steps around the rim each shot
+      // - multi jet: fixed ring of simultaneous sources
+      if (count <= 1) {
+        e.angle = wrapAngle(e.angle + e.drift * 0.22 + (Math.random() * 2 - 1) * 0.08);
+        sourceAngle = e.angle;
+      } else {
+        sourceAngle = slotAngle;
+      }
+      sourceR = Math.max(0, SIM_SPHERE_RADIUS - 0.012);
       const sx = 0.5 + Math.cos(sourceAngle) * sourceR;
       const sy = 0.5 + Math.sin(sourceAngle) * sourceR;
       const inwardX = 0.5 - sx;
@@ -5285,9 +5631,15 @@ async function main() {
       const ang = ((state.burstRadialAngle || 0) * Math.PI) / 180;
       const rx = nx * Math.cos(ang) - ny * Math.sin(ang);
       const ry = nx * Math.sin(ang) + ny * Math.cos(ang);
-      const reach = SIM_SPHERE_RADIUS * (1.8 + width01 * 0.4 + widthBoost * 0.15);
-      explicitTargetX = sx + rx * reach;
-      explicitTargetY = sy + ry * reach;
+      const reach = SIM_SPHERE_RADIUS * 0.95;
+      const rayTarget = pointAlongRayInSphere(sx, sy, rx, ry, reach, 0.01);
+      if (rayTarget) {
+        explicitTargetX = rayTarget.x;
+        explicitTargetY = rayTarget.y;
+      } else {
+        explicitTargetX = sx + rx * 0.08;
+        explicitTargetY = sy + ry * 0.08;
+      }
     } else if (behavior === 4) {
       sourceAngle = slot * TAU + burstGlobalPhase;
       sourceR = edgeSourceR;
@@ -5305,17 +5657,19 @@ async function main() {
     const sy = 0.5 + Math.sin(sourceAngle) * sourceR;
     const tx0 = Number.isFinite(explicitTargetX) ? explicitTargetX : (0.5 + Math.cos(targetAngle) * targetR);
     const ty0 = Number.isFinite(explicitTargetY) ? explicitTargetY : (0.5 + Math.sin(targetAngle) * targetR);
-    const t = clampPointToSphere(tx0, ty0, 0.03);
+    const targetMargin = behavior === 3 ? 0.01 : 0.03;
+    const t = clampPointToSphere(tx0, ty0, targetMargin);
     const dx = t.x - sx;
     const dy = t.y - sy;
     const d = Math.hypot(dx, dy);
     if (d < 1e-5) return;
 
     const jitter = 1 + (Math.random() * 2 - 1) * state.burstForceRandomness;
+    const dyeIntensity = Math.max(0, Number.isFinite(state.burstDyeIntensity) ? state.burstDyeIntensity : 1.0);
     const speed = 0.35 + Math.max(0.25, travelSpeed) * 1.15; // world units / second
     const life = Math.min(2.6, 0.07 + duration * 0.16);
     const forceScale = Math.max(0.15, (0.45 + state.burstForce * 1.5) * jitter);
-    const dyeScale = forceScale * (1.8 + width01 * 0.8 + widthBoost * 0.2); // intentionally dye-heavy
+    const dyeScale = forceScale * (1.8 + width01 * 0.8 + widthBoost * 0.2) * dyeIntensity;
     const radius = state.splatRadius * (0.9 + width01 * 2.8 + widthBoost * 0.9 + state.burstForce * 0.2);
 
     burstShots.push({
@@ -5342,28 +5696,40 @@ async function main() {
 
     ensureBurstEmitters(count, behavior);
     const waitSeconds = Math.max(0, Math.min(10, Number.isFinite(state.burstSpeed) ? state.burstSpeed : 0.4));
-    const travelSpeed = Math.max(0.25, Number.isFinite(state.burstTravelSpeed) ? state.burstTravelSpeed : 1.2);
+    const travelSpeed = Math.max(0.25, Math.min(3.0, Number.isFinite(state.burstTravelSpeed) ? state.burstTravelSpeed : 1.2));
     const duration = Math.max(0.05, Number.isFinite(state.burstDuration) ? state.burstDuration : 0.8);
     const width = Math.max(0, Math.min(12, Number.isFinite(state.burstWidth) ? state.burstWidth : 0.35));
     burstGlobalPhase = wrapAngle(burstGlobalPhase + dt * 0.42);
 
-    // Target find speed acts as explicit wait time between firing events.
-    if (behavior === 0) {
-      for (let i = 0; i < burstEmitters.length; i++) {
-        const e = burstEmitters[i];
-        e.cooldown -= dt;
-        if (e.cooldown <= 0) {
-          spawnBurstShot(e, behavior, i, count, travelSpeed, duration, width);
-          e.cooldown = waitSeconds * (0.8 + Math.random() * 0.45);
-        }
-      }
-    } else {
+    // Jet Wait (s) acts as wait time between firing events.
+    let firedVolleyThisFrame = false;
+    const radialMultiSync = behavior === 3 && count > 1;
+    if (behavior === 1 || behavior === 2 || radialMultiSync) {
+      // Ring/radial-multi patterns: synchronized volleys so Jet Wait (s) controls cadence.
       burstVolleyCooldown -= dt;
       if (burstVolleyCooldown <= 0) {
         for (let i = 0; i < burstEmitters.length; i++) {
           spawnBurstShot(burstEmitters[i], behavior, i, count, travelSpeed, duration, width);
         }
         burstVolleyCooldown = waitSeconds;
+        firedVolleyThisFrame = true;
+      }
+    }
+    const allowSequentialFiring = !(behavior === 1 || behavior === 2 || radialMultiSync);
+    if (allowSequentialFiring && !firedVolleyThisFrame) {
+      for (let i = 0; i < burstEmitters.length; i++) {
+        const e = burstEmitters[i];
+        e.cooldown -= dt;
+        if (e.cooldown <= 0) {
+          spawnBurstShot(e, behavior, i, count, travelSpeed, duration, width);
+          if (waitSeconds <= 0) {
+            e.cooldown = 0;
+          } else if (behavior === 0) {
+            e.cooldown += waitSeconds * (0.8 + Math.random() * 0.45);
+          } else {
+            e.cooldown += waitSeconds;
+          }
+        }
       }
     }
 
@@ -5702,7 +6068,7 @@ async function main() {
     displayUBData[19] = state.roughness;
     // slots 20-23: display extras (20 carries symmetry behavior)
     displayUBData[20] = Math.round(state.noiseBehavior || 0);
-    displayUBData[21] = 0;
+    displayUBData[21] = state.tempColorShift;
     displayUBData[22] = 0;
     displayUBData[23] = 0;
     device.queue.writeBuffer(displayUB, 0, displayUBData);
@@ -5844,10 +6210,12 @@ async function main() {
       tempParamData[1] = 1.0 / SIM_RES;
       tempParamData[2] = SIM_RES;
       tempParamData[3] = effectiveTempDissipation;
+      tempParamData[4] = state.tempDyeHeat;
+      tempParamData[5] = state.tempEdgeCool;
       device.queue.writeBuffer(tempParamBuf, 0, tempParamData);
       const p = enc.beginComputePass();
       p.setPipeline(tempAdvectPipe.pipeline);
-      p.setBindGroup(0, tempAdvectBGs[velFlip][tempFlip]);
+      p.setBindGroup(0, tempAdvectBGs[velFlip][tempFlip][dyeFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
       tempFlip ^= 1;
@@ -5857,8 +6225,8 @@ async function main() {
     if (state.tempAmount > 0.01 && state.tempBuoyancy > 0.01) {
       buoyancyData[0] = SIM_RES;
       buoyancyData[1] = dt;
-      buoyancyData[2] = state.tempBuoyancy * 50.0;
-      buoyancyData[3] = 0;
+      buoyancyData[2] = state.tempBuoyancy * 500.0;
+      buoyancyData[3] = state.tempRadialMix;
       device.queue.writeBuffer(buoyancyBuf, 0, buoyancyData);
       const p = enc.beginComputePass();
       p.setPipeline(buoyancyPipe.pipeline);
@@ -5986,7 +6354,7 @@ async function main() {
         }],
       });
       rp.setPipeline(displayPipeline);
-      rp.setBindGroup(0, displayBGs[dyeFlip]);
+      rp.setBindGroup(0, displayBGs[dyeFlip][tempFlip]);
       rp.draw(3);
       rp.end();
     }
@@ -6468,6 +6836,7 @@ async function main() {
   wireSlider('burstCount', 'burstCount', v => Math.round(v));
   wireSlider('burstForce', 'burstForce');
   wireSlider('burstForceRandomness', 'burstForceRandomness');
+  wireSlider('burstDyeIntensity', 'burstDyeIntensity');
   wireSlider('burstSpeed', 'burstSpeed');
   wireSlider('burstTravelSpeed', 'burstTravelSpeed');
   wireSlider('burstDuration', 'burstDuration');
@@ -6548,7 +6917,10 @@ async function main() {
   wireSlider('tempAmount', 'tempAmount');
   wireSlider('tempBuoyancy', 'tempBuoyancy');
   wireSlider('tempDissipation', 'tempDissipation', v => v.toFixed(3));
-  wireSlider('tempDyeTint', 'tempDyeTint');
+  wireSlider('tempDyeHeat', 'tempDyeHeat');
+  wireSlider('tempEdgeCool', 'tempEdgeCool');
+  wireSlider('tempRadialMix', 'tempRadialMix');
+  wireSlider('tempColorShift', 'tempColorShift');
   // Mood / Palette
   wireSlider('moodAmount', 'moodAmount');
   wireSlider('moodSpeed', 'moodSpeed');
@@ -6614,6 +6986,7 @@ async function main() {
     syncSlider('burstCount', 'burstCount', v => Math.round(v));
     syncSlider('burstForce', 'burstForce');
     syncSlider('burstForceRandomness', 'burstForceRandomness');
+    syncSlider('burstDyeIntensity', 'burstDyeIntensity');
     syncSlider('burstSpeed', 'burstSpeed');
     syncSlider('burstTravelSpeed', 'burstTravelSpeed');
     syncSlider('burstDuration', 'burstDuration');
@@ -6666,7 +7039,10 @@ async function main() {
     syncSlider('tempAmount', 'tempAmount');
     syncSlider('tempBuoyancy', 'tempBuoyancy');
     syncSlider('tempDissipation', 'tempDissipation', v => v.toFixed(3));
-    syncSlider('tempDyeTint', 'tempDyeTint');
+    syncSlider('tempDyeHeat', 'tempDyeHeat');
+    syncSlider('tempEdgeCool', 'tempEdgeCool');
+    syncSlider('tempRadialMix', 'tempRadialMix');
+    syncSlider('tempColorShift', 'tempColorShift');
     // Mood
     syncSlider('moodAmount', 'moodAmount');
     syncSlider('moodSpeed', 'moodSpeed');
@@ -6726,8 +7102,9 @@ async function main() {
     state.burstCount = Math.round(randRange(0, 16));
     state.burstForce = snapTo(randRange(0, 6.4), 0.01);
     state.burstForceRandomness = snapTo(randRange(0, 1), 0.01);
+    state.burstDyeIntensity = snapTo(randRange(0, 3.0), 0.01);
     state.burstSpeed = snapTo(randRange(0, 10.0), 0.01);
-    state.burstTravelSpeed = snapTo(randRange(0.35, 7.6), 0.01);
+    state.burstTravelSpeed = snapTo(randRange(0.35, 3.0), 0.01);
     state.burstDuration = snapTo(randRange(0.1, 32.0), 0.01);
     state.burstWidth = snapTo(randRange(0.05, 12.0), 0.01);
     state.burstRadialAngle = snapTo(randRange(0, 360), 1);
@@ -6761,7 +7138,10 @@ async function main() {
     state.tempAmount = Math.random();
     state.tempBuoyancy = Math.random();
     state.tempDissipation = 0.95 + Math.random() * 0.05;
-    state.tempDyeTint = Math.random();
+    state.tempDyeHeat = Math.random();
+    state.tempEdgeCool = Math.random();
+    state.tempRadialMix = Math.random();
+    state.tempColorShift = Math.random();
     // Mood
     state.moodAmount = Math.random();
     state.moodSpeed = Math.random();
@@ -6785,8 +7165,9 @@ async function main() {
     burstCount: { min: 0, max: 16, step: 1 },
     burstForce: { min: 0, max: 8, step: 0.01 },
     burstForceRandomness: { min: 0, max: 1, step: 0.01 },
+    burstDyeIntensity: { min: 0, max: 3.0, step: 0.01 },
     burstSpeed: { min: 0, max: 10.0, step: 0.01 },
-    burstTravelSpeed: { min: 0.25, max: 8.0, step: 0.01 },
+    burstTravelSpeed: { min: 0.25, max: 3.0, step: 0.01 },
     burstDuration: { min: 0.05, max: 32.0, step: 0.01 },
     burstWidth: { min: 0, max: 12.0, step: 0.01 },
     burstRadialAngle: { min: 0, max: 360, step: 1 },
@@ -6808,9 +7189,12 @@ async function main() {
     noiseDyeIntensity: { min: 0, max: 1, step: 0.01 },
     dyeNoiseAmount: { min: 0, max: 0.15, step: 0.001 },
     tempAmount: { min: 0, max: 1, step: 0.01 },
-    tempBuoyancy: { min: 0, max: 1, step: 0.01 },
+    tempBuoyancy: { min: 0, max: 3, step: 0.01 },
     tempDissipation: { min: 0.95, max: 1.0, step: 0.001 },
-    tempDyeTint: { min: 0, max: 1, step: 0.01 },
+    tempDyeHeat: { min: 0, max: 3, step: 0.01 },
+    tempEdgeCool: { min: 0, max: 3, step: 0.01 },
+    tempRadialMix: { min: 0, max: 1, step: 0.01 },
+    tempColorShift: { min: 0, max: 3, step: 0.01 },
     moodAmount: { min: 0, max: 1, step: 0.01 },
     moodSpeed: { min: 0, max: 1, step: 0.01 },
     paletteIndex: { min: -1, max: 49, step: 1 },

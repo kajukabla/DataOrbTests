@@ -21,8 +21,9 @@ export const SLIDER_SPACE = {
   burstCount:        { min: 0,    max: 16,    step: 1    },
   burstForce:        { min: 0,    max: 8,     step: 0.01 },
   burstForceRandomness:{ min: 0,  max: 1,     step: 0.01 },
+  burstDyeIntensity: { min: 0,    max: 3.0,   step: 0.01 },
   burstSpeed:        { min: 0,    max: 10.0,  step: 0.01 },
-  burstTravelSpeed:  { min: 0.25, max: 8.0,   step: 0.01 },
+  burstTravelSpeed:  { min: 0.25, max: 3.0,   step: 0.01 },
   burstDuration:     { min: 0.05, max: 32.0,  step: 0.01 },
   burstWidth:        { min: 0,    max: 12.0,  step: 0.01 },
   burstRadialAngle:  { min: 0,    max: 360,   step: 1    },
@@ -46,9 +47,12 @@ export const SLIDER_SPACE = {
   dyeNoiseAmount:    { min: 0,    max: 0.15,  step: 0.001 },
   // Temperature/buoyancy
   tempAmount:        { min: 0,    max: 1,     step: 0.01 },
-  tempBuoyancy:      { min: 0,    max: 1,     step: 0.01 },
+  tempBuoyancy:      { min: 0,    max: 3,     step: 0.01 },
   tempDissipation:   { min: 0.95, max: 1.0,   step: 0.001 },
-  tempDyeTint:       { min: 0,    max: 1,     step: 0.01 },
+  tempDyeHeat:       { min: 0,    max: 3,     step: 0.01 },
+  tempEdgeCool:      { min: 0,    max: 3,     step: 0.01 },
+  tempRadialMix:     { min: 0,    max: 1,     step: 0.01 },
+  tempColorShift:    { min: 0,    max: 3,     step: 0.01 },
   // Mood
   moodAmount:        { min: 0,    max: 1,     step: 0.01 },
   moodSpeed:         { min: 0,    max: 1,     step: 0.01 },
@@ -806,7 +810,7 @@ export class BOController {
   /** Toggle locking motion/dynamics params. */
   toggleLockMotion() {
     const motionKeys = SLIDER_KEYS.filter(k =>
-      ['simSpeed', 'burstBehavior', 'burstCount', 'burstForce', 'burstForceRandomness', 'burstSpeed', 'burstTravelSpeed', 'burstDuration', 'burstWidth', 'burstRadialAngle',
+      ['simSpeed', 'burstBehavior', 'burstCount', 'burstForce', 'burstForceRandomness', 'burstDyeIntensity', 'burstSpeed', 'burstTravelSpeed', 'burstDuration', 'burstWidth', 'burstRadialAngle',
         'noiseAmount', 'noiseType', 'noiseBehavior', 'noiseFrequency', 'noiseSpeed',
         'noiseWarp', 'noiseSharpness', 'noiseAnisotropy', 'noiseBlend',
         'curlStrength', 'dyeNoiseAmount'].includes(k));
