@@ -95,6 +95,10 @@ const state = {
   moodSpeed: 0.3,
   // Palette
   paletteIndex: -1,
+  colormapMode: 0,     // 0=palette gradient, 1=viridis, 2=inferno, 3=plasma, 4=magma
+  colorSource: 0,      // 0=density, 1=velocity, 2=pressure, 3=vorticity
+  colorMapLow: 0.0,    // normalized floor (0 = include everything)
+  colorMapHigh: 1.0,   // normalized ceiling (1 = full range)
   // Face effector
   faceEffectorMode: 1,
   faceDyeContribution: 1.1,
@@ -2027,10 +2031,14 @@ struct DisplayUniforms {
   accentColor: vec4f, // xyz=accentColor RGB, w=colorBlend
   sheenColor: vec4f,  // xyz=sheenColor RGB, w=metallic
   tipColor: vec4f,    // xyz=tipColor RGB, w=roughness
-  tempParams: vec4f,  // x=symmetryFlag, y=tempColorShift
+  tempParams: vec4f,  // x=symmetryFlag, y=tempColorShift, z=colormapMode, w=colorSource
+  cmapParams: vec4f,  // x=colorMapLow, y=colorMapHigh
 };
 @group(0) @binding(2) var<uniform> du: DisplayUniforms;
 @group(0) @binding(3) var tempTex: texture_2d<f32>;
+@group(0) @binding(4) var velTex: texture_2d<f32>;
+@group(0) @binding(5) var pressTex: texture_2d<f32>;
+@group(0) @binding(6) var curlTex: texture_2d<f32>;
 
 ${hdr ? `fn tonemap(x: vec3f) -> vec3f {
   let peak = 4.0;
@@ -2049,6 +2057,58 @@ fn oklabToLinear(lab: vec3f) -> vec3f {
     ${M.g.split(',').map((c,i) => `${c.trim()} * ${['l','m','s'][i]}*${['l','m','s'][i]}*${['l','m','s'][i]}`).join(' + ')},
     ${M.b.split(',').map((c,i) => `${c.trim()} * ${['l','m','s'][i]}*${['l','m','s'][i]}*${['l','m','s'][i]}`).join(' + ')}
   ), vec3f(0.0));
+}
+
+// ── Scientific colormaps (6th-degree polynomial approximations) ──
+fn cmapViridis(t: f32) -> vec3f {
+  let c0 = vec3f(0.2777, 0.0054, 0.3340);
+  let c1 = vec3f(0.1050, 1.4046, 1.3840);
+  let c2 = vec3f(-0.3308, 0.2148, -4.7950);
+  let c3 = vec3f(-4.6342, -5.7991, 12.2624);
+  let c4 = vec3f(6.2282, 14.1799, -14.0464);
+  let c5 = vec3f(4.7763, -13.7451, 6.0756);
+  let c6 = vec3f(-5.4354, 4.6459, -0.6946);
+  return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
+}
+
+fn cmapInferno(t: f32) -> vec3f {
+  let c0 = vec3f(0.0002, 0.0016, -0.0194);
+  let c1 = vec3f(0.1065, 0.5639, 3.9327);
+  let c2 = vec3f(11.6024, -3.9728, -15.9423);
+  let c3 = vec3f(-41.7039, 17.4363, 44.3541);
+  let c4 = vec3f(77.1629, -33.4023, -81.8073);
+  let c5 = vec3f(-73.6891, 32.6269, 73.2088);
+  let c6 = vec3f(27.1632, -12.2461, -23.0702);
+  return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
+}
+
+fn cmapPlasma(t: f32) -> vec3f {
+  let c0 = vec3f(0.0587, 0.0234, 0.5433);
+  let c1 = vec3f(2.1761, 0.2138, -2.6346);
+  let c2 = vec3f(-6.8084, 6.2608, 12.6420);
+  let c3 = vec3f(17.6953, -24.0146, -27.6687);
+  let c4 = vec3f(-26.6811, 39.5587, 32.2827);
+  let c5 = vec3f(20.5835, -31.7652, -20.0279);
+  let c6 = vec3f(-6.0116, 10.5195, 5.7893);
+  return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
+}
+
+fn cmapMagma(t: f32) -> vec3f {
+  let c0 = vec3f(-0.0021, -0.0008, -0.0053);
+  let c1 = vec3f(0.2516, 0.6775, 2.4946);
+  let c2 = vec3f(8.3537, -3.5775, -8.6687);
+  let c3 = vec3f(-27.6684, 14.2647, 27.1596);
+  let c4 = vec3f(52.1761, -27.9436, -50.7682);
+  let c5 = vec3f(-50.7685, 29.0467, 45.7131);
+  let c6 = vec3f(18.6557, -11.4898, -15.8989);
+  return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
+}
+
+fn evalColormap(t: f32, mode: i32) -> vec3f {
+  if (mode == 1) { return cmapViridis(t); }
+  else if (mode == 2) { return cmapInferno(t); }
+  else if (mode == 3) { return cmapPlasma(t); }
+  else { return cmapMagma(t); }
 }
 
 @fragment
@@ -2077,22 +2137,64 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let raw = textureSampleLevel(dyeTex, samp, uv, 0.0).rgb;
   let intensity = dot(raw, vec3f(0.3, 0.6, 0.1));
 
-  // Fluid base — gradient from accent (thin/wispy) to base (dense)
-  // Colors pre-converted to Oklab on CPU
-  let okBase = du.baseColor.rgb;
-  let okAccent = du.accentColor.rgb;
-  let blend = du.accentColor.w;
-  let lo = mix(0.0, 0.35, blend);
-  let hi = mix(1.0, 0.4, blend);
-  let densityT = smoothstep(lo, hi, intensity);
-  let okTip = du.tipColor.rgb;
-  let t2 = min(densityT * 2.0, 1.0);
-  let t3 = max(densityT * 2.0 - 1.0, 0.0);
-  let fluidCol = oklabToLinear(mix(mix(okAccent, okBase, t2), okTip, t3));
-  var color = fluidCol * intensity * ${hdr ? '0.5' : '0.25'};
+  // Color source selection
+  let colorSource = i32(du.tempParams.w);
+  let mapLow = du.cmapParams.x;
+  let mapHigh = du.cmapParams.y;
+  let texel = vec2f(1.0 / 512.0);
+
+  // Each source is pre-normalized to roughly the same 0-2 range as density's intensity.
+  // Map Low/High then window into this normalized range (simple linear, no log).
+  var sourceVal = intensity;
+  if (colorSource == 1) {
+    let vel = textureSampleLevel(velTex, samp, uv, 0.0).rg;
+    sourceVal = length(vel) / 100.0;
+  } else if (colorSource == 2) {
+    let press = textureSampleLevel(pressTex, samp, uv, 0.0).r;
+    sourceVal = abs(press) / 100.0;
+  } else if (colorSource == 3) {
+    let c0v = textureSampleLevel(curlTex, samp, uv, 0.0).r;
+    let c1v = textureSampleLevel(curlTex, samp, uv + vec2f(texel.x, 0.0), 0.0).r;
+    let c2v = textureSampleLevel(curlTex, samp, uv - vec2f(texel.x, 0.0), 0.0).r;
+    let c3v = textureSampleLevel(curlTex, samp, uv + vec2f(0.0, texel.y), 0.0).r;
+    let c4v = textureSampleLevel(curlTex, samp, uv - vec2f(0.0, texel.y), 0.0).r;
+    sourceVal = abs((c0v * 2.0 + c1v + c2v + c3v + c4v) / 6.0) / 50.0;
+  }
+  // Map Low/High: at defaults (low=0, high=1) this is identity (mappedVal = sourceVal).
+  // Lowering mapHigh brightens (compresses range). Raising mapLow cuts background.
+  let hi = max(mapHigh, 0.001);
+  let lo = mapLow * hi;
+  var mappedVal = clamp((sourceVal - lo) / (hi - lo), 0.0, 2.0);
+
+  // Colormap mode selection
+  let cmapMode = i32(du.tempParams.z);
+  var color = vec3f(0.0);
+
+  if (cmapMode > 0) {
+    // Scientific colormap path — colormap output IS the color (it encodes brightness)
+    let cmapSrgb = evalColormap(mappedVal, cmapMode);
+    // sRGB → linear
+    let cmapLinear = pow(cmapSrgb, vec3f(2.2));
+${hdr ? `    // HDR: slight boost at bright end for glow
+    color = cmapLinear * (1.0 + 0.5 * mappedVal * mappedVal);` :
+`    color = cmapLinear;`}
+  } else {
+    // Palette gradient path (existing Oklab behavior)
+    let palVal = mappedVal;
+    let okBase = du.baseColor.rgb;
+    let okAccent = du.accentColor.rgb;
+    let blend = du.accentColor.w;
+    let lo = mix(0.0, 0.35, blend);
+    let hi = mix(1.0, 0.4, blend);
+    let densityT = smoothstep(lo, hi, palVal);
+    let okTip = du.tipColor.rgb;
+    let t2 = min(densityT * 2.0, 1.0);
+    let t3 = max(densityT * 2.0 - 1.0, 0.0);
+    let fluidCol = oklabToLinear(mix(mix(okAccent, okBase, t2), okTip, t3));
+    color = fluidCol * palVal * ${hdr ? '0.5' : '0.25'};
+  }
 
   // Surface gradient for multi-lobe metallic sheen (clamp samples to sphere)
-  let texel = vec2f(1.0 / 512.0);
   let uvL = uv - vec2f(texel.x * 2.0, 0.0);
   let uvR = uv + vec2f(texel.x * 2.0, 0.0);
   let uvB = uv - vec2f(0.0, texel.y * 2.0);
@@ -3048,11 +3150,11 @@ async function main() {
   });
   const particleUBData = new Float32Array(16);
 
-  // displayUB: [width, height, time, sheenStrength, baseR, baseG, baseB, pad, accentR, accentG, accentB, colorBlend, sheenR, sheenG, sheenB, pad, tipR, tipG, tipB, pad, symmetryBehavior, pad, pad, pad]
+  // displayUB: [width, height, time, sheenStrength, baseR, baseG, baseB, hdrHeadroom, accentR, accentG, accentB, colorBlend, sheenR, sheenG, sheenB, metallic, tipR, tipG, tipB, roughness, symmetryBehavior, tempColorShift, colormapMode, colorSource, colorMapRange, pad, pad, pad]
   const displayUB = device.createBuffer({
-    size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const displayUBData = new Float32Array(24);
+  const displayUBData = new Float32Array(28);
   const bloomParamData = new Float32Array(8);
   const bloomCompositeData = new Float32Array(1);
 
@@ -3288,6 +3390,9 @@ async function main() {
       { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
       { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
     ],
   });
 
@@ -3833,14 +3938,15 @@ async function main() {
     [bg(buoyancyPipe.layout, [ubuf(buoyancyBuf), tview(tempB), tview(velA), tview(velB)]),
      bg(buoyancyPipe.layout, [ubuf(buoyancyBuf), tview(tempB), tview(velB), tview(velA)])],
   ];
-  // display: reads dye[cur]
-  // displayBGs[dyeFlip][tempFlip]
-  const displayBGs = [
-    [bg(displayBGL, [tview(dyeA), linearSampler, ubuf(displayUB), tview(tempA)]),
-     bg(displayBGL, [tview(dyeA), linearSampler, ubuf(displayUB), tview(tempB)])],
-    [bg(displayBGL, [tview(dyeB), linearSampler, ubuf(displayUB), tview(tempA)]),
-     bg(displayBGL, [tview(dyeB), linearSampler, ubuf(displayUB), tview(tempB)])],
-  ];
+  // display: reads dye[cur], temp[cur], vel[cur], press[cur], curlTex
+  // Built dynamically per-frame since vel/press also flip
+  function makeDisplayBG() {
+    const dyeT = dyeFlip ? dyeB : dyeA;
+    const tempT = tempFlip ? tempB : tempA;
+    const velT = velFlip ? velB : velA;
+    const pressT = pressFlip ? pressB : pressA;
+    return bg(displayBGL, [tview(dyeT), linearSampler, ubuf(displayUB), tview(tempT), tview(velT), tview(pressT), tview(curlTex)]);
+  }
   // particleUpdate: reads vel[cur] + dye[cur] + curlTex — 4 variants [velFlip][dyeFlip]
   function makeParticleUpdateBGs(pBuf, cBuf) {
     return [
@@ -5328,22 +5434,6 @@ async function main() {
     const eyeHoleL = holeCarve * eyeOpenGateL;
     const eyeHoleR = holeCarve * eyeOpenGateR;
     const mouthHole = holeCarve * (0.06 + mouthDrive * 1.24);
-    const holeMaskAt = (x, y) => {
-      if (holeCarve <= 0.001) return 1.0;
-      const cutFrom = (feature, weight) => {
-        if (!feature || weight <= 0.001) return 0;
-        const q = ellipseQ(feature, x, y);
-        const inner = 1.0 - holeFeather;
-        const t = smooth01((q - inner) / Math.max(holeFeather, 1e-5));
-        return (1.0 - t) * weight;
-      };
-      const cut = Math.max(
-        cutFrom(leftEyeFeature, eyeHoleL),
-        cutFrom(rightEyeFeature, eyeHoleR),
-        cutFrom(mouthFeature, mouthHole)
-      );
-      return clamp01(1.0 - Math.min(1.0, cut * 1.16));
-    };
     const isInsideFeatureVoid = (x, y) => {
       if (holeCarve <= 0.001) return false;
       const eyeVoidQ = 1.3 + holeFeather * 0.45 + holeCarve * 0.18;
@@ -5359,13 +5449,13 @@ async function main() {
         : false;
       return eyeCutL || eyeCutR || mouthCut;
     };
-    const carveReserve = Math.max(16, Math.min(32, Math.round(30 - detail01 * 14)));
-    const activeBudget = Math.max(0, MAX_SPLATS - carveReserve);
+    const activeBudget = MAX_SPLATS;
     const anchorBudget = Math.max(1, Math.min(2, activeBudget));
-    const edgeBudget = Math.max(12, Math.floor(activeBudget * (0.24 + detail01 * 0.03)));
-    const fillBudget = Math.max(16, activeBudget - anchorBudget - edgeBudget);
+    const featureBudget = 30; // eye + mouth stamps
+    const edgeBudget = Math.max(12, Math.floor((activeBudget - anchorBudget - featureBudget) * (0.24 + detail01 * 0.03)));
+    const fillBudget = Math.max(16, activeBudget - anchorBudget - featureBudget - edgeBudget);
     const anchorStageCap = Math.min(MAX_SPLATS, splatCount + anchorBudget);
-    const fillStageCap = Math.min(MAX_SPLATS, anchorStageCap + fillBudget);
+    const fillStageCap = Math.min(MAX_SPLATS, anchorStageCap + featureBudget);
     const edgeStageCap = Math.min(MAX_SPLATS, fillStageCap + edgeBudget);
     const pickLoopIndex = (sampleLen, i, count) => {
       if (sampleLen <= 0 || count <= 0) return -1;
@@ -5392,42 +5482,41 @@ async function main() {
       );
     }
 
-    // 1) Concentric ring fill — even distribution by construction.
-    // Each ring interpolates between face center and contour at a fixed fraction.
-    // Inner rings get fewer points, outer rings get more (proportional to circumference).
-    const ringFractions = [0.12, 0.25, 0.38, 0.50, 0.62, 0.73, 0.83, 0.92];
-    const ringBaseCount = [4,    7,   10,   14,   18,   22,   26,   30];
-    const cN = contourSamples.length;
-    if (cN >= 3) {
-      for (let r = 0; r < ringFractions.length; r++) {
+    // 1) Big feature stamps for eyes and mouth — placed at ellipse positions.
+    const eyeCol = [...palette(modeTime * 0.045 + eyeOpenAvg * 0.15, 3)];
+    const featureStampGain = contribution * fillGain;
+    const addFeatureStamps = (feature, amount, col, radiusMul, openY = 1.0) => {
+      if (!feature || amount <= 0.001 || splatCount >= fillStageCap) return;
+      const stamps = [
+        [0.0, 0.0, 1.0],
+        [0.55, 0.0, 0.85], [-0.55, 0.0, 0.85],
+        [0.0, 0.48, 0.80], [0.0, -0.48, 0.80],
+        [0.38, 0.34, 0.72], [-0.38, 0.34, 0.72],
+        [0.38, -0.34, 0.72], [-0.38, -0.34, 0.72],
+      ];
+      for (let i = 0; i < stamps.length; i++) {
         if (splatCount >= fillStageCap) break;
-        const t = ringFractions[r];
-        const nPts = ringBaseCount[r];
-        for (let i = 0; i < nPts; i++) {
-          if (splatCount >= fillStageCap) break;
-          // Pick evenly-spaced contour points for this ring, offset per ring to avoid radial alignment.
-          const contourIdx = Math.floor(((i + r * 0.37) * cN) / nPts) % cN;
-          const cp = contourSamples[contourIdx];
-          const x = face.centerX + (cp[0] - face.centerX) * t;
-          const y = face.centerY + (cp[1] - face.centerY) * t;
-          if (isInsideFeatureVoid(x, y)) continue;
-          const holeMask = holeMaskAt(x, y);
-          if (holeMask <= 0.065) continue;
-          const [rx, ry] = direction(face.centerX, face.centerY, x, y);
-          const g = (0.032 + t * 0.044 + mouth * 0.018 + poseMotion * 0.018) * holeMask;
-          const drift = 0.11 + t * 0.25;
-          const outflow = 0.2 + t * 0.8;
-          const stampMul = 1.8 + t * 0.9 + smile * 0.22;
-          addFaceSplat(
-            x, y,
-            flowX * drift + rx * FACE_SPLAT_FORCE_BASE * 0.0012 * outflow,
-            flowY * drift + ry * FACE_SPLAT_FORCE_BASE * 0.0012 * outflow,
-            fillCol[0] * g, fillCol[1] * g, fillCol[2] * g,
-            state.splatRadius * stampMul * (0.86 + holeMask * 0.24)
-          );
-        }
+        const s = stamps[i];
+        const lx = s[0] * feature.rx;
+        const ly = s[1] * feature.ry * openY;
+        const [x, y] = toWorldFromLocal(lx, ly, feature.cx, feature.cy);
+        const g = featureStampGain * amount * s[2] * 0.06;
+        const stampR = state.splatRadius * radiusMul * (0.9 + s[2] * 0.5);
+        addFaceSplat(
+          x, y,
+          flowX * 0.3, flowY * 0.3,
+          col[0] * g, col[1] * g, col[2] * g,
+          stampR
+        );
       }
-    }
+    };
+    addFeatureStamps(leftEyeFeature, eyeOpenGateL, eyeCol,
+      (2.8 + stampSize * 0.9) * eyeSizeScale, 0.15 + eyeOpenGateL * 1.05);
+    addFeatureStamps(rightEyeFeature, eyeOpenGateR, eyeCol,
+      (2.8 + stampSize * 0.9) * eyeSizeScale, 0.15 + eyeOpenGateR * 1.05);
+    addFeatureStamps(mouthFeature, 0.15 + mouthDrive * 1.1, mouthCol,
+      (2.5 + stampSize * 0.85 + mouthDrive * 1.1) * mouthSizeScale,
+      (0.18 + mouthDrive * 1.2) * mouthSizeScale);
 
     // 2) Add a controlled contour accent so the head boundary reads clearly.
     const edgePointCount = Math.max(12, Math.min(contourSamples.length, Math.max(0, edgeStageCap - splatCount)));
@@ -5448,61 +5537,6 @@ async function main() {
         state.splatRadius * (2.55 + edgeGain * 1.6 + cheekPuff * 0.42)
       );
     }
-
-    // 5) Explicit subtractive hole carving so eyes/mouth remain visible voids.
-    const fromFaceLocal = (lx, ly, cx, cy) => [cx + lx * cosR - ly * sinR, cy + lx * sinR + ly * cosR];
-    const carveSplat = (x, y, amount, radiusMul) => {
-      if (amount <= 0.0005 || splatCount >= MAX_SPLATS) return;
-      const a = clamp01(amount);
-      const dark = 0.00008 + (1.0 - a) * 0.00006;
-      const carveRadius = Math.max(1e-5, state.splatRadius * radiusMul * (0.78 + a * 1.18));
-      addSplat(
-        x, y,
-        0, 0,
-        dark, dark, dark,
-        carveRadius
-      );
-      if (Math.round(state.faceDebugMode || 0) > 0) {
-        pushFaceStampDebug(1, x, y, 0, 0, carveRadius, a);
-      }
-    };
-    const carveFeatureVoid = (feature, amount, radiusMul, openY = 1.0) => {
-      if (!feature || amount <= 0.001 || splatCount >= MAX_SPLATS) return;
-      const stamps = detailScale > 0.66
-        ? [
-            [0.0, 0.0, 1.0],
-            [0.52, 0.0, 0.88], [-0.52, 0.0, 0.88],
-            [0.0, 0.44, 0.84], [0.0, -0.44, 0.84],
-            [0.36, 0.3, 0.78], [-0.36, 0.3, 0.78],
-            [0.36, -0.3, 0.78], [-0.36, -0.3, 0.78],
-            [0.68, 0.0, 0.62], [-0.68, 0.0, 0.62],
-          ]
-        : [
-            [0.0, 0.0, 1.0],
-            [0.48, 0.0, 0.82], [-0.48, 0.0, 0.82],
-            [0.0, 0.36, 0.78], [0.0, -0.36, 0.78],
-          ];
-      for (let i = 0; i < stamps.length; i++) {
-        if (splatCount >= MAX_SPLATS) break;
-        const s = stamps[i];
-        const lx = s[0] * feature.rx;
-        const ly = s[1] * feature.ry * openY;
-        const [x, y] = fromFaceLocal(lx, ly, feature.cx, feature.cy);
-        carveSplat(
-          x,
-          y,
-          amount * (0.75 + s[2] * 0.5),
-          radiusMul * (0.92 + s[2] * 0.45)
-        );
-      }
-    };
-
-    const eyeVoidL = holeCarve * eyeOpenGateL;
-    const eyeVoidR = holeCarve * eyeOpenGateR;
-    const mouthVoid = 0.05 + holeCarve * (0.18 + mouthDrive * 0.95);
-    carveFeatureVoid(leftEyeFeature, eyeVoidL, (2.45 + stampSize * 0.85) * eyeSizeScale, 0.12 + eyeOpenGateL * 1.08);
-    carveFeatureVoid(rightEyeFeature, eyeVoidR, (2.45 + stampSize * 0.85) * eyeSizeScale, 0.12 + eyeOpenGateR * 1.08);
-    carveFeatureVoid(mouthFeature, mouthVoid, (2.2 + stampSize * 0.82 + mouthDrive * 1.05) * mouthSizeScale, (0.16 + mouthDrive * 1.16) * mouthSizeScale);
 
     for (let i = 0; i < face.count; i++) {
       const off = i * 2;
@@ -6074,11 +6108,16 @@ async function main() {
     displayUBData[17] = okTipCol[1];
     displayUBData[18] = okTipCol[2];
     displayUBData[19] = state.roughness;
-    // slots 20-23: display extras (20 carries symmetry behavior)
+    // slots 20-27: tempParams + cmapParams
     displayUBData[20] = Math.round(state.noiseBehavior || 0);
     displayUBData[21] = state.tempColorShift;
-    displayUBData[22] = 0;
-    displayUBData[23] = 0;
+    displayUBData[22] = Math.round(state.colormapMode || 0);
+    displayUBData[23] = Math.round(state.colorSource || 0);
+    // cmapParams vec4f
+    displayUBData[24] = state.colorMapLow ?? 0.0;
+    displayUBData[25] = state.colorMapHigh ?? 0.5;
+    displayUBData[26] = 0;
+    displayUBData[27] = 0;
     device.queue.writeBuffer(displayUB, 0, displayUBData);
 
     // Collect splats into pre-allocated buffer
@@ -6351,7 +6390,7 @@ async function main() {
         }],
       });
       rp.setPipeline(displayPipeline);
-      rp.setBindGroup(0, displayBGs[dyeFlip][tempFlip]);
+      rp.setBindGroup(0, makeDisplayBG());
       rp.draw(3);
       rp.end();
     }
@@ -6935,6 +6974,15 @@ async function main() {
       if (idx >= 0) { applyPalette(idx); syncAllUI(); }
     });
   })();
+  // Colormap / transfer function controls
+  {
+    const cmapSel = document.getElementById('colormapMode');
+    if (cmapSel) cmapSel.addEventListener('change', () => { state.colormapMode = parseInt(cmapSel.value); });
+    const srcSel = document.getElementById('colorSource');
+    if (srcSel) srcSel.addEventListener('change', () => { state.colorSource = parseInt(srcSel.value); });
+  }
+  wireSlider('colorMapLow', 'colorMapLow');
+  wireSlider('colorMapHigh', 'colorMapHigh');
   wireSlider('bloomIntensity', 'bloomIntensity', v => v.toFixed(2));
   wireSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
   wireSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
@@ -7054,6 +7102,15 @@ async function main() {
       if (palSlider) palSlider.value = state.paletteIndex;
       if (palVal) palVal.textContent = state.paletteIndex < 0 ? 'Manual' : (PALETTES[state.paletteIndex]?.name || state.paletteIndex);
     }
+    // Colormap / transfer function
+    {
+      const cmapSel = document.getElementById('colormapMode');
+      if (cmapSel) cmapSel.value = String(Math.round(state.colormapMode || 0));
+      const srcSel = document.getElementById('colorSource');
+      if (srcSel) srcSel.value = String(Math.round(state.colorSource || 0));
+    }
+    syncSlider('colorMapLow', 'colorMapLow');
+    syncSlider('colorMapHigh', 'colorMapHigh');
     syncColor('baseColor', 'baseColor');
     syncColor('accentColor', 'accentColor');
     syncColor('glitterColor', 'glitterColor');
@@ -7199,6 +7256,10 @@ async function main() {
     moodAmount: { min: 0, max: 1, step: 0.01 },
     moodSpeed: { min: 0, max: 1, step: 0.01 },
     paletteIndex: { min: -1, max: 49, step: 1 },
+    colormapMode: { min: 0, max: 4, step: 1 },
+    colorSource: { min: 0, max: 3, step: 1 },
+    colorMapLow: { min: 0, max: 1, step: 0.001 },
+    colorMapHigh: { min: 0.001, max: 1, step: 0.001 },
   };
   const morphColors = ['baseColor', 'accentColor', 'tipColor', 'glitterColor', 'glitterAccent', 'glitterTip', 'sheenColor'];
 

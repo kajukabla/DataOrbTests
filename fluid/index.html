@@ -535,6 +535,34 @@
         <label>Palette <span class="val" id="paletteIndexVal">-1</span></label>
         <input type="range" id="paletteIndex" min="-1" max="49" step="1" value="-1">
       </div>
+      <!-- Transfer Function -->
+      <div class="setting-group">
+        <label>Colormap</label>
+        <select id="colormapMode">
+          <option value="0">Palette Gradient</option>
+          <option value="1">Viridis</option>
+          <option value="2">Inferno</option>
+          <option value="3">Plasma</option>
+          <option value="4">Magma</option>
+        </select>
+      </div>
+      <div class="setting-group">
+        <label>Color Source</label>
+        <select id="colorSource">
+          <option value="0">Density</option>
+          <option value="1">Velocity</option>
+          <option value="2">Pressure</option>
+          <option value="3">Vorticity</option>
+        </select>
+      </div>
+      <div class="setting-group">
+        <label>Map Low <span class="val" id="colorMapLowVal">0.00</span></label>
+        <input type="range" id="colorMapLow" min="0.0" max="1.0" step="0.01" value="0.00">
+      </div>
+      <div class="setting-group">
+        <label>Map High <span class="val" id="colorMapHighVal">1.00</span></label>
+        <input type="range" id="colorMapHigh" min="0.01" max="1.0" step="0.01" value="1.00">
+      </div>
       <!-- Bloom -->
       <div class="setting-group">
         <label>Bloom Intensity <span class="val" id="bloomIntensityVal">0.00</span></label>
