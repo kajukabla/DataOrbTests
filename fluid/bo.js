@@ -87,7 +87,7 @@ export const SLIDER_SPACE = {
   bloomThreshold:    { min: 0, max: 2, step: 0.01 },
   bloomRadius:       { min: 0, max: 1, step: 0.01 },
   // Face tracking
-  faceEffectorMode:  { min: 0, max: 1, step: 1    },
+  faceEffectorMode:  { min: 0, max: 2, step: 1    },
   // Transfer function
   colormapMode:      { min: 0, max: 6, step: 1    },
   colorSource:       { min: 0, max: 3, step: 1    },
