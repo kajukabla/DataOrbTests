@@ -1457,7 +1457,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 // (tempSplatShader removed — fused into batchSplatShaderDye)
 
 // ─── Particle Compact Shader (GPU indirect draw — builds visible index list) ──
-const TILE_GRID = 48; // 48x48 tile grid for per-tile particle budgets
+const TILE_GRID = 128; // 128x128 tile grid for per-tile particle budgets
 const TILE_COUNT = TILE_GRID * TILE_GRID;
 
 function makeParticleCompactShader(count) {
@@ -1482,9 +1482,11 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let col = colors[idx];
   if (col.a <= 0.01) { return; }
 
-  // Map particle position to tile grid
-  let tileX = clamp(u32(particles[idx].posX * ${TILE_GRID}.0), 0u, ${TILE_GRID - 1}u);
-  let tileY = clamp(u32(particles[idx].posY * ${TILE_GRID}.0), 0u, ${TILE_GRID - 1}u);
+  // Map particle position to tile grid with seed-based jitter to blur boundaries
+  let jx = fract(particles[idx].seed * 7.31) - 0.5;
+  let jy = fract(particles[idx].seed * 13.17) - 0.5;
+  let tileX = clamp(u32(particles[idx].posX * ${TILE_GRID}.0 + jx), 0u, ${TILE_GRID - 1}u);
+  let tileY = clamp(u32(particles[idx].posY * ${TILE_GRID}.0 + jy), 0u, ${TILE_GRID - 1}u);
   let tileIdx = tileY * ${TILE_GRID}u + tileX;
 
   // Enforce per-tile budget — excess particles are simply not rendered
@@ -6506,7 +6508,8 @@ async function main() {
     device.queue.writeBuffer(atomicCounterBuf, 0, zeroU32);
     device.queue.writeBuffer(tileGridBuf, 0, zeroTileGrid);
     // Map glitterCap (0..1+) to per-tile particle budget
-    const budget = Math.max(1, Math.round(state.glitterCap * 200));
+    // Budget per tile — high default allows rich buildup, only extreme overdraw is culled
+    const budget = Math.max(1, Math.round(state.glitterCap * 150));
     if (budget !== lastTileBudget) {
       tileBudgetData[0] = budget;
       device.queue.writeBuffer(tileBudgetBuf, 0, tileBudgetData);

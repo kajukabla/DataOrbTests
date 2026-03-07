@@ -93,7 +93,7 @@ export const SLIDER_SPACE = {
   colorSource:       { min: 0, max: 3, step: 1    },
   colorGain:         { min: 0, max: 1, step: 0.01 },
   // Particle overdraw cap
-  glitterCap:        { min: 0.01, max: 1, step: 0.01 },
+  glitterCap:        { min: 0.01, max: 3, step: 0.01 },
   sphereMode:        { min: 0, max: 1, step: 1    },
   shadowExtend:      { min: 0, max: 1, step: 0.01 },
   sphereSize:        { min: 0.5, max: 2, step: 0.01 },
