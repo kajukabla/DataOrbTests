@@ -2,6 +2,7 @@
 const SIM_RES = 512;
 const WORKGROUP = 8;
 const TEX_FMT = 'rgba16float';
+let SCALAR_FMT = TEX_FMT; // overridden to 'r32float' if float32-filterable is available
 const PARTICLE_STRIDE = 32;       // 8 floats × 4 bytes
 const PARTICLE_WG = 256;
 // Shared hard containment radius for all simulation layers.
@@ -139,22 +140,6 @@ const FACE_IDX = {
   rightEye: [263, 387, 385, 362, 380, 373],
   nose: [1, 4, 6, 168, 195, 5, 98, 327],
   cheeks: [50, 123, 117, 346, 352, 280],
-  fill: [
-    // Forehead
-    151, 9, 8, 108, 337, 69, 299,
-    // Between brows / eyes
-    168, 6, 197, 195,
-    // Nose sides
-    45, 275, 48, 278, 2,
-    // Upper cheeks
-    116, 345, 36, 266, 205, 425,
-    // Lower cheeks
-    187, 411, 147, 376,
-    // Nasolabial / philtrum
-    164, 393, 167, 391,
-    // Chin area
-    18, 200, 175, 208, 428, 171, 396,
-  ],
 };
 
 function uniqueIndices(...groups) {
@@ -179,9 +164,111 @@ const FACE_DENSE_INDICES = uniqueIndices(
   FACE_IDX.leftBrow,
   FACE_IDX.rightBrow,
   FACE_IDX.nose,
-  FACE_IDX.cheeks,
-  FACE_IDX.fill
+  FACE_IDX.cheeks
 );
+
+// Precomputed interior fill indices: all 478 MediaPipe landmarks minus edge/rim features.
+const FACE_EDGE_SET = new Set([
+  ...FACE_IDX.contour, ...FACE_IDX.lips, ...FACE_IDX.mouthHole,
+  ...FACE_IDX.leftEye, ...FACE_IDX.rightEye,
+  ...FACE_IDX.leftBrow, ...FACE_IDX.rightBrow,
+]);
+const FACE_FILL_INDICES = [];
+for (let i = 0; i < 478; i++) {
+  if (!FACE_EDGE_SET.has(i)) FACE_FILL_INDICES.push(i);
+}
+
+// One-time farthest-point sampling: reorders fill indices so the first N
+// give the best possible N-point spatial coverage of the face interior.
+function computeFillOrder(mapped, count) {
+  const lm = (idx) => {
+    if (idx >= count) return null;
+    const x = mapped[idx * 2], y = mapped[idx * 2 + 1];
+    return Number.isFinite(x) && Number.isFinite(y) ? [x, y] : null;
+  };
+  const groupCenter = (indices) => {
+    let sx = 0, sy = 0, n = 0;
+    for (const idx of indices) {
+      const p = lm(idx);
+      if (!p) continue;
+      sx += p[0]; sy += p[1]; n++;
+    }
+    return n > 0 ? [sx / n, sy / n] : null;
+  };
+  const groupRadius = (indices, center) => {
+    let m = 0;
+    for (const idx of indices) {
+      const p = lm(idx);
+      if (!p) continue;
+      m = Math.max(m, Math.hypot(p[0] - center[0], p[1] - center[1]));
+    }
+    return m;
+  };
+  // Build circular exclusion zones around eyes, mouth, and brows.
+  const exclusions = [];
+  const addExclusion = (indices, padFactor) => {
+    const c = groupCenter(indices);
+    if (!c) return;
+    exclusions.push({ cx: c[0], cy: c[1], r: groupRadius(indices, c) * padFactor });
+  };
+  addExclusion(FACE_IDX.leftEye, 1.8);
+  addExclusion(FACE_IDX.rightEye, 1.8);
+  addExclusion(FACE_IDX.mouthHole, 1.6);
+  addExclusion(FACE_IDX.lips, 1.4);
+  addExclusion(FACE_IDX.leftBrow, 1.3);
+  addExclusion(FACE_IDX.rightBrow, 1.3);
+  const isExcluded = (x, y) => {
+    for (const e of exclusions) {
+      if (Math.hypot(x - e.cx, y - e.cy) < e.r) return true;
+    }
+    return false;
+  };
+
+  const candidates = [];
+  for (let i = 0; i < FACE_FILL_INDICES.length; i++) {
+    const idx = FACE_FILL_INDICES[i];
+    if (idx >= count) continue;
+    const x = mapped[idx * 2], y = mapped[idx * 2 + 1];
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    if (isExcluded(x, y)) continue;
+    candidates.push({ idx, x, y });
+  }
+  if (candidates.length === 0) return FACE_FILL_INDICES;
+
+  let cx = 0, cy = 0;
+  for (const c of candidates) { cx += c.x; cy += c.y; }
+  cx /= candidates.length; cy /= candidates.length;
+
+  const n = candidates.length;
+  const minDist = new Float32Array(n).fill(Infinity);
+  const used = new Uint8Array(n);
+  const order = [];
+
+  // Seed: candidate closest to centroid
+  let bestI = 0, bestD = Infinity;
+  for (let i = 0; i < n; i++) {
+    const d = (candidates[i].x - cx) ** 2 + (candidates[i].y - cy) ** 2;
+    if (d < bestD) { bestD = d; bestI = i; }
+  }
+
+  // Greedy farthest-point iteration
+  for (let iter = 0; iter < n; iter++) {
+    const sel = bestI;
+    used[sel] = 1;
+    order.push(candidates[sel].idx);
+    const sx = candidates[sel].x, sy = candidates[sel].y;
+
+    bestI = -1; bestD = -1;
+    for (let i = 0; i < n; i++) {
+      if (used[i]) continue;
+      const d = (candidates[i].x - sx) ** 2 + (candidates[i].y - sy) ** 2;
+      if (d < minDist[i]) minDist[i] = d;
+      if (minDist[i] > bestD) { bestD = minDist[i]; bestI = i; }
+    }
+    if (bestI < 0) break;
+  }
+  return order;
+}
 
 const FACE_DEBUG_PATHS = [
   { points: FACE_IDX.contour, closed: true },
@@ -314,7 +401,7 @@ const SPHERE_CENTER = vec2f(0.5, 0.5);
 const SPHERE_RADIUS: f32 = ${SIM_SPHERE_RADIUS};
 `;
 
-const MAX_SPLATS = 128;
+const MAX_SPLATS = 256;
 
 const batchSplatShaderVel = /* wgsl */`
 ${commonHeader}
@@ -375,6 +462,8 @@ struct Splat {
 @group(0) @binding(2) var dst: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(3) var<storage, read> splats: array<Splat>;
 @group(0) @binding(4) var<uniform> splatMeta: vec4u;
+@group(0) @binding(5) var tempSrc: texture_2d<f32>;
+@group(0) @binding(6) var tempDst: texture_storage_2d<rgba16float, write>;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -383,11 +472,20 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let uv = (vec2f(id.xy) + 0.5) / p.simRes;
   let toCenter = uv - SPHERE_CENTER;
   let dist = length(toCenter);
+  let doTemp = splatMeta.y != 0u;
   if (dist > SPHERE_RADIUS - 0.02) {
     textureStore(dst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+    if (doTemp) {
+      if (dist > SPHERE_RADIUS) {
+        textureStore(tempDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+      } else {
+        textureStore(tempDst, id.xy, vec4f(textureLoad(tempSrc, id.xy, 0).r, 0.0, 0.0, 1.0));
+      }
+    }
     return;
   }
   var dye = textureLoad(src, id.xy, 0);
+  var temp = select(0.0, textureLoad(tempSrc, id.xy, 0).r, doTemp);
   let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS - 0.02, dist);
   let count = min(splatMeta.x, ${MAX_SPLATS}u);
   for (var i = 0u; i < count; i++) {
@@ -406,8 +504,17 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
         dye = vec4f(mix(dye.rgb, incoming, blend), 1.0);
       }
     }
+    // Accumulate heat from splat intensity (fused tempSplat)
+    if (doTemp) {
+      let dyeIntensity = (s.r + s.g + s.b) / 3.0;
+      temp += strength * boundaryFade * dyeIntensity * 0.5 * p.splatX;
+    }
   }
   textureStore(dst, id.xy, dye);
+  if (doTemp) {
+    temp = clamp(temp, 0.0, 1.0);
+    textureStore(tempDst, id.xy, vec4f(temp, 0.0, 0.0, 1.0));
+  }
 }
 `;
 
@@ -659,29 +766,40 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
 const advectDyeShader = /* wgsl */`
 ${commonHeader}
+
+struct TempParams {
+  dt: f32, dx: f32, simRes: f32, dissipation: f32,
+  dyeHeat: f32, edgeCool: f32, tempActive: f32, pad2: f32,
+};
+
 @group(0) @binding(1) var velTex: texture_2d<f32>;
 @group(0) @binding(2) var dyeSrc: texture_2d<f32>;
 @group(0) @binding(3) var sampl: sampler;
 @group(0) @binding(4) var dst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(5) var tempSrc: texture_2d<f32>;
+@group(0) @binding(6) var tempDst: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(7) var<uniform> tp: TempParams;
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
   let res = u32(p.simRes);
   if (id.x >= res || id.y >= res) { return; }
   let uv = (vec2f(id.xy) + 0.5) / p.simRes;
+  let doTemp = tp.tempActive > 0.5;
 
   // Hard kill dye outside sphere
   let toCenter = uv - SPHERE_CENTER;
   let dist = length(toCenter);
   if (dist > SPHERE_RADIUS) {
     textureStore(dst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+    if (doTemp) { textureStore(tempDst, id.xy, vec4f(0.5, 0.0, 0.0, 1.0)); }
     return;
   }
   let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.04, dist);
 
+  // ── Shared backtrace ──
   let vel = textureLoad(velTex, id.xy, 0).xy;
   let backUV = uv - p.dt * vel * p.dx;
-  // Clamp backtrace inside sphere
   let backToCenter = backUV - SPHERE_CENTER;
   let backDist = length(backToCenter);
   var sampUV = backUV;
@@ -689,18 +807,31 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     sampUV = SPHERE_CENTER + backToCenter / backDist * SPHERE_RADIUS;
   }
   let clamped = clamp(sampUV, vec2f(0.5 / p.simRes), vec2f(1.0 - 0.5 / p.simRes));
+
+  // ── Dye advection ──
   let advected = textureSampleLevel(dyeSrc, sampl, clamped, 0.0);
-  // Ratio-preserving cap: scale all channels proportionally to keep hue intact
   var dye = advected.rgb * p.dyeDissipation * edgeFade;
   let maxC = max(dye.r, max(dye.g, dye.b));
-  if (maxC > 1.2) {
-    dye *= 1.2 / maxC;
-  }
-  // Aggressively remove grey component to keep gold tones sharp
+  if (maxC > 1.2) { dye *= 1.2 / maxC; }
   let minC = min(dye.r, min(dye.g, dye.b));
   dye -= vec3f(minC * 0.08);
-
   textureStore(dst, id.xy, vec4f(max(dye, vec3f(0.0)), 1.0));
+
+  // ── Temperature advection (fused, conditional) ──
+  if (doTemp) {
+    let tempAdvected = textureSampleLevel(tempSrc, sampl, clamped, 0.0).r;
+    var temp = mix(0.5, tempAdvected, tp.dissipation);
+    temp = mix(0.5, temp, edgeFade);
+    let edgeCoolAmount = (1.0 - edgeFade) * tp.edgeCool * 0.3;
+    temp -= edgeCoolAmount;
+    temp -= 0.008 * edgeFade;
+    if (tp.dyeHeat > 0.0) {
+      let dyeBrightness = dot(textureLoad(dyeSrc, id.xy, 0).rgb, vec3f(0.3, 0.6, 0.1));
+      temp += dyeBrightness * tp.dyeHeat * 0.1 * edgeFade;
+    }
+    temp = clamp(temp, 0.0, 1.0);
+    textureStore(tempDst, id.xy, vec4f(temp, 0.0, 0.0, 1.0));
+  }
 }
 `;
 
@@ -1262,69 +1393,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 `;
 
 // ─── Temperature/Buoyancy Shaders ────────────────────────────────────────────
-
-const temperatureAdvectShader = /* wgsl */`
-struct TempParams {
-  dt: f32,
-  dx: f32,
-  simRes: f32,
-  dissipation: f32,
-  dyeHeat: f32,
-  edgeCool: f32,
-  pad1: f32,
-  pad2: f32,
-};
-
-const SPHERE_CENTER = vec2f(0.5, 0.5);
-const SPHERE_RADIUS: f32 = ${SIM_SPHERE_RADIUS};
-
-@group(0) @binding(0) var<uniform> tp: TempParams;
-@group(0) @binding(1) var velTex: texture_2d<f32>;
-@group(0) @binding(2) var tempSrc: texture_2d<f32>;
-@group(0) @binding(3) var sampl: sampler;
-@group(0) @binding(4) var tempDst: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(5) var dyeTex: texture_2d<f32>;
-
-@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
-fn main(@builtin(global_invocation_id) id: vec3u) {
-  let res = u32(tp.simRes);
-  if (id.x >= res || id.y >= res) { return; }
-  let uv = (vec2f(id.xy) + 0.5) / tp.simRes;
-  let toCenter = uv - SPHERE_CENTER;
-  let dist = length(toCenter);
-  if (dist > SPHERE_RADIUS) {
-    textureStore(tempDst, id.xy, vec4f(0.5, 0.0, 0.0, 1.0));
-    return;
-  }
-  let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.04, dist);
-  let vel = textureLoad(velTex, id.xy, 0).xy;
-  let backUV = uv - tp.dt * vel * tp.dx;
-  let backToCenter = backUV - SPHERE_CENTER;
-  let backDist = length(backToCenter);
-  var sampUV = backUV;
-  if (backDist > SPHERE_RADIUS) {
-    sampUV = SPHERE_CENTER + backToCenter / backDist * SPHERE_RADIUS;
-  }
-  let clamped = clamp(sampUV, vec2f(0.5 / tp.simRes), vec2f(1.0 - 0.5 / tp.simRes));
-  let advected = textureSampleLevel(tempSrc, sampl, clamped, 0.0).r;
-  // Decay toward 0.5 (neutral) instead of toward 0
-  var temp = mix(0.5, advected, tp.dissipation);
-  // Edge fade: blend toward neutral at sphere boundary
-  temp = mix(0.5, temp, edgeFade);
-  // Edge cooling: actively cool below neutral near edges
-  let edgeCoolAmount = (1.0 - edgeFade) * tp.edgeCool * 0.3;
-  temp -= edgeCoolAmount;
-  // Gentle ambient cooling so dye-absent areas drift below neutral (→ blue)
-  temp -= 0.008 * edgeFade;
-  // Dye-driven heat: bright dye warms above neutral
-  if (tp.dyeHeat > 0.0) {
-    let dyeBrightness = dot(textureLoad(dyeTex, id.xy, 0).rgb, vec3f(0.3, 0.6, 0.1));
-    temp += dyeBrightness * tp.dyeHeat * 0.1 * edgeFade;
-  }
-  temp = clamp(temp, 0.0, 1.0);
-  textureStore(tempDst, id.xy, vec4f(temp, 0.0, 0.0, 1.0));
-}
-`;
+// (temperatureAdvectShader removed — fused into advectDyeShader)
 
 const buoyancyShader = /* wgsl */`
 struct BuoyancyParams {
@@ -1376,45 +1445,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 `;
 
-const tempSplatShader = /* wgsl */`
-${commonHeader}
-
-struct Splat {
-  x: f32, y: f32, dx: f32, dy: f32,
-  r: f32, g: f32, b: f32, radius: f32,
-};
-
-@group(0) @binding(1) var tempSrc: texture_2d<f32>;
-@group(0) @binding(2) var tempDst: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(3) var<storage, read> splats: array<Splat>;
-@group(0) @binding(4) var<uniform> splatMeta: vec4u;
-
-@compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
-fn main(@builtin(global_invocation_id) id: vec3u) {
-  let res = u32(p.simRes);
-  if (id.x >= res || id.y >= res) { return; }
-  let uv = (vec2f(id.xy) + 0.5) / p.simRes;
-  let toCenter = uv - SPHERE_CENTER;
-  let dist = length(toCenter);
-  if (dist > SPHERE_RADIUS) {
-    textureStore(tempDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
-    return;
-  }
-  let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS - 0.02, dist);
-  var temp = textureLoad(tempSrc, id.xy, 0).r;
-  let count = min(splatMeta.x, ${MAX_SPLATS}u);
-  for (var i = 0u; i < count; i++) {
-    let s = splats[i];
-    let diff = uv - vec2f(s.x, s.y);
-    let dist2 = dot(diff, diff);
-    let strength = exp(-dist2 / (2.0 * s.radius * s.radius));
-    let dyeIntensity = (s.r + s.g + s.b) / 3.0;
-    temp += strength * boundaryFade * dyeIntensity * 0.5 * p.splatX;
-  }
-  temp = clamp(temp, 0.0, 1.0);
-  textureStore(tempDst, id.xy, vec4f(temp, 0.0, 0.0, 1.0));
-}
-`;
+// (tempSplatShader removed — fused into batchSplatShaderDye)
 
 // ─── Particle Compact Shader (GPU indirect draw — builds visible index list) ──
 function makeParticleCompactShader(count) {
@@ -2514,15 +2545,17 @@ async function requestAdapterAdaptive(loadStatus) {
 }
 
 function requestDeviceOnAdapter(adapter, requestMaxLimits) {
+  const features = [];
+  if (adapter.features.has('float32-filterable')) features.push('float32-filterable');
+  const opts = {};
+  if (features.length) opts.requiredFeatures = features;
   if (requestMaxLimits) {
-    return adapter.requestDevice({
-      requiredLimits: {
-        maxBufferSize: Math.min(adapter.limits.maxBufferSize, 1024 * MB),
-        maxStorageBufferBindingSize: Math.min(adapter.limits.maxStorageBufferBindingSize, 1024 * MB),
-      },
-    });
+    opts.requiredLimits = {
+      maxBufferSize: Math.min(adapter.limits.maxBufferSize, 1024 * MB),
+      maxStorageBufferBindingSize: Math.min(adapter.limits.maxStorageBufferBindingSize, 1024 * MB),
+    };
   }
-  return adapter.requestDevice();
+  return adapter.requestDevice(opts);
 }
 
 async function requestDeviceAdaptive(primaryAdapter, primaryMode, loadStatus, requestMaxLimits) {
@@ -2855,6 +2888,11 @@ async function main() {
   if (deviceResult.downgradedLimits) {
     console.warn('Init: max-limit request downgraded to default limits to avoid long device stall.');
   }
+  // Enable r32float for scalar textures if the device supports float32 filtering
+  if (device.features.has('float32-filterable')) {
+    SCALAR_FMT = 'r32float';
+    console.log('Init: float32-filterable supported — using r32float for scalar textures');
+  }
   device.lost.then(info => {
     console.error('WebGPU device lost:', info.message);
     dumpGpuInitSummary('device-lost', {
@@ -2942,11 +2980,11 @@ async function main() {
   });
 
   // ─── Textures ────────────────────────────────────────────────────────────
-  function makeTex(label) {
+  function makeTex(label, fmt = TEX_FMT) {
     return device.createTexture({
       label,
       size: [SIM_RES, SIM_RES],
-      format: TEX_FMT,
+      format: fmt,
       usage:
         GPUTextureUsage.TEXTURE_BINDING |
         GPUTextureUsage.STORAGE_BINDING |
@@ -2956,11 +2994,11 @@ async function main() {
   }
 
   let velA = makeTex('velA'), velB = makeTex('velB');
-  let pressA = makeTex('pressA'), pressB = makeTex('pressB');
-  const divTex = makeTex('divergence');
+  let pressA = makeTex('pressA', SCALAR_FMT), pressB = makeTex('pressB', SCALAR_FMT);
+  const divTex = makeTex('divergence', SCALAR_FMT);
   let dyeA = makeTex('dyeA'), dyeB = makeTex('dyeB');
-  const curlTex = makeTex('curl');
-  let tempA = makeTex('tempA'), tempB = makeTex('tempB');
+  const curlTex = makeTex('curl', SCALAR_FMT);
+  let tempA = makeTex('tempA', SCALAR_FMT), tempB = makeTex('tempB', SCALAR_FMT);
 
   const linearSampler = device.createSampler({
     minFilter: 'linear', magFilter: 'linear',
@@ -3033,8 +3071,11 @@ async function main() {
       const e = { binding: i, visibility: GPUShaderStage.COMPUTE };
       if (desc === 'uniform') e.buffer = { type: 'uniform' };
       else if (desc === 'texture') e.texture = { sampleType: 'float' };
+      else if (desc === 'scalar-texture') e.texture = { sampleType: 'float' };
       else if (desc === 'storage') e.storageTexture = { access: 'write-only', format: TEX_FMT };
+      else if (desc === 'scalar-storage') e.storageTexture = { access: 'write-only', format: SCALAR_FMT };
       else if (desc === 'sampler') e.sampler = {};
+      else if (desc === 'storage-buf') e.buffer = { type: 'read-only-storage' };
       return e;
     });
     const layout = device.createBindGroupLayout({ entries, label: label + '_bgl' });
@@ -3067,11 +3108,27 @@ async function main() {
     },
   });
 
+  // Fused dye+temp splat BGL: extends batchSplatBGL with tempSrc (texture) + tempDst (scalar-storage)
+  const batchSplatDyeBGL = device.createBindGroupLayout({
+    label: 'batchSplatDye_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 6, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: SCALAR_FMT } },
+    ],
+  });
   const batchSplatDyePipe = device.createComputePipeline({
     label: 'batchSplatDye',
-    layout: batchSplatLayout,
+    layout: device.createPipelineLayout({ bindGroupLayouts: [batchSplatDyeBGL] }),
     compute: {
-      module: device.createShaderModule({ code: batchSplatShaderDye, label: 'batchSplatDye' }),
+      module: device.createShaderModule({
+        code: batchSplatShaderDye.replace('var tempDst: texture_storage_2d<rgba16float', `var tempDst: texture_storage_2d<${SCALAR_FMT}`),
+        label: 'batchSplatDye',
+      }),
       entryPoint: 'main',
     },
   });
@@ -3082,11 +3139,14 @@ async function main() {
     entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
-      { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: SCALAR_FMT } },
       { binding: 3, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
     ],
   });
-  const fusedCurlVortModule = device.createShaderModule({ code: fusedCurlVortShader, label: 'fusedCurlVort' });
+  const fusedCurlVortModule = device.createShaderModule({
+    code: fusedCurlVortShader.replace('var curlDst: texture_storage_2d<rgba16float', `var curlDst: texture_storage_2d<${SCALAR_FMT}`),
+    label: 'fusedCurlVort',
+  });
   checkShader(fusedCurlVortModule, 'fusedCurlVort');
   const fusedCurlVortPipe = device.createComputePipeline({
     label: 'fusedCurlVort',
@@ -3101,11 +3161,16 @@ async function main() {
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
-      { binding: 3, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
-      { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: SCALAR_FMT } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: SCALAR_FMT } },
     ],
   });
-  const fusedDivClearPressModule = device.createShaderModule({ code: fusedDivClearPressShader, label: 'fusedDivClearPress' });
+  const fusedDivClearPressModule = device.createShaderModule({
+    code: fusedDivClearPressShader
+      .replace('var divDst: texture_storage_2d<rgba16float', `var divDst: texture_storage_2d<${SCALAR_FMT}`)
+      .replace('var pressDst: texture_storage_2d<rgba16float', `var pressDst: texture_storage_2d<${SCALAR_FMT}`),
+    label: 'fusedDivClearPress',
+  });
   checkShader(fusedDivClearPressModule, 'fusedDivClearPress');
   const fusedDivClearPressPipe = device.createComputePipeline({
     label: 'fusedDivClearPress',
@@ -3113,9 +3178,11 @@ async function main() {
     compute: { module: fusedDivClearPressModule, entryPoint: 'main' },
   });
 
-  // Jacobi: uniform, texture(pressure), texture(div), storage(dst)
-  const jacobiPipe = buildPipeline(jacobiShader, 'jacobi',
-    ['uniform', 'texture', 'texture', 'storage']);
+  // Jacobi: uniform, texture(pressure), texture(div), scalar-storage(dst)
+  const jacobiPipe = buildPipeline(
+    jacobiShader.replace('var dst: texture_storage_2d<rgba16float', `var dst: texture_storage_2d<${SCALAR_FMT}`),
+    'jacobi',
+    ['uniform', 'texture', 'texture', 'scalar-storage']);
 
   // Gradient subtract: uniform, texture(vel), texture(pressure), storage(dst)
   const gradSubPipe = buildPipeline(gradSubShader, 'gradSub',
@@ -3125,9 +3192,33 @@ async function main() {
   const advectVelPipe = buildPipeline(advectVelShader, 'advectVel',
     ['uniform', 'texture', 'sampler', 'storage']);
 
-  // Advect dye: uniform, texture(vel), texture(dye), sampler, storage(dst)
-  const advectDyePipe = buildPipeline(advectDyeShader, 'advectDye',
-    ['uniform', 'texture', 'texture', 'sampler', 'storage']);
+  // Advect dye (fused with tempAdvect): uniform, texture(vel), texture(dye), sampler, storage(dyeDst), texture(tempSrc), scalar-storage(tempDst), uniform(tempParams)
+  const advectDyeBGL = device.createBindGroupLayout({
+    label: 'advectDye_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, sampler: {} },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: TEX_FMT } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 6, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: SCALAR_FMT } },
+      { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ],
+  });
+  const advectDyeModule = device.createShaderModule({
+    code: advectDyeShader.replace('var tempDst: texture_storage_2d<rgba16float', `var tempDst: texture_storage_2d<${SCALAR_FMT}`),
+    label: 'advectDye',
+  });
+  checkShader(advectDyeModule, 'advectDye');
+  const advectDyePipe = {
+    pipeline: device.createComputePipeline({
+      label: 'advectDye',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [advectDyeBGL] }),
+      compute: { module: advectDyeModule, entryPoint: 'main' },
+    }),
+    layout: advectDyeBGL,
+  };
 
   // Curl noise pipeline
   const curlNoisePipe = buildPipeline(curlNoiseShader, 'curlNoise',
@@ -3171,14 +3262,11 @@ async function main() {
   device.queue.writeBuffer(cleanupBuf, 0, cleanupData);
 
   // ─── Temperature/Buoyancy pipelines ─────────────────────────────────────
-  // Temperature advect: BGL (uniform, texture(vel), texture(temp), sampler, storage(tempDst), texture(dye))
-  const tempAdvectPipe = buildPipeline(temperatureAdvectShader, 'tempAdvect',
-    ['uniform', 'texture', 'texture', 'sampler', 'storage', 'texture']);
-
+  // (tempAdvect pipeline removed — fused into advectDye)
   const tempParamBuf = device.createBuffer({
     size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const tempParamData = new Float32Array(8); // [dt, dx, simRes, dissipation, dyeHeat, edgeCool, pad, pad]
+  const tempParamData = new Float32Array(8); // [dt, dx, simRes, dissipation, dyeHeat, edgeCool, tempActive, pad]
 
   // Buoyancy: custom BGL (uniform, texture(temp), texture(vel), storage(velDst))
   const buoyancyPipe = buildPipeline(buoyancyShader, 'buoyancy',
@@ -3189,14 +3277,7 @@ async function main() {
   });
   const buoyancyData = new Float32Array(4); // [simRes, dt, buoyancy, pad]
 
-  // Temperature splat: reuses batchSplatBGL layout (uniform, texture, storage-tex, storage-buf, uniform)
-  const tempSplatModule = device.createShaderModule({ code: tempSplatShader, label: 'tempSplat' });
-  checkShader(tempSplatModule, 'tempSplat');
-  const tempSplatPipe = device.createComputePipeline({
-    label: 'tempSplat',
-    layout: batchSplatLayout,
-    compute: { module: tempSplatModule, entryPoint: 'main' },
-  });
+  // (tempSplat is now fused into batchSplatDye — no separate pipeline needed)
 
   // ─── Display render pipeline ────────────────────────────────────────────
   const displayBGL = device.createBindGroupLayout({
@@ -3611,36 +3692,42 @@ async function main() {
 
   // ─── Temperature texture init (0.5 = ambient everywhere) ──────────────
   {
-    const pixels = new Float32Array(SIM_RES * SIM_RES * 4);
+    const isScalar = SCALAR_FMT === 'r32float';
+    const channels = isScalar ? 1 : 4;
+    const bpp = isScalar ? 4 : 8; // bytes per pixel: r32float=4, rgba16float=8
+    const pixels = new Float32Array(SIM_RES * SIM_RES * channels);
     for (let i = 0; i < SIM_RES * SIM_RES; i++) {
-      pixels[i * 4] = 0.5;     // R = temperature = 0.5 (ambient)
-      pixels[i * 4 + 1] = 0.0;
-      pixels[i * 4 + 2] = 0.0;
-      pixels[i * 4 + 3] = 1.0;
+      pixels[i * channels] = 0.5; // R = temperature = 0.5 (ambient)
+      if (!isScalar) { pixels[i * 4 + 3] = 1.0; }
     }
-    const u16 = new Uint16Array(SIM_RES * SIM_RES * 4);
-    for (let i = 0; i < pixels.length; i++) {
-      const f = pixels[i];
-      const view = new DataView(new ArrayBuffer(4));
-      view.setFloat32(0, f);
-      const bits = view.getUint32(0);
-      const sign = (bits >> 16) & 0x8000;
-      const exp = ((bits >> 23) & 0xFF) - 127 + 15;
-      const mant = (bits >> 13) & 0x3FF;
-      if (exp <= 0) u16[i] = sign;
-      else if (exp >= 31) u16[i] = sign | 0x7C00;
-      else u16[i] = sign | (exp << 10) | mant;
+    let buf;
+    if (isScalar) {
+      buf = pixels.buffer; // r32float: write Float32 directly
+    } else {
+      // rgba16float: convert to float16
+      const u16 = new Uint16Array(SIM_RES * SIM_RES * 4);
+      for (let i = 0; i < pixels.length; i++) {
+        const view = new DataView(new ArrayBuffer(4));
+        view.setFloat32(0, pixels[i]);
+        const bits = view.getUint32(0);
+        const sign = (bits >> 16) & 0x8000;
+        const exp = ((bits >> 23) & 0xFF) - 127 + 15;
+        const mant = (bits >> 13) & 0x3FF;
+        if (exp <= 0) u16[i] = sign;
+        else if (exp >= 31) u16[i] = sign | 0x7C00;
+        else u16[i] = sign | (exp << 10) | mant;
+      }
+      buf = u16.buffer;
     }
+    const bytesPerRow = SIM_RES * bpp;
     device.queue.writeTexture(
-      { texture: tempA },
-      u16.buffer,
-      { bytesPerRow: SIM_RES * 8, rowsPerImage: SIM_RES },
+      { texture: tempA }, buf,
+      { bytesPerRow, rowsPerImage: SIM_RES },
       { width: SIM_RES, height: SIM_RES }
     );
     device.queue.writeTexture(
-      { texture: tempB },
-      u16.buffer,
-      { bytesPerRow: SIM_RES * 8, rowsPerImage: SIM_RES },
+      { texture: tempB }, buf,
+      { bytesPerRow, rowsPerImage: SIM_RES },
       { width: SIM_RES, height: SIM_RES }
     );
   }
@@ -3667,10 +3754,13 @@ async function main() {
     bg(batchSplatBGL, [ubuf(paramBuf), tview(velA), tview(velB), ubuf(splatBuf), ubuf(splatCountBuf)]),
     bg(batchSplatBGL, [ubuf(paramBuf), tview(velB), tview(velA), ubuf(splatBuf), ubuf(splatCountBuf)]),
   ];
-  // batchSplatDye: reads dye[cur], writes dye[1-cur]
+  // batchSplatDye (fused with tempSplat): reads dye[cur]+temp[cur], writes dye[1-cur]+temp[1-cur]
+  // batchSplatDyeBGs[dyeFlip][tempFlip]
   const batchSplatDyeBGs = [
-    bg(batchSplatBGL, [ubuf(paramBuf), tview(dyeA), tview(dyeB), ubuf(splatBuf), ubuf(splatCountBuf)]),
-    bg(batchSplatBGL, [ubuf(paramBuf), tview(dyeB), tview(dyeA), ubuf(splatBuf), ubuf(splatCountBuf)]),
+    [bg(batchSplatDyeBGL, [ubuf(paramBuf), tview(dyeA), tview(dyeB), ubuf(splatBuf), ubuf(splatCountBuf), tview(tempA), tview(tempB)]),
+     bg(batchSplatDyeBGL, [ubuf(paramBuf), tview(dyeA), tview(dyeB), ubuf(splatBuf), ubuf(splatCountBuf), tview(tempB), tview(tempA)])],
+    [bg(batchSplatDyeBGL, [ubuf(paramBuf), tview(dyeB), tview(dyeA), ubuf(splatBuf), ubuf(splatCountBuf), tview(tempA), tview(tempB)]),
+     bg(batchSplatDyeBGL, [ubuf(paramBuf), tview(dyeB), tview(dyeA), ubuf(splatBuf), ubuf(splatCountBuf), tview(tempB), tview(tempA)])],
   ];
   // fusedCurlVort: reads vel[cur], writes curlTex + vel[1-cur]
   const fusedCurlVortBGs = [
@@ -3701,12 +3791,17 @@ async function main() {
     bg(advectVelPipe.layout, [ubuf(paramBuf), tview(velA), linearSampler, tview(velB)]),
     bg(advectVelPipe.layout, [ubuf(paramBuf), tview(velB), linearSampler, tview(velA)]),
   ];
-  // advectDye: reads vel[cur] + dye[cur], writes dye[1-cur] — 4 variants (vel × dye)
+  // advectDye (fused with tempAdvect): reads vel[cur]+dye[cur]+temp[cur], writes dye[1-cur]+temp[1-cur]
+  // advDyeBGs[velFlip][dyeFlip][tempFlip]
   const advDyeBGs = [
-    [bg(advectDyePipe.layout, [ubuf(paramBuf), tview(velA), tview(dyeA), linearSampler, tview(dyeB)]),
-     bg(advectDyePipe.layout, [ubuf(paramBuf), tview(velA), tview(dyeB), linearSampler, tview(dyeA)])],
-    [bg(advectDyePipe.layout, [ubuf(paramBuf), tview(velB), tview(dyeA), linearSampler, tview(dyeB)]),
-     bg(advectDyePipe.layout, [ubuf(paramBuf), tview(velB), tview(dyeB), linearSampler, tview(dyeA)])],
+    [[bg(advectDyeBGL, [ubuf(paramBuf), tview(velA), tview(dyeA), linearSampler, tview(dyeB), tview(tempA), tview(tempB), ubuf(tempParamBuf)]),
+      bg(advectDyeBGL, [ubuf(paramBuf), tview(velA), tview(dyeA), linearSampler, tview(dyeB), tview(tempB), tview(tempA), ubuf(tempParamBuf)])],
+     [bg(advectDyeBGL, [ubuf(paramBuf), tview(velA), tview(dyeB), linearSampler, tview(dyeA), tview(tempA), tview(tempB), ubuf(tempParamBuf)]),
+      bg(advectDyeBGL, [ubuf(paramBuf), tview(velA), tview(dyeB), linearSampler, tview(dyeA), tview(tempB), tview(tempA), ubuf(tempParamBuf)])]],
+    [[bg(advectDyeBGL, [ubuf(paramBuf), tview(velB), tview(dyeA), linearSampler, tview(dyeB), tview(tempA), tview(tempB), ubuf(tempParamBuf)]),
+      bg(advectDyeBGL, [ubuf(paramBuf), tview(velB), tview(dyeA), linearSampler, tview(dyeB), tview(tempB), tview(tempA), ubuf(tempParamBuf)])],
+     [bg(advectDyeBGL, [ubuf(paramBuf), tview(velB), tview(dyeB), linearSampler, tview(dyeA), tview(tempA), tview(tempB), ubuf(tempParamBuf)]),
+      bg(advectDyeBGL, [ubuf(paramBuf), tview(velB), tview(dyeB), linearSampler, tview(dyeA), tview(tempB), tview(tempA), ubuf(tempParamBuf)])]],
   ];
   // curlNoise: reads vel[cur], writes vel[1-cur]
   const curlNoiseBGs = [
@@ -3728,22 +3823,7 @@ async function main() {
      bg(cleanupBGL, [ubuf(cleanupBuf), tview(velB), tview(dyeB), tview(velA), tview(dyeA)])],
   ];
   // ─── Temperature/Buoyancy bind groups ──────────────────────────────────
-  // tempSplat: uses batchSplatBGL (uniform, texture, storage-tex, storage-buf, uniform)
-  const tempSplatBGs = [
-    bg(batchSplatBGL, [ubuf(paramBuf), tview(tempA), tview(tempB), ubuf(splatBuf), ubuf(splatCountBuf)]),
-    bg(batchSplatBGL, [ubuf(paramBuf), tview(tempB), tview(tempA), ubuf(splatBuf), ubuf(splatCountBuf)]),
-  ];
-  // tempAdvect: reads vel[cur] + temp[cur] + dye[cur], writes temp[1-cur] — 8 variants [velFlip][tempFlip][dyeFlip]
-  const tempAdvectBGs = [
-    [[bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velA), tview(tempA), linearSampler, tview(tempB), tview(dyeA)]),
-      bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velA), tview(tempA), linearSampler, tview(tempB), tview(dyeB)])],
-     [bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velA), tview(tempB), linearSampler, tview(tempA), tview(dyeA)]),
-      bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velA), tview(tempB), linearSampler, tview(tempA), tview(dyeB)])]],
-    [[bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velB), tview(tempA), linearSampler, tview(tempB), tview(dyeA)]),
-      bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velB), tview(tempA), linearSampler, tview(tempB), tview(dyeB)])],
-     [bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velB), tview(tempB), linearSampler, tview(tempA), tview(dyeA)]),
-      bg(tempAdvectPipe.layout, [ubuf(tempParamBuf), tview(velB), tview(tempB), linearSampler, tview(tempA), tview(dyeB)])]],
-  ];
+  // (tempSplat + tempAdvect bind groups removed — fused into batchSplatDye and advectDye respectively)
   // buoyancy: reads temp[cur] + vel[cur], writes vel[1-cur] — 4 variants [tempFlip][velFlip]
   const buoyancyBGs = [
     [bg(buoyancyPipe.layout, [ubuf(buoyancyBuf), tview(tempA), tview(velA), tview(velB)]),
@@ -3851,6 +3931,7 @@ async function main() {
     matrixMotion: 0,
     poseRoll: 0,
     poseScale: 1,
+    fillOrder: null,
     prevMapped: null,
     prevCenterX: NaN,
     prevCenterY: NaN,
@@ -5233,10 +5314,6 @@ async function main() {
       mouthInflate
     );
     const contourSamples = sampleClosedLoop(FACE_IDX.contour, Math.round(42 + detail01 * 118));
-    const leftEyeSamples = sampleClosedLoop(FACE_IDX.leftEye, Math.round(12 + detail01 * 20));
-    const rightEyeSamples = sampleClosedLoop(FACE_IDX.rightEye, Math.round(12 + detail01 * 20));
-    const mouthHoleSamples = sampleClosedLoop(FACE_IDX.mouthHole, Math.round(14 + detail01 * 26));
-    const lipSamples = sampleClosedLoop(FACE_IDX.lips, Math.round(18 + detail01 * 30));
     const holeFeather = 0.1 + (1.0 - detailScale) * 0.14;
     const blinkGateL = 1.0 - Math.pow(clamp01(blinkL), 1.2);
     const blinkGateR = 1.0 - Math.pow(clamp01(blinkR), 1.2);
@@ -5263,8 +5340,8 @@ async function main() {
     };
     const isInsideFeatureVoid = (x, y) => {
       if (holeCarve <= 0.001) return false;
-      const eyeVoidQ = 1.18 + holeFeather * 0.45 + holeCarve * 0.18;
-      const mouthVoidQ = 1.24 + holeFeather * 0.5 + holeCarve * 0.22;
+      const eyeVoidQ = 1.3 + holeFeather * 0.45 + holeCarve * 0.18;
+      const mouthVoidQ = 1.35 + holeFeather * 0.5 + holeCarve * 0.22;
       const eyeCutL = eyeHoleL > 0.02 && leftEyeFeature
         ? ellipseQ(leftEyeFeature, x, y) < eyeVoidQ
         : false;
@@ -5280,12 +5357,10 @@ async function main() {
     const activeBudget = Math.max(0, MAX_SPLATS - carveReserve);
     const anchorBudget = Math.max(1, Math.min(2, activeBudget));
     const edgeBudget = Math.max(12, Math.floor(activeBudget * (0.24 + detail01 * 0.03)));
-    const rimBudget = Math.max(9, Math.floor(activeBudget * (0.17 - detail01 * 0.03)));
-    const fillBudget = Math.max(16, activeBudget - anchorBudget - edgeBudget - rimBudget);
+    const fillBudget = Math.max(16, activeBudget - anchorBudget - edgeBudget);
     const anchorStageCap = Math.min(MAX_SPLATS, splatCount + anchorBudget);
     const fillStageCap = Math.min(MAX_SPLATS, anchorStageCap + fillBudget);
     const edgeStageCap = Math.min(MAX_SPLATS, fillStageCap + edgeBudget);
-    const rimStageCap = Math.min(MAX_SPLATS, edgeStageCap + rimBudget);
     const pickLoopIndex = (sampleLen, i, count) => {
       if (sampleLen <= 0 || count <= 0) return -1;
       return Math.floor((i * sampleLen) / count) % sampleLen;
@@ -5311,30 +5386,41 @@ async function main() {
       );
     }
 
-    // 1) Landmark-based interior fill — points track the face surface.
-    const fillIndices = FACE_IDX.fill;
-    for (let i = 0; i < fillIndices.length; i++) {
-      if (splatCount >= fillStageCap) break;
-      const idx = fillIndices[i];
-      const pt = getPoint(idx, 0.12);
-      if (!pt) continue;
-      if (isInsideFeatureVoid(pt[0], pt[1])) continue;
-      const holeMask = holeMaskAt(pt[0], pt[1]);
-      if (holeMask <= 0.065) continue;
-      const [rx, ry] = direction(face.centerX, face.centerY, pt[0], pt[1]);
-      const distToCenter = Math.hypot(pt[0] - face.centerX, pt[1] - face.centerY);
-      const edgeness = clamp01(distToCenter / Math.max(face.radius, 1e-6));
-      const g = (0.032 + edgeness * 0.044 + mouth * 0.018 + poseMotion * 0.018) * holeMask;
-      const drift = 0.11 + edgeness * 0.25;
-      const outflow = 0.2 + edgeness * 0.8;
-      const stampMul = 1.8 + edgeness * 0.9 + smile * 0.22;
-      addFaceSplat(
-        pt[0], pt[1],
-        flowX * drift + rx * FACE_SPLAT_FORCE_BASE * 0.0012 * outflow,
-        flowY * drift + ry * FACE_SPLAT_FORCE_BASE * 0.0012 * outflow,
-        fillCol[0] * g, fillCol[1] * g, fillCol[2] * g,
-        state.splatRadius * stampMul * (0.86 + holeMask * 0.24)
-      );
+    // 1) Concentric ring fill — even distribution by construction.
+    // Each ring interpolates between face center and contour at a fixed fraction.
+    // Inner rings get fewer points, outer rings get more (proportional to circumference).
+    const ringFractions = [0.12, 0.25, 0.38, 0.50, 0.62, 0.73, 0.83, 0.92];
+    const ringBaseCount = [4,    7,   10,   14,   18,   22,   26,   30];
+    const cN = contourSamples.length;
+    if (cN >= 3) {
+      for (let r = 0; r < ringFractions.length; r++) {
+        if (splatCount >= fillStageCap) break;
+        const t = ringFractions[r];
+        const nPts = ringBaseCount[r];
+        for (let i = 0; i < nPts; i++) {
+          if (splatCount >= fillStageCap) break;
+          // Pick evenly-spaced contour points for this ring, offset per ring to avoid radial alignment.
+          const contourIdx = Math.floor(((i + r * 0.37) * cN) / nPts) % cN;
+          const cp = contourSamples[contourIdx];
+          const x = face.centerX + (cp[0] - face.centerX) * t;
+          const y = face.centerY + (cp[1] - face.centerY) * t;
+          if (isInsideFeatureVoid(x, y)) continue;
+          const holeMask = holeMaskAt(x, y);
+          if (holeMask <= 0.065) continue;
+          const [rx, ry] = direction(face.centerX, face.centerY, x, y);
+          const g = (0.032 + t * 0.044 + mouth * 0.018 + poseMotion * 0.018) * holeMask;
+          const drift = 0.11 + t * 0.25;
+          const outflow = 0.2 + t * 0.8;
+          const stampMul = 1.8 + t * 0.9 + smile * 0.22;
+          addFaceSplat(
+            x, y,
+            flowX * drift + rx * FACE_SPLAT_FORCE_BASE * 0.0012 * outflow,
+            flowY * drift + ry * FACE_SPLAT_FORCE_BASE * 0.0012 * outflow,
+            fillCol[0] * g, fillCol[1] * g, fillCol[2] * g,
+            state.splatRadius * stampMul * (0.86 + holeMask * 0.24)
+          );
+        }
+      }
     }
 
     // 2) Add a controlled contour accent so the head boundary reads clearly.
@@ -5356,90 +5442,6 @@ async function main() {
         state.splatRadius * (2.55 + edgeGain * 1.6 + cheekPuff * 0.42)
       );
     }
-
-    // 3) Draw smoother feature rims (eyes/lips) to avoid hole-punch artifacts.
-    const loopRim = (samples, center, color, gain, radiusMul, flowMix = 0.58, forceMul = 1.0, maxPoints = samples.length) => {
-      if (gain <= 0.0005 || !samples || samples.length < 3) return;
-      const n = samples.length;
-      const pointCount = Math.max(3, Math.min(n, Math.round(maxPoints)));
-      for (let i = 0; i < pointCount; i++) {
-        if (splatCount >= rimStageCap) break;
-        const idx = pickLoopIndex(n, i, pointCount);
-        if (idx < 0) continue;
-        const pt = samples[idx];
-        const prev = samples[(idx - 1 + n) % n];
-        const next = samples[(idx + 1) % n];
-        const tx = next[0] - prev[0];
-        const ty = next[1] - prev[1];
-        const tl = Math.hypot(tx, ty) || 1;
-        const tangentX = tx / tl;
-        const tangentY = ty / tl;
-        const [nx, ny] = direction(center[0], center[1], pt[0], pt[1]);
-        const swirl = Math.sin(modeTime * 1.9 + i * 0.73) * 0.5 + 0.5;
-        const tint = gain * (0.84 + swirl * 0.32);
-        const tangentForce = FACE_SPLAT_FORCE_BASE * (0.0007 + 0.00035 * forceMul);
-        const normalForce = FACE_SPLAT_FORCE_BASE * (0.00045 + 0.00025 * forceMul);
-        addFaceSplat(
-          pt[0], pt[1],
-          flowX * flowMix + tangentX * tangentForce + nx * normalForce * 0.45,
-          flowY * flowMix + tangentY * tangentForce + ny * normalForce * 0.45,
-          color[0] * tint, color[1] * tint, color[2] * tint,
-          state.splatRadius * radiusMul
-        );
-      }
-    };
-
-    const leftEyeCenter = leftEyeFeature ? [leftEyeFeature.cx, leftEyeFeature.cy] : [face.centerX, face.centerY];
-    const rightEyeCenter = rightEyeFeature ? [rightEyeFeature.cx, rightEyeFeature.cy] : [face.centerX, face.centerY];
-    const mouthCenterForRim = mouthFeature ? [mouthFeature.cx, mouthFeature.cy] : mouthCenter;
-    const eyeRimGain = edgeGain * (0.028 + poseMotion * 0.018) * (0.65 + holeCarve * 0.7);
-    const leftEyeRimPts = Math.max(3, Math.floor(rimBudget * 0.22));
-    const rightEyeRimPts = Math.max(3, Math.floor(rimBudget * 0.22));
-    const mouthRimPts = Math.max(4, Math.floor(rimBudget * 0.32));
-    const lipRimPts = Math.max(4, rimBudget - leftEyeRimPts - rightEyeRimPts - mouthRimPts);
-    loopRim(
-      leftEyeSamples,
-      leftEyeCenter,
-      edgeCol,
-      eyeRimGain * eyeOpenGateL,
-      2.05 + stampSize * 0.52 + eyeLeftOpen * 1.05,
-      0.54,
-      0.95,
-      leftEyeRimPts
-    );
-    loopRim(
-      rightEyeSamples,
-      rightEyeCenter,
-      edgeCol,
-      eyeRimGain * eyeOpenGateR,
-      2.05 + stampSize * 0.52 + eyeRightOpen * 1.05,
-      0.54,
-      0.95,
-      rightEyeRimPts
-    );
-
-    // 4) Keep mouth as a soft lip rim injector instead of center bursts.
-    const mouthRimGain = (0.008 + mouthDrive * 0.12 * mouthBoost + smile * 0.02) * (0.6 + holeCarve * 0.68);
-    loopRim(
-      mouthHoleSamples,
-      mouthCenterForRim,
-      mouthCol,
-      mouthRimGain,
-      2.85 + stampSize * 0.7 + mouthDrive * 1.85 * mouthBoost,
-      0.6 * mouthFlowBoost,
-      1.1 * mouthFlowBoost,
-      mouthRimPts
-    );
-    loopRim(
-      lipSamples,
-      mouthCenterForRim,
-      mouthCol,
-      mouthRimGain * 0.62,
-      2.55 + stampSize * 0.65 + mouthDrive * 1.35,
-      0.55 * (1.0 + mouthBoostN * 0.9),
-      0.85 * (1.0 + mouthBoostN * 1.1),
-      lipRimPts
-    );
 
     // 5) Explicit subtractive hole carving so eyes/mouth remain visible voids.
     const fromFaceLocal = (lx, ly, cx, cy) => [cx + lx * cosR - ly * sinR, cy + lx * sinR + ly * cosR];
@@ -6098,8 +6100,13 @@ async function main() {
     }
     if (pointer.moved) { pointer.moved = false; }
 
+    // ── Temperature active check (skip temp passes when not contributing) ──
+    const tempActive = state.tempAmount > 0.01 &&
+      (state.tempBuoyancy > 0.01 || state.tempColorShift > 0.01 || state.tempDyeHeat > 0.01);
+
     // ── Upload batch splat data + write simulation params ──
     splatCountUData[0] = splatCount;
+    splatCountUData[1] = tempActive ? 1 : 0;
     if (splatCount > 0) device.queue.writeBuffer(splatCountBuf, 0, splatCountUData);
     if (splatCount > 0) {
       device.queue.writeBuffer(splatBuf, 0, splatArrayData, 0, splatCount * 8);
@@ -6128,20 +6135,11 @@ async function main() {
 
       const p2 = enc.beginComputePass();
       p2.setPipeline(batchSplatDyePipe);
-      p2.setBindGroup(0, batchSplatDyeBGs[dyeFlip]);
+      p2.setBindGroup(0, batchSplatDyeBGs[dyeFlip][tempFlip]);
       p2.dispatchWorkgroups(dispatch, dispatch);
       p2.end();
       dyeFlip ^= 1;
-    }
-
-    // ── Temperature Splat (inject heat where dye splats land) ──
-    if (splatCount > 0 && state.tempAmount > 0.01) {
-      const p = enc.beginComputePass();
-      p.setPipeline(tempSplatPipe);
-      p.setBindGroup(0, tempSplatBGs[tempFlip]);
-      p.dispatchWorkgroups(dispatch, dispatch);
-      p.end();
-      tempFlip ^= 1;
+      if (tempActive) tempFlip ^= 1;
     }
 
     // ── Pass 2+3: Fused Curl + Vorticity (reads vel[cur], writes curlTex + vel[1-cur]) ──
@@ -6194,35 +6192,28 @@ async function main() {
       velFlip ^= 1;
     }
 
-    // ── Pass 9: Advect Dye (reads vel[cur] + dye[cur], writes dye[1-cur]) ──
+    // ── Pass 9: Fused Advect Dye + Temperature (reads vel[cur]+dye[cur]+temp[cur], writes dye[1-cur]+temp[1-cur]) ──
     {
-      const p = enc.beginComputePass();
-      p.setPipeline(advectDyePipe.pipeline);
-      p.setBindGroup(0, advDyeBGs[velFlip][dyeFlip]);
-      p.dispatchWorkgroups(dispatch, dispatch);
-      p.end();
-      dyeFlip ^= 1;
-    }
-
-    // ── Temperature Advect (reads vel[cur] + temp[cur], writes temp[1-cur]) ──
-    if (state.tempAmount > 0.01) {
+      // Always write tempParams (shader checks tempActive flag in tp.tempActive)
       tempParamData[0] = dt;
       tempParamData[1] = 1.0 / SIM_RES;
       tempParamData[2] = SIM_RES;
       tempParamData[3] = effectiveTempDissipation;
       tempParamData[4] = state.tempDyeHeat;
       tempParamData[5] = state.tempEdgeCool;
+      tempParamData[6] = tempActive ? 1.0 : 0.0;
       device.queue.writeBuffer(tempParamBuf, 0, tempParamData);
       const p = enc.beginComputePass();
-      p.setPipeline(tempAdvectPipe.pipeline);
-      p.setBindGroup(0, tempAdvectBGs[velFlip][tempFlip][dyeFlip]);
+      p.setPipeline(advectDyePipe.pipeline);
+      p.setBindGroup(0, advDyeBGs[velFlip][dyeFlip][tempFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
-      tempFlip ^= 1;
+      dyeFlip ^= 1;
+      if (tempActive) tempFlip ^= 1;
     }
 
     // ── Buoyancy (reads temp[cur] + vel[cur], writes vel[1-cur]) ──
-    if (state.tempAmount > 0.01 && state.tempBuoyancy > 0.01) {
+    if (tempActive && state.tempBuoyancy > 0.01) {
       buoyancyData[0] = SIM_RES;
       buoyancyData[1] = dt;
       buoyancyData[2] = state.tempBuoyancy * 500.0;
