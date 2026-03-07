@@ -32,7 +32,8 @@ const state = {
   particleCount: 4194304,   // 4M default
   particleSize: 0.9,
   glitterCap: 1.0,       // per-tile particle budget scale (0=minimal, 1=200/tile)
-  streakGlow: 2.0,       // density-based brightness boost for particles in dense flows
+  streakGlow: 10.0,      // density-based brightness boost for particles in dense flows
+  glitterFloor: 0.01,    // minimum brightness to render a particle (cull below this)
   sphereMode: 0,         // 0=off, 1=on (planet-like shading)
   shadowExtend: 0.5,     // 0=hard shadow, 1=no shadow
   sphereSize: 1.0,       // visual sphere size multiplier (0.5-2.0)
@@ -1469,30 +1470,33 @@ struct Particle {
   angularVel: f32, life: f32, seed: f32,
 };
 
+struct CompactParams {
+  tileBudget: u32,
+  brightnessFloor: f32,
+};
+
 @group(0) @binding(0) var<storage, read> colors: array<vec4f>;
 @group(0) @binding(1) var<storage, read_write> visibleIndices: array<u32>;
 @group(0) @binding(2) var<storage, read_write> counter: atomic<u32>;
 @group(0) @binding(3) var<storage, read> particles: array<Particle>;
 @group(0) @binding(4) var<storage, read_write> tileGrid: array<atomic<u32>>;
-@group(0) @binding(5) var<uniform> tileBudget: u32;
+@group(0) @binding(5) var<uniform> params: CompactParams;
 
 @compute @workgroup_size(${PARTICLE_WG})
 fn main(@builtin(global_invocation_id) id: vec3u) {
   let idx = id.x;
   if (idx >= ${count}u) { return; }
   let col = colors[idx];
-  if (col.a <= 0.01) { return; }
+  if (col.a <= params.brightnessFloor) { return; }
 
-  // Map particle position to tile grid with seed-based jitter to blur boundaries
-  let jx = fract(particles[idx].seed * 7.31) - 0.5;
-  let jy = fract(particles[idx].seed * 13.17) - 0.5;
-  let tileX = clamp(u32(particles[idx].posX * ${TILE_GRID}.0 + jx), 0u, ${TILE_GRID - 1}u);
-  let tileY = clamp(u32(particles[idx].posY * ${TILE_GRID}.0 + jy), 0u, ${TILE_GRID - 1}u);
+  // Map particle position to tile grid
+  let tileX = clamp(u32(particles[idx].posX * ${TILE_GRID}.0), 0u, ${TILE_GRID - 1}u);
+  let tileY = clamp(u32(particles[idx].posY * ${TILE_GRID}.0), 0u, ${TILE_GRID - 1}u);
   let tileIdx = tileY * ${TILE_GRID}u + tileX;
 
   // Enforce per-tile budget — excess particles are simply not rendered
   let tileCount = atomicAdd(&tileGrid[tileIdx], 1u);
-  if (tileCount >= tileBudget) { return; }
+  if (tileCount >= params.tileBudget) { return; }
 
   let slot = atomicAdd(&counter, 1u);
   visibleIndices[slot] = idx;
@@ -1841,7 +1845,9 @@ fn main(
   let sizeRand = pp.extra3.x;
   // Per-particle size variation: seed drives a 0.2..1.8 range scaled by randomness
   let sizeScale = mix(1.0, 0.2 + part.seed * 1.6, sizeRand);
-  let pixelSize = basePixelSize * sizeScale;
+  // Density size boost: brighter particles (dense flows) grow slightly larger
+  let densitySizeBoost = 1.0 + clamp(col.a * 0.3, 0.0, 0.6);
+  let pixelSize = basePixelSize * sizeScale * densitySizeBoost;
   let aspect = screenSize.x / screenSize.y;
   let clipSize = vec2f(pixelSize * 2.0 / screenSize.x, pixelSize * 2.0 / screenSize.y);
 
@@ -3840,13 +3846,16 @@ async function main() {
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
   const zeroTileGrid = new Uint32Array(TILE_COUNT);
-  const tileBudgetBuf = device.createBuffer({
-    label: 'tileBudget',
-    size: 4,
+  const compactParamsBuf = device.createBuffer({
+    label: 'compactParams',
+    size: 8,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const tileBudgetData = new Uint32Array(1);
+  const compactParamsData = new ArrayBuffer(8);
+  const compactParamsU32 = new Uint32Array(compactParamsData);
+  const compactParamsF32 = new Float32Array(compactParamsData);
   let lastTileBudget = -1;
+  let lastGlitterFloor = -1;
 
   const compactModule = device.createShaderModule({ code: makeParticleCompactShader(state.particleCount), label: 'particleCompact' });
   checkShader(compactModule, 'particleCompact');
@@ -3879,7 +3888,7 @@ async function main() {
       { binding: 2, resource: { buffer: atomicCounterBuf } },
       { binding: 3, resource: { buffer: particleBuf } },
       { binding: 4, resource: { buffer: tileGridBuf } },
-      { binding: 5, resource: { buffer: tileBudgetBuf } },
+      { binding: 5, resource: { buffer: compactParamsBuf } },
     ],
   });
   const particleFinalizeBG = device.createBindGroup({
@@ -6024,7 +6033,7 @@ async function main() {
         { binding: 2, resource: { buffer: atomicCounterBuf } },
         { binding: 3, resource: { buffer: newBuf } },
         { binding: 4, resource: { buffer: tileGridBuf } },
-        { binding: 5, resource: { buffer: tileBudgetBuf } },
+        { binding: 5, resource: { buffer: compactParamsBuf } },
       ],
     });
 
@@ -6514,10 +6523,13 @@ async function main() {
     // Map glitterCap (0..1+) to per-tile particle budget
     // Budget per tile — high default allows rich buildup, only extreme overdraw is culled
     const budget = Math.max(1, Math.round(state.glitterCap * 150));
-    if (budget !== lastTileBudget) {
-      tileBudgetData[0] = budget;
-      device.queue.writeBuffer(tileBudgetBuf, 0, tileBudgetData);
+    const floor = state.glitterFloor;
+    if (budget !== lastTileBudget || floor !== lastGlitterFloor) {
+      compactParamsU32[0] = budget;
+      compactParamsF32[1] = floor;
+      device.queue.writeBuffer(compactParamsBuf, 0, compactParamsData);
       lastTileBudget = budget;
+      lastGlitterFloor = floor;
     }
     {
       const p = enc.beginComputePass();
@@ -7193,6 +7205,7 @@ async function main() {
   wireSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
   wireSlider('glitterCap', 'glitterCap', v => v.toFixed(2));
   wireSlider('streakGlow', 'streakGlow', v => v.toFixed(1));
+  wireSlider('glitterFloor', 'glitterFloor', v => v.toFixed(3));
   wireSelect('sphereMode', 'sphereMode', () => {
     const on = state.sphereMode > 0;
     document.querySelectorAll('.sphere-setting').forEach(el => el.style.display = on ? '' : 'none');
@@ -7342,6 +7355,7 @@ async function main() {
     syncSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
     syncSlider('glitterCap', 'glitterCap', v => v.toFixed(2));
     syncSlider('streakGlow', 'streakGlow', v => v.toFixed(1));
+    syncSlider('glitterFloor', 'glitterFloor', v => v.toFixed(3));
     { const sel = document.getElementById('sphereMode'); if (sel) sel.value = String(Math.round(state.sphereMode || 0)); }
     syncSlider('shadowExtend', 'shadowExtend');
     syncSlider('sphereSize', 'sphereSize');
