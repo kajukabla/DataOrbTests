@@ -31,7 +31,7 @@ const FACE_MIRROR_X = true;
 const state = {
   particleCount: 4194304,   // 4M default
   particleSize: 0.9,
-  glitterCap: 1.0,       // max per-pixel particle brightness (overdraw clamp)
+  glitterCap: 1.0,       // per-tile particle budget scale (0=minimal, 1=200/tile)
   sphereMode: 0,         // 0=off, 1=on (planet-like shading)
   shadowExtend: 0.5,     // 0=hard shadow, 1=no shadow
   sphereSize: 1.0,       // visual sphere size multiplier (0.5-2.0)
@@ -1457,21 +1457,42 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 // (tempSplatShader removed — fused into batchSplatShaderDye)
 
 // ─── Particle Compact Shader (GPU indirect draw — builds visible index list) ──
+const TILE_GRID = 48; // 48x48 tile grid for per-tile particle budgets
+const TILE_COUNT = TILE_GRID * TILE_GRID;
+
 function makeParticleCompactShader(count) {
   return /* wgsl */`
+struct Particle {
+  posX: f32, posY: f32,
+  nx: f32, ny: f32, nz: f32,
+  angularVel: f32, life: f32, seed: f32,
+};
+
 @group(0) @binding(0) var<storage, read> colors: array<vec4f>;
 @group(0) @binding(1) var<storage, read_write> visibleIndices: array<u32>;
 @group(0) @binding(2) var<storage, read_write> counter: atomic<u32>;
+@group(0) @binding(3) var<storage, read> particles: array<Particle>;
+@group(0) @binding(4) var<storage, read_write> tileGrid: array<atomic<u32>>;
+@group(0) @binding(5) var<uniform> tileBudget: u32;
 
 @compute @workgroup_size(${PARTICLE_WG})
 fn main(@builtin(global_invocation_id) id: vec3u) {
   let idx = id.x;
   if (idx >= ${count}u) { return; }
   let col = colors[idx];
-  if (col.a > 0.01) {
-    let slot = atomicAdd(&counter, 1u);
-    visibleIndices[slot] = idx;
-  }
+  if (col.a <= 0.01) { return; }
+
+  // Map particle position to tile grid
+  let tileX = clamp(u32(particles[idx].posX * ${TILE_GRID}.0), 0u, ${TILE_GRID - 1}u);
+  let tileY = clamp(u32(particles[idx].posY * ${TILE_GRID}.0), 0u, ${TILE_GRID - 1}u);
+  let tileIdx = tileY * ${TILE_GRID}u + tileX;
+
+  // Enforce per-tile budget — excess particles are simply not rendered
+  let tileCount = atomicAdd(&tileGrid[tileIdx], 1u);
+  if (tileCount >= tileBudget) { return; }
+
+  let slot = atomicAdd(&counter, 1u);
+  visibleIndices[slot] = idx;
 }
 `;
 }
@@ -2008,12 +2029,11 @@ fn frag(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 }
 `;
 
-// Particle composite: scene + min(particles, cap)
+// Particle composite: scene + particles (overdraw handled by tile-based culling in compact pass)
 const particleCompositeShader = /* wgsl */`
 @group(0) @binding(0) var sceneTex: texture_2d<f32>;
 @group(0) @binding(1) var particleTex: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
-@group(0) @binding(3) var<uniform> cap: f32;
 
 @vertex
 fn vert(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
@@ -2028,8 +2048,7 @@ fn frag(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let uv = pos.xy / texSize;
   let scene = textureSampleLevel(sceneTex, samp, uv, 0.0).rgb;
   let particles = textureSampleLevel(particleTex, samp, uv, 0.0).rgb;
-  let capped = vec3f(cap) * (1.0 - exp(-particles / vec3f(cap)));
-  return vec4f(scene + capped, 1.0);
+  return vec4f(scene + particles, 1.0);
 }
 `;
 
@@ -3640,14 +3659,13 @@ async function main() {
     lastBloomH = 0;
   }
 
-  // ─── Particle Composite (overdraw cap) ──────────────────────────────────
+  // ─── Particle Composite (scene + particles, overdraw handled by tile culling) ─
   const particleCompositeBGL = device.createBindGroupLayout({
     label: 'particleComposite_bgl',
     entries: [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
       { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
       { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
-      { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
     ],
   });
 
@@ -3663,14 +3681,6 @@ async function main() {
     },
     primitive: { topology: 'triangle-list' },
   });
-
-  const particleCapUB = device.createBuffer({
-    label: 'particleCapUB',
-    size: 4,
-    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-  });
-  const particleCapData = new Float32Array(1);
-  let lastGlitterCap = -1;
 
   // Offscreen textures for particle composite (recreated on resize)
   let particleRT = null;   // particles rendered here (additive, cleared)
@@ -3700,7 +3710,6 @@ async function main() {
         { binding: 0, resource: sceneRTView },
         { binding: 1, resource: particleRTView },
         { binding: 2, resource: linearSampler },
-        { binding: 3, resource: { buffer: particleCapUB } },
       ],
     });
   }
@@ -3805,16 +3814,34 @@ async function main() {
     },
   });
 
-  // Particle compact pipeline (GPU indirect draw)
+  // Particle compact pipeline (GPU indirect draw with tile-based culling)
   const particleCompactBGL = device.createBindGroupLayout({
     label: 'particleCompact_bgl',
     entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
     ],
   });
   const particleCompactLayout = device.createPipelineLayout({ bindGroupLayouts: [particleCompactBGL] });
+
+  // Tile grid for per-tile particle budget enforcement
+  const tileGridBuf = device.createBuffer({
+    label: 'tileGrid',
+    size: TILE_COUNT * 4,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const zeroTileGrid = new Uint32Array(TILE_COUNT);
+  const tileBudgetBuf = device.createBuffer({
+    label: 'tileBudget',
+    size: 4,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const tileBudgetData = new Uint32Array(1);
+  let lastTileBudget = -1;
 
   const compactModule = device.createShaderModule({ code: makeParticleCompactShader(state.particleCount), label: 'particleCompact' });
   checkShader(compactModule, 'particleCompact');
@@ -3845,6 +3872,9 @@ async function main() {
       { binding: 0, resource: { buffer: colorBuf } },
       { binding: 1, resource: { buffer: visibleIndexBuf } },
       { binding: 2, resource: { buffer: atomicCounterBuf } },
+      { binding: 3, resource: { buffer: particleBuf } },
+      { binding: 4, resource: { buffer: tileGridBuf } },
+      { binding: 5, resource: { buffer: tileBudgetBuf } },
     ],
   });
   const particleFinalizeBG = device.createBindGroup({
@@ -5987,6 +6017,9 @@ async function main() {
         { binding: 0, resource: { buffer: newColorBuf } },
         { binding: 1, resource: { buffer: newVisibleIndexBuf } },
         { binding: 2, resource: { buffer: atomicCounterBuf } },
+        { binding: 3, resource: { buffer: newBuf } },
+        { binding: 4, resource: { buffer: tileGridBuf } },
+        { binding: 5, resource: { buffer: tileBudgetBuf } },
       ],
     });
 
@@ -6469,8 +6502,16 @@ async function main() {
       p.end();
     }
 
-    // ── Pass 10b: Particle Compact (build visible index list for indirect draw) ──
+    // ── Pass 10b: Particle Compact (tile-budgeted, build visible index list) ──
     device.queue.writeBuffer(atomicCounterBuf, 0, zeroU32);
+    device.queue.writeBuffer(tileGridBuf, 0, zeroTileGrid);
+    // Map glitterCap (0..1+) to per-tile particle budget
+    const budget = Math.max(1, Math.round(state.glitterCap * 200));
+    if (budget !== lastTileBudget) {
+      tileBudgetData[0] = budget;
+      device.queue.writeBuffer(tileBudgetBuf, 0, tileBudgetData);
+      lastTileBudget = budget;
+    }
     {
       const p = enc.beginComputePass();
       p.setPipeline(particleCompactPipeline);
@@ -6536,13 +6577,8 @@ async function main() {
       rp.end();
     }
 
-    // ── Pass 12b: Particle Composite (scene + clamped particles → output) ──
+    // ── Pass 12b: Particle Composite (scene + particles → output) ──
     {
-      if (state.glitterCap !== lastGlitterCap) {
-        particleCapData[0] = state.glitterCap;
-        device.queue.writeBuffer(particleCapUB, 0, particleCapData);
-        lastGlitterCap = state.glitterCap;
-      }
       const compositeTarget = bloomActive ? bloomResources.sceneView : canvasView;
       const rp = enc.beginRenderPass({
         colorAttachments: [{
