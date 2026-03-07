@@ -990,7 +990,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     if (maxC > 1.2) { dye *= 1.2 / maxC; }
   }
   let minC = min(dye.r, min(dye.g, dye.b));
-  dye -= vec3f(minC * 0.08);
+  dye -= vec3f(minC * 0.02);
   textureStore(dst, id.xy, vec4f(max(dye, vec3f(0.0)), 1.0));
 
   // ── Temperature advection (fused, conditional) ──
