@@ -1852,8 +1852,9 @@ fn main(
   let sizeRand = pp.extra3.x;
   // Per-particle size variation: seed drives a 0.2..1.8 range scaled by randomness
   let sizeScale = mix(1.0, 0.2 + part.seed * 1.6, sizeRand);
-  // Density size boost: smoothstep transfer function scales particles up in dense flows
-  let densityT = smoothstep(0.1, 2.0, col.a);
+  // Density size boost: dim-but-visible particles (tendril accumulators) grow larger
+  // so additive overlap creates thicker, more visible streaks
+  let densityT = 1.0 - smoothstep(0.01, 0.12, col.a);
   let densitySizeBoost = 1.0 + densityT * pp.extra4.y;
   let pixelSize = basePixelSize * sizeScale * densitySizeBoost;
   let aspect = screenSize.x / screenSize.y;
