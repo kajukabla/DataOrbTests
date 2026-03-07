@@ -425,8 +425,9 @@ export class BOController {
 
   async refreshExamples() {
     try {
-      const res = await fetch('/api/examples');
-      if (res.ok) this.examples = await res.json();
+      let res = await fetch('/api/examples').catch(() => null);
+      if (!res || !res.ok) res = await fetch('data/examples.json').catch(() => null);
+      if (res && res.ok) this.examples = await res.json();
     } catch { this.examples = []; }
   }
 
