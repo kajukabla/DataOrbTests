@@ -88,6 +88,11 @@ export const SLIDER_SPACE = {
   bloomRadius:       { min: 0, max: 1, step: 0.01 },
   // Face tracking
   faceEffectorMode:  { min: 0, max: 2, step: 1    },
+  faceMeshNoiseAmount: { min: 0, max: 3, step: 0.01 },
+  faceMeshNoiseFreq: { min: 1, max: 60, step: 0.5 },
+  faceMeshNoiseSpeed: { min: 0, max: 5, step: 0.01 },
+  faceMeshNoiseDir: { min: 0, max: 1, step: 0.01 },
+  faceMouthSimBoost: { min: 0, max: 1, step: 0.01 },
   // Transfer function
   colormapMode:      { min: 0, max: 6, step: 1    },
   colorSource:       { min: 0, max: 3, step: 1    },

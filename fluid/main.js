@@ -119,6 +119,12 @@ const state = {
   faceMaskDetail: 0.68,
   faceStampSize: 1.35,
   faceDebugMode: 0,
+  // Face mesh noise
+  faceMeshNoiseAmount: 0.5,
+  faceMeshNoiseFreq: 12.0,
+  faceMeshNoiseSpeed: 1.0,
+  faceMeshNoiseDir: 0.0,
+  faceMouthSimBoost: 0.3,
 };
 
 const FACE_TRACKER_BUNDLE_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
@@ -1683,10 +1689,37 @@ fn fs(@location(0) vel: vec2f, @location(1) maskVis: vec2f) -> @location(0) vec4
 const faceMeshInjectVelShader = /* wgsl */`
 ${commonHeader}
 
+struct FaceForceParams {
+  motionScale: f32,
+  noiseAmount: f32,
+  noiseFreq: f32,
+  noiseSpeed: f32,
+  directionality: f32, // 0=random curls, 1=outward from face center
+  time: f32,
+  faceCenterX: f32,
+  faceCenterY: f32,
+};
+
 @group(0) @binding(1) var faceTex: texture_2d<f32>;
 @group(0) @binding(2) var velSrc: texture_2d<f32>;
 @group(0) @binding(3) var velDst: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(4) var<uniform> faceForce: vec4f; // x=forceScale
+@group(0) @binding(4) var<uniform> ff: FaceForceParams;
+
+fn fhash(p: vec2f) -> f32 {
+  var n = u32(dot(p, vec2f(127.1, 311.7)) * 43758.5453);
+  n = n ^ (n >> 16u); n = n * 0x45d9f3bu; n = n ^ (n >> 16u);
+  return f32(n & 0xFFFFu) / 65535.0;
+}
+fn fnoise(p: vec2f) -> f32 {
+  let i = floor(p); let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(fhash(i), fhash(i + vec2f(1,0)), u.x),
+             mix(fhash(i + vec2f(0,1)), fhash(i + vec2f(1,1)), u.x), u.y);
+}
+fn fbm3(p: vec2f) -> f32 {
+  return fnoise(p) * 0.5 + fnoise(p * 2.13 + vec2f(5.3, 1.7)) * 0.3
+       + fnoise(p * 4.51 + vec2f(2.1, 8.4)) * 0.2;
+}
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -1706,7 +1739,33 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let vis = max(face.a, 0.0);
     let strength = mask * vis;
     let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS - 0.02, dist);
-    vel += face.rg * strength * faceForce.x * boundaryFade;
+
+    // Face motion velocity
+    vel += face.rg * strength * ff.motionScale * boundaryFade;
+
+    // Curl noise on face surface
+    if (ff.noiseAmount > 0.001) {
+      let t = ff.time * ff.noiseSpeed;
+      let freq = ff.noiseFreq;
+      let nUV = uv * freq;
+      let eps = 1.0 / p.simRes;
+      let sC = fbm3(nUV + vec2f(t * 0.7, t * 0.3));
+      let sX = fbm3(nUV + vec2f(eps * freq + t * 0.7, t * 0.3));
+      let sY = fbm3(nUV + vec2f(t * 0.7, eps * freq + t * 0.3));
+      var curl = vec2f(sY - sC, -(sX - sC)) / eps * 0.15;
+
+      // Blend toward directional (outward from face center)
+      if (ff.directionality > 0.01) {
+        let toFaceCenter = uv - vec2f(ff.faceCenterX, ff.faceCenterY);
+        let r = length(toFaceCenter);
+        let outDir = select(vec2f(0.0), toFaceCenter / r, r > 0.001);
+        let noiseLen = length(curl);
+        let directional = outDir * noiseLen;
+        curl = mix(curl, directional, ff.directionality);
+      }
+
+      vel += curl * strength * ff.noiseAmount * boundaryFade;
+    }
   }
   textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
 }
@@ -4308,7 +4367,7 @@ async function main() {
     ],
   });
   const faceMeshForceBuf = device.createBuffer({
-    label: 'faceMeshForce', size: 16,
+    label: 'faceMeshForce', size: 32,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   const faceMeshInjectVelPipe = device.createComputePipeline({
@@ -4351,7 +4410,7 @@ async function main() {
     bg(faceMeshInjectDyeBGL, [ubuf(paramBuf), faceMeshTexView, tview(dyeA), tview(dyeB), ubuf(faceMeshDyeBuf)]),
     bg(faceMeshInjectDyeBGL, [ubuf(paramBuf), faceMeshTexView, tview(dyeB), tview(dyeA), ubuf(faceMeshDyeBuf)]),
   ];
-  const faceMeshForceData = new Float32Array(4);
+  const faceMeshForceData = new Float32Array(8);
   const faceMeshDyeData = new Float32Array(8);
   let faceMeshActive = false;
 
@@ -6369,7 +6428,14 @@ async function main() {
     // Set face inject uniforms
     const flowCarry = Math.max(0, Math.min(1.5, state.faceFlowCarry ?? 0.12));
     const fillGain = Math.max(0, state.faceDyeFill ?? 1.8);
-    faceMeshForceData[0] = contribution * flowCarry * FACE_SPLAT_FORCE_BASE * 0.0038;
+    faceMeshForceData[0] = contribution * flowCarry * FACE_SPLAT_FORCE_BASE * 0.0038; // motionScale
+    faceMeshForceData[1] = Math.max(0, state.faceMeshNoiseAmount ?? 0.5);   // noiseAmount
+    faceMeshForceData[2] = Math.max(0.1, state.faceMeshNoiseFreq ?? 12.0);  // noiseFreq
+    faceMeshForceData[3] = Math.max(0, state.faceMeshNoiseSpeed ?? 1.0);    // noiseSpeed
+    faceMeshForceData[4] = Math.max(0, Math.min(1, state.faceMeshNoiseDir ?? 0.0)); // directionality
+    faceMeshForceData[5] = time;                                             // time
+    faceMeshForceData[6] = face.centerX;                                     // faceCenterX
+    faceMeshForceData[7] = face.centerY;                                     // faceCenterY
     device.queue.writeBuffer(faceMeshForceBuf, 0, faceMeshForceData);
 
     const blend = faceTracking.blendshapeScores;
@@ -6886,7 +6952,13 @@ async function main() {
     // This avoids the frame-skipping look while still slowing all calculations.
     const masterSpeed = Math.max(0, Math.min(1, Number.isFinite(state.masterSpeed) ? state.masterSpeed : 1.0));
     frameTimeScale = masterSpeed;
-    const dt = 0.016 * state.simSpeed * masterSpeed;
+    // Mouth open → boost sim dynamics
+    let mouthSimBoost = 0;
+    if (faceTracking.face && Math.round(state.faceEffectorMode || 0) >= 2) {
+      const jaw = faceTracking.blendshapeScores?.jawOpen ?? faceTracking.face.mouthOpen ?? 0;
+      mouthSimBoost = jaw * Math.max(0, state.faceMouthSimBoost ?? 0.3);
+    }
+    const dt = 0.016 * (state.simSpeed + mouthSimBoost) * masterSpeed;
     const decayScale = masterSpeed;
     const effectivePressureDecay = Math.pow(state.pressureDecay, decayScale);
     const effectiveVelDissipation = Math.pow(state.velDissipation, decayScale);
@@ -7864,6 +7936,11 @@ async function main() {
   wireSlider('faceMouthBoost', 'faceMouthBoost', v => v.toFixed(2));
   wireSlider('faceMaskDetail', 'faceMaskDetail', v => v.toFixed(2));
   wireSlider('faceStampSize', 'faceStampSize', v => v.toFixed(2));
+  wireSlider('faceMeshNoiseAmount', 'faceMeshNoiseAmount', v => v.toFixed(2));
+  wireSlider('faceMeshNoiseFreq', 'faceMeshNoiseFreq', v => v.toFixed(1));
+  wireSlider('faceMeshNoiseSpeed', 'faceMeshNoiseSpeed', v => v.toFixed(2));
+  wireSlider('faceMeshNoiseDir', 'faceMeshNoiseDir', v => v.toFixed(2));
+  wireSlider('faceMouthSimBoost', 'faceMouthSimBoost', v => v.toFixed(2));
   wireSelect('faceDebugMode', 'faceDebugMode', v => {
     state.faceDebugMode = Math.max(0, Math.min(2, Math.round(v)));
     if ((state.faceDebugMode > 0 || state.faceEffectorMode > 0) && !faceTracking.enabled) {
