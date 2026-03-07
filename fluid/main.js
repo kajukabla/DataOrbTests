@@ -1468,7 +1468,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let idx = id.x;
   if (idx >= ${count}u) { return; }
   let col = colors[idx];
-  if (col.a > 0.0) {
+  if (col.a > 0.01) {
     let slot = atomicAdd(&counter, 1u);
     visibleIndices[slot] = idx;
   }
@@ -1476,19 +1476,22 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 `;
 }
 
-const MAX_VISIBLE_PARTICLES = 2097152; // 2M cap — prevents overdraw stalls at high counts
-const particleFinalizeShader = /* wgsl */`
+function makeParticleFinalizeShader(particleCount) {
+  // Cap visible particles at half the total count or 1M, whichever is smaller
+  const cap = Math.min(particleCount >> 1, 1048576);
+  return /* wgsl */`
 @group(0) @binding(0) var<storage, read_write> counter: atomic<u32>;
 @group(0) @binding(1) var<storage, read_write> drawArgs: array<u32>;
 
 @compute @workgroup_size(1)
 fn main() {
   drawArgs[0] = 4u;
-  drawArgs[1] = min(atomicLoad(&counter), ${MAX_VISIBLE_PARTICLES}u);
+  drawArgs[1] = min(atomicLoad(&counter), ${cap}u);
   drawArgs[2] = 0u;
   drawArgs[3] = 0u;
 }
 `;
+}
 
 // ─── Particle Update Compute Shader (function — count baked in) ─────────────
 function makeParticleUpdateShader(count, hdr) {
@@ -2366,16 +2369,16 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 
 // ─── CPU-side Oklab conversion (avoids per-particle GPU conversion) ──────────
+const _oklabOut = [0, 0, 0];
 function linearToOklabCPU(rgb) {
   const r = rgb[0], g = rgb[1], b = rgb[2];
   const l = Math.cbrt(Math.max(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b, 0));
   const m = Math.cbrt(Math.max(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b, 0));
   const s = Math.cbrt(Math.max(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b, 0));
-  return [
-    0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
-    1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
-    0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
-  ];
+  _oklabOut[0] = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s;
+  _oklabOut[1] = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s;
+  _oklabOut[2] = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
+  return _oklabOut;
 }
 
 // ─── Bayesian Optimization ───────────────────────────────────────────────────
@@ -3106,12 +3109,16 @@ async function main() {
     }
   }
 
+  let bloomParamsDirty = true;
+  let lastBloomThreshold = -1, lastBloomRadius = -1, lastBloomIntensity = -1;
+
   function resize() {
     const dpr = window.devicePixelRatio || 1;
     const cssW = canvas.clientWidth || window.innerWidth || 1;
     const cssH = canvas.clientHeight || window.innerHeight || 1;
     canvas.width = Math.max(1, Math.round(cssW * dpr));
     canvas.height = Math.max(1, Math.round(cssH * dpr));
+    bloomParamsDirty = true;
   }
   resize();
   window.addEventListener('resize', resize);
@@ -3529,7 +3536,6 @@ async function main() {
     size: 4,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-
   // Bloom resource lifecycle
   let bloomResources = null;
   let lastBloomW = 0, lastBloomH = 0;
@@ -3664,6 +3670,7 @@ async function main() {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   const particleCapData = new Float32Array(1);
+  let lastGlitterCap = -1;
 
   // Offscreen textures for particle composite (recreated on resize)
   let particleRT = null;   // particles rendered here (additive, cleared)
@@ -3680,7 +3687,10 @@ async function main() {
     lastCompW = w;
     lastCompH = h;
     const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
-    particleRT = device.createTexture({ label: 'particleRT', size: [w, h], format: canvasFmt, usage });
+    // Render particles at half resolution to reduce fill-rate cost (4x fewer blend ops)
+    const halfW = Math.max(1, w >> 1);
+    const halfH = Math.max(1, h >> 1);
+    particleRT = device.createTexture({ label: 'particleRT', size: [halfW, halfH], format: canvasFmt, usage });
     particleRTView = particleRT.createView();
     sceneRT = device.createTexture({ label: 'sceneRT', size: [w, h], format: canvasFmt, usage });
     sceneRTView = sceneRT.createView();
@@ -3821,9 +3831,9 @@ async function main() {
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
     ],
   });
-  const finalizeModule = device.createShaderModule({ code: particleFinalizeShader, label: 'particleFinalize' });
+  const finalizeModule = device.createShaderModule({ code: makeParticleFinalizeShader(state.particleCount), label: 'particleFinalize' });
   checkShader(finalizeModule, 'particleFinalize');
-  const particleFinalizePipeline = device.createComputePipeline({
+  let particleFinalizePipeline = device.createComputePipeline({
     label: 'particleFinalize',
     layout: device.createPipelineLayout({ bindGroupLayouts: [particleFinalizeBGL] }),
     compute: { module: finalizeModule, entryPoint: 'main' },
@@ -5990,6 +6000,16 @@ async function main() {
       ],
     });
 
+    // Rebuild finalize pipeline with updated visible cap
+    particleFinalizePipeline = device.createComputePipeline({
+      label: 'particleFinalize',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [particleFinalizeBGL] }),
+      compute: {
+        module: device.createShaderModule({ code: makeParticleFinalizeShader(count), label: 'particleFinalize' }),
+        entryPoint: 'main',
+      },
+    });
+
     particleBuf = newBuf;
     colorBuf = newColorBuf;
     visibleIndexBuf = newVisibleIndexBuf;
@@ -6167,51 +6187,51 @@ async function main() {
     }
 
     // Pre-convert colors to Oklab on CPU (avoids per-particle GPU conversion)
-    const okGlitBase = linearToOklabCPU(state.glitterColor);
-    const okGlitAccent = linearToOklabCPU(state.glitterAccent);
-    const okGlitTip = linearToOklabCPU(state.glitterTip);
-    const okBaseCol = linearToOklabCPU(moodBaseColor);
-    const okAccentCol = linearToOklabCPU(moodAccentColor);
-    const okTipCol = linearToOklabCPU(moodTipColor);
-
+    // linearToOklabCPU reuses a shared output array, so copy values immediately
     // Update screen/particle/display uniform buffers
     particleUBData[0] = canvas.width;
     particleUBData[1] = canvas.height;
     particleUBData[2] = state.particleSize * (window.devicePixelRatio || 1);
     particleUBData[3] = state.glintBrightness;
     particleUBData[4] = state.prismaticAmount;
-    particleUBData[5] = okGlitBase[0];
-    particleUBData[6] = okGlitBase[1];
-    particleUBData[7] = okGlitBase[2];
-    particleUBData[8] = okGlitAccent[0];
-    particleUBData[9] = okGlitAccent[1];
-    particleUBData[10] = okGlitAccent[2];
+    linearToOklabCPU(state.glitterColor);
+    particleUBData[5] = _oklabOut[0];
+    particleUBData[6] = _oklabOut[1];
+    particleUBData[7] = _oklabOut[2];
+    linearToOklabCPU(state.glitterAccent);
+    particleUBData[8] = _oklabOut[0];
+    particleUBData[9] = _oklabOut[1];
+    particleUBData[10] = _oklabOut[2];
     particleUBData[11] = state.colorBlend;
     particleUBData[12] = state.sizeRandomness;
-    particleUBData[13] = okGlitTip[0];
-    particleUBData[14] = okGlitTip[1];
-    particleUBData[15] = okGlitTip[2];
+    linearToOklabCPU(state.glitterTip);
+    particleUBData[13] = _oklabOut[0];
+    particleUBData[14] = _oklabOut[1];
+    particleUBData[15] = _oklabOut[2];
     device.queue.writeBuffer(particleUB, 0, particleUBData);
 
     displayUBData[0] = canvas.width;
     displayUBData[1] = canvas.height;
     displayUBData[2] = time;
     displayUBData[3] = state.sheenStrength;
-    displayUBData[4] = okBaseCol[0];
-    displayUBData[5] = okBaseCol[1];
-    displayUBData[6] = okBaseCol[2];
+    linearToOklabCPU(moodBaseColor);
+    displayUBData[4] = _oklabOut[0];
+    displayUBData[5] = _oklabOut[1];
+    displayUBData[6] = _oklabOut[2];
     displayUBData[7] = 1.0; // sheen headroom (no HDR boost — sheen stays SDR-range)
-    displayUBData[8] = okAccentCol[0];
-    displayUBData[9] = okAccentCol[1];
-    displayUBData[10] = okAccentCol[2];
+    linearToOklabCPU(moodAccentColor);
+    displayUBData[8] = _oklabOut[0];
+    displayUBData[9] = _oklabOut[1];
+    displayUBData[10] = _oklabOut[2];
     displayUBData[11] = state.colorBlend;
     displayUBData[12] = state.sheenColor[0];
     displayUBData[13] = state.sheenColor[1];
     displayUBData[14] = state.sheenColor[2];
     displayUBData[15] = state.metallic;
-    displayUBData[16] = okTipCol[0];
-    displayUBData[17] = okTipCol[1];
-    displayUBData[18] = okTipCol[2];
+    linearToOklabCPU(moodTipColor);
+    displayUBData[16] = _oklabOut[0];
+    displayUBData[17] = _oklabOut[1];
+    displayUBData[18] = _oklabOut[2];
     displayUBData[19] = state.roughness;
     // slots 20-27: tempParams + cmapParams
     displayUBData[20] = Math.round(state.noiseBehavior || 0);
@@ -6518,8 +6538,11 @@ async function main() {
 
     // ── Pass 12b: Particle Composite (scene + clamped particles → output) ──
     {
-      particleCapData[0] = state.glitterCap;
-      device.queue.writeBuffer(particleCapUB, 0, particleCapData);
+      if (state.glitterCap !== lastGlitterCap) {
+        particleCapData[0] = state.glitterCap;
+        device.queue.writeBuffer(particleCapUB, 0, particleCapData);
+        lastGlitterCap = state.glitterCap;
+      }
       const compositeTarget = bloomActive ? bloomResources.sceneView : canvasView;
       const rp = enc.beginRenderPass({
         colorAttachments: [{
@@ -6538,72 +6561,87 @@ async function main() {
     // ── Pass 13: Bloom Post-Processing ──
     if (bloomActive) {
       const br = bloomResources;
-      // Compute per-mip weights from size slider
-      function smoothstepJS(edge0, edge1, x) {
-        if (edge0 >= edge1) return x >= edge1 ? 1.0 : 0.0;
-        const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
-        return t * t * (3 - 2 * t);
+
+      // Only rewrite bloom uniform buffers when params actually change
+      const needsBloomWrite = bloomParamsDirty ||
+        state.bloomThreshold !== lastBloomThreshold ||
+        state.bloomRadius !== lastBloomRadius ||
+        state.bloomIntensity !== lastBloomIntensity;
+
+      if (needsBloomWrite) {
+        // Downsample params
+        let srcW = canvas.width, srcH = canvas.height;
+        for (let i = 0; i < BLOOM_MIPS; i++) {
+          const dstW = Math.max(1, srcW >> 1);
+          const dstH = Math.max(1, srcH >> 1);
+          bloomParamData[0] = 1.0 / srcW;
+          bloomParamData[1] = 1.0 / srcH;
+          bloomParamData[2] = state.bloomThreshold;
+          bloomParamData[3] = state.bloomThreshold * 0.5;
+          bloomParamData[4] = 0;
+          bloomParamData[5] = 0;
+          bloomParamData[6] = i === 0 ? 1.0 : 0.0;
+          bloomParamData[7] = 0;
+          device.queue.writeBuffer(bloomParamBufs[i], 0, bloomParamData);
+          srcW = dstW;
+          srcH = dstH;
+        }
+
+        // Upsample params
+        for (let i = 0; i < BLOOM_MIPS - 1; i++) {
+          const mipIdx = BLOOM_MIPS - 2 - i;
+          const lowerW = i === 0 ? br.bloomDown[BLOOM_MIPS - 1].width : br.bloomUp[mipIdx + 1].width;
+          const lowerH = i === 0 ? br.bloomDown[BLOOM_MIPS - 1].height : br.bloomUp[mipIdx + 1].height;
+          const radiusNorm = Math.min(state.bloomRadius / 10.0, 1.0);
+          const depth = (BLOOM_MIPS - 2 - i) / (BLOOM_MIPS - 2);
+          const mipWeight = Math.pow(radiusNorm, 1.0 + depth * 2.0);
+          bloomParamData[0] = 1.0 / lowerW;
+          bloomParamData[1] = 1.0 / lowerH;
+          bloomParamData[2] = 0;
+          bloomParamData[3] = 0;
+          bloomParamData[4] = 0;
+          bloomParamData[5] = mipWeight;
+          bloomParamData[6] = 0;
+          bloomParamData[7] = 0;
+          device.queue.writeBuffer(bloomParamBufs[BLOOM_MIPS + i], 0, bloomParamData);
+        }
+
+        bloomCompositeData[0] = state.bloomIntensity;
+        device.queue.writeBuffer(bloomCompositeUB, 0, bloomCompositeData);
+
+        lastBloomThreshold = state.bloomThreshold;
+        lastBloomRadius = state.bloomRadius;
+        lastBloomIntensity = state.bloomIntensity;
+        bloomParamsDirty = false;
       }
 
       // Downsample chain (5 passes)
-      let srcW = canvas.width, srcH = canvas.height;
-      for (let i = 0; i < BLOOM_MIPS; i++) {
-        const dstW = Math.max(1, srcW >> 1);
-        const dstH = Math.max(1, srcH >> 1);
-        bloomParamData[0] = 1.0 / srcW;  // texelSize.x (of source)
-        bloomParamData[1] = 1.0 / srcH;  // texelSize.y
-        bloomParamData[2] = state.bloomThreshold;
-        bloomParamData[3] = state.bloomThreshold * 0.5; // knee
-        bloomParamData[4] = 0; // unused in downsample
-        bloomParamData[5] = 0; // unused
-        bloomParamData[6] = i === 0 ? 1.0 : 0.0; // flags: threshold on first pass only
-        bloomParamData[7] = 0;
-        device.queue.writeBuffer(bloomParamBufs[i], 0, bloomParamData);
-
-        const p = enc.beginComputePass();
-        p.setPipeline(bloomDownPipe);
-        p.setBindGroup(0, br.downBGs[i]);
-        p.dispatchWorkgroups(Math.ceil(dstW / 8), Math.ceil(dstH / 8));
-        p.end();
-
-        srcW = dstW;
-        srcH = dstH;
+      {
+        let srcW = canvas.width, srcH = canvas.height;
+        for (let i = 0; i < BLOOM_MIPS; i++) {
+          const dstW = Math.max(1, srcW >> 1);
+          const dstH = Math.max(1, srcH >> 1);
+          const p = enc.beginComputePass();
+          p.setPipeline(bloomDownPipe);
+          p.setBindGroup(0, br.downBGs[i]);
+          p.dispatchWorkgroups(Math.ceil(dstW / 8), Math.ceil(dstH / 8));
+          p.end();
+          srcW = dstW;
+          srcH = dstH;
+        }
       }
 
       // Upsample chain (4 passes)
       for (let i = 0; i < BLOOM_MIPS - 1; i++) {
-        const mipIdx = BLOOM_MIPS - 2 - i; // 3, 2, 1, 0
+        const mipIdx = BLOOM_MIPS - 2 - i;
         const dstW = br.bloomUp[mipIdx].width;
         const dstH = br.bloomUp[mipIdx].height;
-        // texelSize of the lower (source) mip
-        const lowerW = i === 0 ? br.bloomDown[BLOOM_MIPS - 1].width : br.bloomUp[mipIdx + 1].width;
-        const lowerH = i === 0 ? br.bloomDown[BLOOM_MIPS - 1].height : br.bloomUp[mipIdx + 1].height;
-        const radiusNorm = Math.min(state.bloomRadius / 10.0, 1.0);
-        // Coarser passes (low i) need higher radius to activate
-        // depth: 0 for finest pass, 1 for coarsest pass
-        const depth = (BLOOM_MIPS - 2 - i) / (BLOOM_MIPS - 2);
-        const mipWeight = Math.pow(radiusNorm, 1.0 + depth * 2.0);
-
-        bloomParamData[0] = 1.0 / lowerW;
-        bloomParamData[1] = 1.0 / lowerH;
-        bloomParamData[2] = 0;
-        bloomParamData[3] = 0;
-        bloomParamData[4] = 0;
-        bloomParamData[5] = mipWeight;
-        bloomParamData[6] = 0;
-        bloomParamData[7] = 0;
-        device.queue.writeBuffer(bloomParamBufs[BLOOM_MIPS + i], 0, bloomParamData);
-
         const p = enc.beginComputePass();
         p.setPipeline(bloomUpPipe);
         p.setBindGroup(0, br.upBGs[i]);
         p.dispatchWorkgroups(Math.ceil(dstW / 8), Math.ceil(dstH / 8));
         p.end();
       }
-
-      // Composite: sceneTex + bloomUp[0] → canvasView
-      bloomCompositeData[0] = state.bloomIntensity;
-      device.queue.writeBuffer(bloomCompositeUB, 0, bloomCompositeData);
       {
         const rp = enc.beginRenderPass({
           colorAttachments: [{
