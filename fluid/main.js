@@ -153,6 +153,22 @@ const FACE_IDX = {
   rightEye: [263, 387, 385, 362, 380, 373],
   nose: [1, 4, 6, 168, 195, 5, 98, 327],
   cheeks: [50, 123, 117, 346, 352, 280],
+  fill: [
+    // Forehead
+    151, 9, 8, 108, 337, 69, 299,
+    // Between brows / eyes
+    168, 6, 197, 195,
+    // Nose sides
+    45, 275, 48, 278, 2,
+    // Upper cheeks
+    116, 345, 36, 266, 205, 425,
+    // Lower cheeks
+    187, 411, 147, 376,
+    // Nasolabial / philtrum
+    164, 393, 167, 391,
+    // Chin area
+    18, 200, 175, 208, 428, 171, 396,
+  ],
 };
 
 function uniqueIndices(...groups) {
@@ -177,7 +193,8 @@ const FACE_DENSE_INDICES = uniqueIndices(
   FACE_IDX.leftBrow,
   FACE_IDX.rightBrow,
   FACE_IDX.nose,
-  FACE_IDX.cheeks
+  FACE_IDX.cheeks,
+  FACE_IDX.fill
 );
 
 // Precomputed interior fill indices: all 478 MediaPipe landmarks minus edge/rim features.
