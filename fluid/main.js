@@ -32,6 +32,7 @@ const state = {
   particleCount: 4194304,   // 4M default
   particleSize: 0.9,
   glitterCap: 1.0,       // per-tile particle budget scale (0=minimal, 1=200/tile)
+  streakGlow: 2.0,       // density-based brightness boost for particles in dense flows
   sphereMode: 0,         // 0=off, 1=on (planet-like shading)
   shadowExtend: 0.5,     // 0=hard shadow, 1=no shadow
   sphereSize: 1.0,       // visual sphere size multiplier (0.5-2.0)
@@ -1543,6 +1544,7 @@ struct PParams {
   extra: vec4f,
   extra2: vec4f,
   extra3: vec4f,
+  extra4: vec4f,
 };
 @group(0) @binding(5) var<uniform> pp: PParams;
 @group(0) @binding(6) var<storage, read_write> colors: array<vec4f>;
@@ -1762,7 +1764,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
   let glintBoost = ${hdr ? '4.0' : '1.0'};
   // Density boost: particles in concentrated dye flows glow brighter (sinewy streaks)
-  let densityBoost = 1.0 + smoothstep(0.2, 0.8, intensity) * 2.0;
+  let densityBoost = 1.0 + smoothstep(0.2, 0.8, intensity) * pp.extra4.x;
   let brightness = (glint * pp.screen.w * glintBoost + ambient) * densityBoost;
   colors[idx] = vec4f(tint * brightness * fluidGate, brightness * fluidGate);
 }
@@ -1789,6 +1791,7 @@ struct PParams {
   extra: vec4f,
   extra2: vec4f,
   extra3: vec4f,
+  extra4: vec4f,
 };
 @group(0) @binding(1) var<uniform> pp: PParams;
 @group(0) @binding(2) var<storage, read> colors: array<vec4f>;
@@ -1864,6 +1867,7 @@ struct PParams {
   extra: vec4f,
   extra2: vec4f,
   extra3: vec4f,
+  extra4: vec4f,
 };
 @group(0) @binding(1) var<uniform> pp: PParams;
 
@@ -3216,9 +3220,9 @@ async function main() {
   // ─── Split screen uniforms: particle UB + display UB ───────────────────
   // particleUB: [width, height, particleSize, glintBrightness, prismaticAmount, glitR, glitG, glitB, accentGlitR, accentGlitG, accentGlitB, colorBlend, sizeRandomness, pad, pad, pad]
   const particleUB = device.createBuffer({
-    size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const particleUBData = new Float32Array(16);
+  const particleUBData = new Float32Array(20);
 
   // displayUB: [width, height, time, sheenStrength, baseR, baseG, baseB, hdrHeadroom, accentR, accentG, accentB, colorBlend, sheenR, sheenG, sheenB, metallic, tipR, tipG, tipB, roughness, symmetryBehavior, tempColorShift, colormapMode, colorSource, colorMapRange, pad, pad, pad]
   const displayUB = device.createBuffer({
@@ -3701,10 +3705,7 @@ async function main() {
     lastCompW = w;
     lastCompH = h;
     const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
-    // Render particles at half resolution to reduce fill-rate cost (4x fewer blend ops)
-    const halfW = Math.max(1, w >> 1);
-    const halfH = Math.max(1, h >> 1);
-    particleRT = device.createTexture({ label: 'particleRT', size: [halfW, halfH], format: canvasFmt, usage });
+    particleRT = device.createTexture({ label: 'particleRT', size: [w, h], format: canvasFmt, usage });
     particleRTView = particleRT.createView();
     sceneRT = device.createTexture({ label: 'sceneRT', size: [w, h], format: canvasFmt, usage });
     sceneRTView = sceneRT.createView();
@@ -6245,6 +6246,7 @@ async function main() {
     particleUBData[13] = _oklabOut[0];
     particleUBData[14] = _oklabOut[1];
     particleUBData[15] = _oklabOut[2];
+    particleUBData[16] = state.streakGlow;
     device.queue.writeBuffer(particleUB, 0, particleUBData);
 
     displayUBData[0] = canvas.width;
@@ -7190,6 +7192,7 @@ async function main() {
   wireSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
   wireSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
   wireSlider('glitterCap', 'glitterCap', v => v.toFixed(2));
+  wireSlider('streakGlow', 'streakGlow', v => v.toFixed(1));
   wireSelect('sphereMode', 'sphereMode', () => {
     const on = state.sphereMode > 0;
     document.querySelectorAll('.sphere-setting').forEach(el => el.style.display = on ? '' : 'none');
@@ -7338,6 +7341,7 @@ async function main() {
     syncSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
     syncSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
     syncSlider('glitterCap', 'glitterCap', v => v.toFixed(2));
+    syncSlider('streakGlow', 'streakGlow', v => v.toFixed(1));
     { const sel = document.getElementById('sphereMode'); if (sel) sel.value = String(Math.round(state.sphereMode || 0)); }
     syncSlider('shadowExtend', 'shadowExtend');
     syncSlider('sphereSize', 'sphereSize');
