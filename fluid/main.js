@@ -97,8 +97,7 @@ const state = {
   paletteIndex: -1,
   colormapMode: 0,     // 0=palette gradient, 1=viridis, 2=inferno, 3=plasma, 4=magma
   colorSource: 0,      // 0=density, 1=velocity, 2=pressure, 3=vorticity
-  colorMapLow: 0.0,    // normalized floor (0 = include everything)
-  colorMapHigh: 1.0,   // normalized ceiling (1 = full range)
+  colorGain: 0.5,      // 0-1 slider, 0.5 = 1x gain, log-scale multiplier
   // Face effector
   faceEffectorMode: 1,
   faceDyeContribution: 1.1,
@@ -2032,7 +2031,7 @@ struct DisplayUniforms {
   sheenColor: vec4f,  // xyz=sheenColor RGB, w=metallic
   tipColor: vec4f,    // xyz=tipColor RGB, w=roughness
   tempParams: vec4f,  // x=symmetryFlag, y=tempColorShift, z=colormapMode, w=colorSource
-  cmapParams: vec4f,  // x=colorMapLow, y=colorMapHigh
+  cmapParams: vec4f,  // x=colorGain
 };
 @group(0) @binding(2) var<uniform> du: DisplayUniforms;
 @group(0) @binding(3) var tempTex: texture_2d<f32>;
@@ -2139,32 +2138,28 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 
   // Color source selection
   let colorSource = i32(du.tempParams.w);
-  let mapLow = du.cmapParams.x;
-  let mapHigh = du.cmapParams.y;
+  let gainSlider = du.cmapParams.x;
   let texel = vec2f(1.0 / 512.0);
 
-  // Each source is pre-normalized to roughly the same 0-2 range as density's intensity.
-  // Map Low/High then window into this normalized range (simple linear, no log).
-  var sourceVal = intensity;
+  // Gain controls the normalization divisor for vel/press/curl only.
+  // Slider 0.5 = default. Left = larger divisor (tames peaks). Right = smaller (brightens).
+  let gainMul = pow(10.0, (0.5 - gainSlider) * 4.0);
+  var sourceVal = intensity; // density default — gain does NOT apply to density
   if (colorSource == 1) {
     let vel = textureSampleLevel(velTex, samp, uv, 0.0).rg;
-    sourceVal = length(vel) / 100.0;
+    sourceVal = length(vel) / (100.0 * gainMul);
   } else if (colorSource == 2) {
     let press = textureSampleLevel(pressTex, samp, uv, 0.0).r;
-    sourceVal = abs(press) / 100.0;
+    sourceVal = abs(press) / (100.0 * gainMul);
   } else if (colorSource == 3) {
     let c0v = textureSampleLevel(curlTex, samp, uv, 0.0).r;
     let c1v = textureSampleLevel(curlTex, samp, uv + vec2f(texel.x, 0.0), 0.0).r;
     let c2v = textureSampleLevel(curlTex, samp, uv - vec2f(texel.x, 0.0), 0.0).r;
     let c3v = textureSampleLevel(curlTex, samp, uv + vec2f(0.0, texel.y), 0.0).r;
     let c4v = textureSampleLevel(curlTex, samp, uv - vec2f(0.0, texel.y), 0.0).r;
-    sourceVal = abs((c0v * 2.0 + c1v + c2v + c3v + c4v) / 6.0) / 50.0;
+    sourceVal = abs((c0v * 2.0 + c1v + c2v + c3v + c4v) / 6.0) / (50.0 * gainMul);
   }
-  // Map Low/High: at defaults (low=0, high=1) this is identity (mappedVal = sourceVal).
-  // Lowering mapHigh brightens (compresses range). Raising mapLow cuts background.
-  let hi = max(mapHigh, 0.001);
-  let lo = mapLow * hi;
-  var mappedVal = clamp((sourceVal - lo) / (hi - lo), 0.0, 2.0);
+  var mappedVal = clamp(sourceVal, 0.0, 2.0);
 
   // Colormap mode selection
   let cmapMode = i32(du.tempParams.z);
@@ -2191,15 +2186,20 @@ ${hdr ? `    // HDR: slight boost at bright end for glow
     let t2 = min(densityT * 2.0, 1.0);
     let t3 = max(densityT * 2.0 - 1.0, 0.0);
     let fluidCol = oklabToLinear(mix(mix(okAccent, okBase, t2), okTip, t3));
-    color = fluidCol * palVal * ${hdr ? '0.5' : '0.25'};
+    if (colorSource > 0) {
+      // Non-density: brightness from gradient position so gain controls range, not opacity
+      color = fluidCol * max(densityT, 0.05) * ${hdr ? '0.5' : '0.25'};
+    } else {
+      // Density: original behavior — brightness = raw intensity
+      color = fluidCol * palVal * ${hdr ? '0.5' : '0.25'};
+    }
   }
 
-  // Surface gradient for multi-lobe metallic sheen (clamp samples to sphere)
+  // Surface gradient for multi-lobe metallic sheen (always from dye — physical surface effect)
   let uvL = uv - vec2f(texel.x * 2.0, 0.0);
   let uvR = uv + vec2f(texel.x * 2.0, 0.0);
   let uvB = uv - vec2f(0.0, texel.y * 2.0);
   let uvT = uv + vec2f(0.0, texel.y * 2.0);
-  // If any sample is outside sphere, use center value instead
   let cVal = dot(raw, vec3f(0.3, 0.6, 0.1));
   let iL = select(cVal, dot(textureSampleLevel(dyeTex, samp, uvL, 0.0).rgb, vec3f(0.3, 0.6, 0.1)), length(uvL - vec2f(0.5)) < screenRadius);
   let iR = select(cVal, dot(textureSampleLevel(dyeTex, samp, uvR, 0.0).rgb, vec3f(0.3, 0.6, 0.1)), length(uvR - vec2f(0.5)) < screenRadius);
@@ -6114,8 +6114,8 @@ async function main() {
     displayUBData[22] = Math.round(state.colormapMode || 0);
     displayUBData[23] = Math.round(state.colorSource || 0);
     // cmapParams vec4f
-    displayUBData[24] = state.colorMapLow ?? 0.0;
-    displayUBData[25] = state.colorMapHigh ?? 0.5;
+    displayUBData[24] = state.colorGain ?? 0.5;
+    displayUBData[25] = 0.0; // unused
     displayUBData[26] = 0;
     displayUBData[27] = 0;
     device.queue.writeBuffer(displayUB, 0, displayUBData);
@@ -6981,8 +6981,7 @@ async function main() {
     const srcSel = document.getElementById('colorSource');
     if (srcSel) srcSel.addEventListener('change', () => { state.colorSource = parseInt(srcSel.value); });
   }
-  wireSlider('colorMapLow', 'colorMapLow');
-  wireSlider('colorMapHigh', 'colorMapHigh');
+  wireSlider('colorGain', 'colorGain');
   wireSlider('bloomIntensity', 'bloomIntensity', v => v.toFixed(2));
   wireSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
   wireSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
@@ -7109,8 +7108,7 @@ async function main() {
       const srcSel = document.getElementById('colorSource');
       if (srcSel) srcSel.value = String(Math.round(state.colorSource || 0));
     }
-    syncSlider('colorMapLow', 'colorMapLow');
-    syncSlider('colorMapHigh', 'colorMapHigh');
+    syncSlider('colorGain', 'colorGain');
     syncColor('baseColor', 'baseColor');
     syncColor('accentColor', 'accentColor');
     syncColor('glitterColor', 'glitterColor');
@@ -7258,8 +7256,7 @@ async function main() {
     paletteIndex: { min: -1, max: 49, step: 1 },
     colormapMode: { min: 0, max: 4, step: 1 },
     colorSource: { min: 0, max: 3, step: 1 },
-    colorMapLow: { min: 0, max: 1, step: 0.001 },
-    colorMapHigh: { min: 0.001, max: 1, step: 0.001 },
+    colorGain: { min: 0, max: 1, step: 0.01 },
   };
   const morphColors = ['baseColor', 'accentColor', 'tipColor', 'glitterColor', 'glitterAccent', 'glitterTip', 'sheenColor'];
 
