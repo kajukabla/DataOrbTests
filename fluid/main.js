@@ -102,7 +102,7 @@ const state = {
   moodSpeed: 0.3,
   // Palette
   paletteIndex: -1,
-  colormapMode: 0,     // 0=palette gradient, 1=viridis, 2=inferno, 3=plasma, 4=magma
+  colormapMode: 0,     // 0=palette gradient, 1=viridis, 2=inferno, 3=plasma, 4=magma, 5=rainbow HDR, 6=rainbow HDR inv
   colorSource: 0,      // 0=density, 1=velocity, 2=pressure, 3=vorticity
   colorGain: 0.5,      // 0-1 slider, 0.5 = 1x gain, log-scale multiplier
   // Face effector
@@ -2164,10 +2164,21 @@ fn cmapMagma(t: f32) -> vec3f {
   return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
 }
 
+fn cmapRainbow(t: f32) -> vec3f {
+  // Full saturated hue rotation: red→yellow→green→cyan→blue→magenta→red
+  let h = t * 6.0;
+  let r = clamp(abs(h - 3.0) - 1.0, 0.0, 1.0);
+  let g = clamp(2.0 - abs(h - 2.0), 0.0, 1.0);
+  let b = clamp(2.0 - abs(h - 4.0), 0.0, 1.0);
+  return vec3f(r, g, b);
+}
+
 fn evalColormap(t: f32, mode: i32) -> vec3f {
   if (mode == 1) { return cmapViridis(t); }
   else if (mode == 2) { return cmapInferno(t); }
   else if (mode == 3) { return cmapPlasma(t); }
+  else if (mode == 5) { return cmapRainbow(t); }
+  else if (mode == 6) { return cmapRainbow(1.0 - t); }
   else { return cmapMagma(t); }
 }
 
@@ -2236,7 +2247,8 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     // Fade to black where there's no fluid data — colormaps map 0 to non-black colors
     // (e.g. viridis→purple, plasma→blue). Use dye intensity as data presence proxy.
     let dataPresence = smoothstep(0.0, 0.015, intensity);
-${hdr ? `    color = cmapLinear * bloom * dataPresence * (1.0 + 0.5 * cmapT * cmapT);` :
+${hdr ? `    let hdrBoost = select(1.0 + 0.5 * cmapT * cmapT, 1.0 + 1.5 * cmapT, cmapMode >= 5);
+    color = cmapLinear * bloom * dataPresence * hdrBoost;` :
 `    color = cmapLinear * bloom * dataPresence;`}
   } else {
     // Palette gradient path (existing Oklab behavior)
@@ -7515,7 +7527,7 @@ async function main() {
     moodAmount: { min: 0, max: 1, step: 0.01 },
     moodSpeed: { min: 0, max: 1, step: 0.01 },
     paletteIndex: { min: -1, max: 49, step: 1 },
-    colormapMode: { min: 0, max: 4, step: 1 },
+    colormapMode: { min: 0, max: 6, step: 1 },
     colorSource: { min: 0, max: 3, step: 1 },
     colorGain: { min: 0, max: 1, step: 0.01 },
   };

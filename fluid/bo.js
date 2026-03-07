@@ -89,7 +89,7 @@ export const SLIDER_SPACE = {
   // Face tracking
   faceEffectorMode:  { min: 0, max: 1, step: 1    },
   // Transfer function
-  colormapMode:      { min: 0, max: 4, step: 1    },
+  colormapMode:      { min: 0, max: 6, step: 1    },
   colorSource:       { min: 0, max: 3, step: 1    },
   colorGain:         { min: 0, max: 1, step: 0.01 },
   // Particle overdraw cap
