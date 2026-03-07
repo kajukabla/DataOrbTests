@@ -1472,6 +1472,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 `;
 }
 
+const MAX_VISIBLE_PARTICLES = 2097152; // 2M cap — prevents overdraw stalls at high counts
 const particleFinalizeShader = /* wgsl */`
 @group(0) @binding(0) var<storage, read_write> counter: atomic<u32>;
 @group(0) @binding(1) var<storage, read_write> drawArgs: array<u32>;
@@ -1479,7 +1480,7 @@ const particleFinalizeShader = /* wgsl */`
 @compute @workgroup_size(1)
 fn main() {
   drawArgs[0] = 4u;
-  drawArgs[1] = atomicLoad(&counter);
+  drawArgs[1] = min(atomicLoad(&counter), ${MAX_VISIBLE_PARTICLES}u);
   drawArgs[2] = 0u;
   drawArgs[3] = 0u;
 }
@@ -1843,21 +1844,7 @@ struct FSIn {
 
 @fragment
 fn main(in: FSIn) -> @location(0) vec4f {
-  // Sphere mask (safety for large particle sizes)
-  let screenSize = pp.screen.xy;
-  let aspect = screenSize.x / screenSize.y;
-  let rawUV = vec2f(in.fragPos.x, screenSize.y - in.fragPos.y) / screenSize;
-  // Convert to simulation UV (1:1 square)
-  let uv = vec2f(
-    (rawUV.x - 0.5) * max(aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5,
-    (rawUV.y - 0.5) * max(1.0 / aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5
-  );
-  let centered = uv - vec2f(0.5, 0.5);
-  let sphereDist = length(centered);
-  let sphereRadius = ${VISIBLE_SPHERE_RADIUS};
-  if (sphereDist > sphereRadius) { discard; }
-
-  // Circular cutout + soft edge
+  // Circular cutout + soft edge (sphere culling already done in compact shader)
   let d = length(in.localUV - vec2f(0.5));
   if (d > 0.5) { discard; }
   let edge = 1.0 - smoothstep(0.3, 0.5, d);
@@ -2144,7 +2131,7 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // Gain controls the normalization divisor for vel/press/curl only.
   // Slider 0.5 = default. Left = larger divisor (tames peaks). Right = smaller (brightens).
   let gainMul = pow(10.0, (0.5 - gainSlider) * 4.0);
-  var sourceVal = intensity; // density default — gain does NOT apply to density
+  var sourceVal = intensity / gainMul; // density default — gain applies for colormaps
   if (colorSource == 1) {
     let vel = textureSampleLevel(velTex, samp, uv, 0.0).rg;
     sourceVal = length(vel) / (100.0 * gainMul);
@@ -2159,20 +2146,24 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let c4v = textureSampleLevel(curlTex, samp, uv - vec2f(0.0, texel.y), 0.0).r;
     sourceVal = abs((c0v * 2.0 + c1v + c2v + c3v + c4v) / 6.0) / (50.0 * gainMul);
   }
-  var mappedVal = clamp(sourceVal, 0.0, 2.0);
+  var mappedVal = max(sourceVal, 0.0);
 
   // Colormap mode selection
   let cmapMode = i32(du.tempParams.z);
   var color = vec3f(0.0);
 
   if (cmapMode > 0) {
-    // Scientific colormap path — colormap output IS the color (it encodes brightness)
-    let cmapSrgb = evalColormap(mappedVal, cmapMode);
-    // sRGB → linear
+    // Clamp colormap input to [0,1] — polynomials produce garbage outside this range.
+    // For values > 1, bloom the top color brighter instead of clipping.
+    let cmapT = min(mappedVal, 1.0);
+    let cmapSrgb = evalColormap(cmapT, cmapMode);
     let cmapLinear = pow(cmapSrgb, vec3f(2.2));
-${hdr ? `    // HDR: slight boost at bright end for glow
-    color = cmapLinear * (1.0 + 0.5 * mappedVal * mappedVal);` :
-`    color = cmapLinear;`}
+    let bloom = 1.0 + max(mappedVal - 1.0, 0.0);
+    // Fade to black where there's no fluid data — colormaps map 0 to non-black colors
+    // (e.g. viridis→purple, plasma→blue). Use dye intensity as data presence proxy.
+    let dataPresence = smoothstep(0.0, 0.015, intensity);
+${hdr ? `    color = cmapLinear * bloom * dataPresence * (1.0 + 0.5 * cmapT * cmapT);` :
+`    color = cmapLinear * bloom * dataPresence;`}
   } else {
     // Palette gradient path (existing Oklab behavior)
     let palVal = mappedVal;
@@ -2190,8 +2181,12 @@ ${hdr ? `    // HDR: slight boost at bright end for glow
       // Non-density: brightness from gradient position so gain controls range, not opacity
       color = fluidCol * max(densityT, 0.05) * ${hdr ? '0.5' : '0.25'};
     } else {
-      // Density: original behavior — brightness = raw intensity
-      color = fluidCol * palVal * ${hdr ? '0.5' : '0.25'};
+      // Density: original behavior — use raw intensity (unaffected by gain)
+      let densB = smoothstep(lo, hi, intensity);
+      let dT2 = min(densB * 2.0, 1.0);
+      let dT3 = max(densB * 2.0 - 1.0, 0.0);
+      let densCol = oklabToLinear(mix(mix(okAccent, okBase, dT2), okTip, dT3));
+      color = densCol * intensity * ${hdr ? '0.5' : '0.25'};
     }
   }
 
@@ -7121,6 +7116,13 @@ async function main() {
     syncSlider('bloomIntensity', 'bloomIntensity', v => v.toFixed(2));
     syncSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
     syncSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
+    // Start/stop face tracking to match preset
+    if ((state.faceEffectorMode > 0 || state.faceDebugMode > 0) && !faceTracking.enabled && !faceTracking.initializing) {
+      startFaceTracking();
+    } else if (state.faceEffectorMode <= 0 && state.faceDebugMode <= 0 && (faceTracking.enabled || faceTracking.initializing)) {
+      stopFaceTracking(true);
+      setFaceStatus('Face tracking idle');
+    }
   }
 
   // ─── Randomize helpers ────────────────────────────────────────────────
@@ -7526,6 +7528,14 @@ async function main() {
       stepPreset(-1);
     }
   });
+
+  // Load FlameGlitter preset on startup
+  const flameGlitterIdx = bo.examples.findIndex(e => e.name === 'FlameGlitter');
+  if (flameGlitterIdx >= 0) {
+    currentPresetIdx = flameGlitterIdx;
+    bo.loadExample(bo.examples[flameGlitterIdx], state, syncAllUI);
+    if (presetNameEl) presetNameEl.textContent = bo.examples[flameGlitterIdx].name;
+  }
 
   loadStatus.textContent = 'Starting simulation...';
   // Ensure we have a non-zero drawable size before first frame submission.

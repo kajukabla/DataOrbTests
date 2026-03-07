@@ -82,6 +82,16 @@ export const SLIDER_SPACE = {
   sheenColor_0:      { min: 0, max: 1, step: 0.01 },
   sheenColor_1:      { min: 0, max: 1, step: 0.01 },
   sheenColor_2:      { min: 0, max: 1, step: 0.01 },
+  // Bloom
+  bloomIntensity:    { min: 0, max: 1, step: 0.01 },
+  bloomThreshold:    { min: 0, max: 2, step: 0.01 },
+  bloomRadius:       { min: 0, max: 1, step: 0.01 },
+  // Face tracking
+  faceEffectorMode:  { min: 0, max: 1, step: 1    },
+  // Transfer function
+  colormapMode:      { min: 0, max: 4, step: 1    },
+  colorSource:       { min: 0, max: 3, step: 1    },
+  colorGain:         { min: 0, max: 1, step: 0.01 },
 };
 
 export const SLIDER_KEYS = Object.keys(SLIDER_SPACE);
