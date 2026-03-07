@@ -3671,6 +3671,7 @@ async function main() {
   let sceneRT = null;      // display (fluid) rendered here
   let sceneRTView = null;
   let lastCompW = 0, lastCompH = 0;
+  let cachedCompositeBG = null;
 
   function ensureCompositeTex(w, h) {
     if (particleRT && lastCompW === w && lastCompH === h) return;
@@ -3683,6 +3684,15 @@ async function main() {
     particleRTView = particleRT.createView();
     sceneRT = device.createTexture({ label: 'sceneRT', size: [w, h], format: canvasFmt, usage });
     sceneRTView = sceneRT.createView();
+    cachedCompositeBG = device.createBindGroup({
+      layout: particleCompositeBGL,
+      entries: [
+        { binding: 0, resource: sceneRTView },
+        { binding: 1, resource: particleRTView },
+        { binding: 2, resource: linearSampler },
+        { binding: 3, resource: { buffer: particleCapUB } },
+      ],
+    });
   }
 
   // ─── Bind group helpers ─────────────────────────────────────────────────
@@ -4031,13 +4041,17 @@ async function main() {
   ];
   // display: reads dye[cur], temp[cur], vel[cur], press[cur], curlTex
   // Built dynamically per-frame since vel/press also flip
-  function makeDisplayBG() {
-    const dyeT = dyeFlip ? dyeB : dyeA;
-    const tempT = tempFlip ? tempB : tempA;
-    const velT = velFlip ? velB : velA;
-    const pressT = pressFlip ? pressB : pressA;
-    return bg(displayBGL, [tview(dyeT), linearSampler, ubuf(displayUB), tview(tempT), tview(velT), tview(pressT), tview(curlTex)]);
-  }
+  // Pre-compute all 16 display bind group variants (2^4 flip states)
+  const displayBGs = [];
+  for (let d = 0; d < 2; d++)
+    for (let t = 0; t < 2; t++)
+      for (let v = 0; v < 2; v++)
+        for (let p = 0; p < 2; p++)
+          displayBGs.push(bg(displayBGL, [
+            tview(d ? dyeB : dyeA), linearSampler, ubuf(displayUB),
+            tview(t ? tempB : tempA), tview(v ? velB : velA),
+            tview(p ? pressB : pressA), tview(curlTex)
+          ]));
   // particleUpdate: reads vel[cur] + dye[cur] + curlTex — 4 variants [velFlip][dyeFlip]
   function makeParticleUpdateBGs(pBuf, cBuf) {
     return [
@@ -6481,7 +6495,7 @@ async function main() {
         }],
       });
       rp.setPipeline(displayPipeline);
-      rp.setBindGroup(0, makeDisplayBG());
+      rp.setBindGroup(0, displayBGs[(dyeFlip << 3) | (tempFlip << 2) | (velFlip << 1) | pressFlip]);
       rp.draw(3);
       rp.end();
     }
@@ -6507,15 +6521,6 @@ async function main() {
       particleCapData[0] = state.glitterCap;
       device.queue.writeBuffer(particleCapUB, 0, particleCapData);
       const compositeTarget = bloomActive ? bloomResources.sceneView : canvasView;
-      const compositeBG = device.createBindGroup({
-        layout: particleCompositeBGL,
-        entries: [
-          { binding: 0, resource: sceneRTView },
-          { binding: 1, resource: particleRTView },
-          { binding: 2, resource: linearSampler },
-          { binding: 3, resource: { buffer: particleCapUB } },
-        ],
-      });
       const rp = enc.beginRenderPass({
         colorAttachments: [{
           view: compositeTarget,
@@ -6525,7 +6530,7 @@ async function main() {
         }],
       });
       rp.setPipeline(particleCompositePipe);
-      rp.setBindGroup(0, compositeBG);
+      rp.setBindGroup(0, cachedCompositeBG);
       rp.draw(3);
       rp.end();
     }
