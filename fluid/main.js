@@ -102,6 +102,9 @@ const state = {
   faceEdgeBoost: 0.9,
   faceFlowCarry: 0.12,
   faceHoleCarve: 0.45,
+  faceEyeOpenSize: 1.0,
+  faceMouthOpenSize: 1.0,
+  faceMouthClosedSize: 1.0,
   faceMouthBoost: 1.0,
   faceMaskDetail: 0.68,
   faceStampSize: 1.35,
@@ -5293,24 +5296,28 @@ async function main() {
       const [lx, ly] = toFaceLocal(x, y, feature.cx, feature.cy);
       return Math.hypot(lx / Math.max(feature.rx, 1e-5), ly / Math.max(feature.ry, 1e-5));
     };
-    const eyeInflate = (0.0028 + (1.0 - detailScale) * 0.0022) * stampSize;
-    const mouthInflate = (0.0017 + (1.0 - detailScale) * 0.0018) * stampSize * (0.5 + mouthDrive * 0.9);
+    const eyeSizeScale = Math.max(0, Math.min(2, state.faceEyeOpenSize ?? 1.0));
+    const mouthOpenScale = Math.max(0, Math.min(2, state.faceMouthOpenSize ?? 1.0));
+    const mouthClosedScale = Math.max(0, Math.min(2, state.faceMouthClosedSize ?? 1.0));
+    const mouthSizeScale = mouthClosedScale + (mouthOpenScale - mouthClosedScale) * mouthDrive;
+    const eyeInflate = (0.0028 + (1.0 - detailScale) * 0.0022) * stampSize * eyeSizeScale;
+    const mouthInflate = (0.0017 + (1.0 - detailScale) * 0.0018) * stampSize * (0.5 + mouthDrive * 0.9) * mouthSizeScale;
     const leftEyeFeature = buildFeatureEllipse(
       FACE_IDX.leftEye,
-      1.4 + eyeLeftOpen * 0.25,
-      1.25 + eyeLeftOpen * 0.55,
+      (1.4 + eyeLeftOpen * 0.25) * eyeSizeScale,
+      (1.25 + eyeLeftOpen * 0.55) * eyeSizeScale,
       eyeInflate
     );
     const rightEyeFeature = buildFeatureEllipse(
       FACE_IDX.rightEye,
-      1.4 + eyeRightOpen * 0.25,
-      1.25 + eyeRightOpen * 0.55,
+      (1.4 + eyeRightOpen * 0.25) * eyeSizeScale,
+      (1.25 + eyeRightOpen * 0.55) * eyeSizeScale,
       eyeInflate
     );
     const mouthFeature = buildFeatureEllipse(
       FACE_IDX.mouthHole,
-      1.35 + smile * 0.12,
-      0.42 + mouthDrive * 0.78,
+      (1.35 + smile * 0.12) * mouthSizeScale,
+      (0.42 + mouthDrive * 0.78) * mouthSizeScale,
       mouthInflate
     );
     const contourSamples = sampleClosedLoop(FACE_IDX.contour, Math.round(42 + detail01 * 118));
@@ -6858,6 +6865,9 @@ async function main() {
   wireSlider('faceEdgeBoost', 'faceEdgeBoost', v => v.toFixed(2));
   wireSlider('faceFlowCarry', 'faceFlowCarry', v => v.toFixed(2));
   wireSlider('faceHoleCarve', 'faceHoleCarve', v => v.toFixed(2));
+  wireSlider('faceEyeOpenSize', 'faceEyeOpenSize', v => v.toFixed(2));
+  wireSlider('faceMouthOpenSize', 'faceMouthOpenSize', v => v.toFixed(2));
+  wireSlider('faceMouthClosedSize', 'faceMouthClosedSize', v => v.toFixed(2));
   wireSlider('faceMouthBoost', 'faceMouthBoost', v => v.toFixed(2));
   wireSlider('faceMaskDetail', 'faceMaskDetail', v => v.toFixed(2));
   wireSlider('faceStampSize', 'faceStampSize', v => v.toFixed(2));
@@ -7012,6 +7022,9 @@ async function main() {
     syncSlider('faceEdgeBoost', 'faceEdgeBoost', v => v.toFixed(2));
     syncSlider('faceFlowCarry', 'faceFlowCarry', v => v.toFixed(2));
     syncSlider('faceHoleCarve', 'faceHoleCarve', v => v.toFixed(2));
+    syncSlider('faceEyeOpenSize', 'faceEyeOpenSize', v => v.toFixed(2));
+    syncSlider('faceMouthOpenSize', 'faceMouthOpenSize', v => v.toFixed(2));
+    syncSlider('faceMouthClosedSize', 'faceMouthClosedSize', v => v.toFixed(2));
     syncSlider('faceMouthBoost', 'faceMouthBoost', v => v.toFixed(2));
     syncSlider('faceMaskDetail', 'faceMaskDetail', v => v.toFixed(2));
     syncSlider('faceStampSize', 'faceStampSize', v => v.toFixed(2));
