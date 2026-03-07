@@ -1761,7 +1761,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   tint *= glitCol;
 
   let glintBoost = ${hdr ? '4.0' : '1.0'};
-  let brightness = glint * pp.screen.w * glintBoost + ambient;
+  // Density boost: particles in concentrated dye flows glow brighter (sinewy streaks)
+  let densityBoost = 1.0 + smoothstep(0.2, 0.8, intensity) * 2.0;
+  let brightness = (glint * pp.screen.w * glintBoost + ambient) * densityBoost;
   colors[idx] = vec4f(tint * brightness * fluidGate, brightness * fluidGate);
 }
 `;
