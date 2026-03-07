@@ -1489,9 +1489,15 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let col = colors[idx];
   if (col.a <= params.brightnessFloor) { return; }
 
-  // Map particle position to tile grid
-  let tileX = clamp(u32(particles[idx].posX * ${TILE_GRID}.0), 0u, ${TILE_GRID - 1}u);
-  let tileY = clamp(u32(particles[idx].posY * ${TILE_GRID}.0), 0u, ${TILE_GRID - 1}u);
+  // Stochastic tile assignment: each particle offsets its grid lookup by ±0.5 tiles
+  // using its stable seed, so tile boundaries are fuzzy (no coherent hard edges)
+  let s = particles[idx].seed;
+  let jx = fract(s * 7.31) - 0.5;
+  let jy = fract(s * 13.17) - 0.5;
+  let fx = particles[idx].posX * ${TILE_GRID}.0 + jx;
+  let fy = particles[idx].posY * ${TILE_GRID}.0 + jy;
+  let tileX = clamp(u32(max(fx, 0.0)), 0u, ${TILE_GRID - 1}u);
+  let tileY = clamp(u32(max(fy, 0.0)), 0u, ${TILE_GRID - 1}u);
   let tileIdx = tileY * ${TILE_GRID}u + tileX;
 
   // Enforce per-tile budget — excess particles are simply not rendered
@@ -7776,12 +7782,12 @@ async function main() {
     }
   });
 
-  // Load FlameGlitter preset on startup
-  const flameGlitterIdx = bo.examples.findIndex(e => e.name === 'FlameGlitter');
-  if (flameGlitterIdx >= 0) {
-    currentPresetIdx = flameGlitterIdx;
-    bo.loadExample(bo.examples[flameGlitterIdx], state, syncAllUI);
-    if (presetNameEl) presetNameEl.textContent = bo.examples[flameGlitterIdx].name;
+  // Load default preset on startup
+  const defaultIdx = bo.examples.findIndex(e => e.name === 'GlitterGooInferno1');
+  if (defaultIdx >= 0) {
+    currentPresetIdx = defaultIdx;
+    bo.loadExample(bo.examples[defaultIdx], state, syncAllUI);
+    if (presetNameEl) presetNameEl.textContent = bo.examples[defaultIdx].name;
   }
 
   loadStatus.textContent = 'Starting simulation...';
