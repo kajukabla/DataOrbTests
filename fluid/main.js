@@ -1775,10 +1775,39 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 const faceMeshInjectDyeShader = /* wgsl */`
 ${commonHeader}
 
+struct FaceDyeParams {
+  color1: vec3f,     // base color
+  dyeScale: f32,
+  color2: vec3f,     // secondary color (hue-shifted)
+  frameTimeScale: f32,
+  color3: vec3f,     // edge/motion color
+  noiseFreq: f32,
+  faceCenterX: f32,
+  faceCenterY: f32,
+  time: f32,
+  noiseSpeed: f32,
+};
+
 @group(0) @binding(1) var faceTex: texture_2d<f32>;
 @group(0) @binding(2) var dyeSrc: texture_2d<f32>;
 @group(0) @binding(3) var dyeDst: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(4) var<uniform> faceDye: array<vec4f, 2>; // [0]=color.rgb+dyeScale, [1].x=frameTimeScale
+@group(0) @binding(4) var<uniform> fd: FaceDyeParams;
+
+fn dhash(p: vec2f) -> f32 {
+  var n = u32(dot(p, vec2f(127.1, 311.7)) * 43758.5453);
+  n = n ^ (n >> 16u); n = n * 0x45d9f3bu; n = n ^ (n >> 16u);
+  return f32(n & 0xFFFFu) / 65535.0;
+}
+fn dnoise(p: vec2f) -> f32 {
+  let i = floor(p); let f = fract(p);
+  let u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(dhash(i), dhash(i + vec2f(1,0)), u.x),
+             mix(dhash(i + vec2f(0,1)), dhash(i + vec2f(1,1)), u.x), u.y);
+}
+fn dfbm(p: vec2f) -> f32 {
+  return dnoise(p) * 0.5 + dnoise(p * 2.13 + vec2f(5.3, 1.7)) * 0.3
+       + dnoise(p * 4.51 + vec2f(2.1, 8.4)) * 0.2;
+}
 
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3u) {
@@ -1798,8 +1827,43 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let vis = max(face.a, 0.0);
     let strength = mask * vis;
     let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS - 0.02, dist);
-    let blend = strength * faceDye[0].w * boundaryFade * faceDye[1].x;
-    dye = vec4f(dye.rgb + faceDye[0].rgb * blend, 1.0);
+
+    let faceCenter = vec2f(fd.faceCenterX, fd.faceCenterY);
+    let toFace = uv - faceCenter;
+    let faceR = length(toFace);
+    let faceAngle = atan2(toFace.y, toFace.x);
+
+    // Noise-based intensity variation (same field as vel noise for coherence)
+    let t = fd.time * fd.noiseSpeed;
+    let nUV = uv * fd.noiseFreq;
+    let n1 = dfbm(nUV + vec2f(t * 0.7, t * 0.3));
+    let n2 = dfbm(nUV * 0.6 + vec2f(-t * 0.4, t * 0.55) + vec2f(33.0, 17.0));
+    let noiseIntensity = 0.3 + n1 * 0.7; // 0.3–1.0 range
+    let noiseHueShift = n2;              // 0–1 for color mixing
+
+    // Radial gradient: stronger at edges of face region
+    let edgeness = smoothstep(0.0, 0.08, faceR);
+
+    // Edge glow: where mask transitions (near voids and face boundary)
+    let maskEdge = smoothstep(0.0, 0.3, mask) * (1.0 - smoothstep(0.7, 1.0, mask));
+    let edgeGlow = maskEdge * 2.0 + edgeness * 0.5;
+
+    // Motion-based brightness: moving face parts glow brighter
+    let faceVel = face.rg;
+    let motionMag = min(length(faceVel) * 40.0, 1.5);
+
+    // Blend between 3 colors based on position, noise, and motion
+    // color1 = base (fills most of face)
+    // color2 = secondary (noise-driven patches)
+    // color3 = edge/motion accent
+    let colorMix = clamp(noiseHueShift * 0.6 + edgeness * 0.3, 0.0, 1.0);
+    let baseColor = mix(fd.color1, fd.color2, colorMix);
+    let finalColor = mix(baseColor, fd.color3, clamp(edgeGlow * 0.3 + motionMag * 0.4, 0.0, 0.6));
+
+    // Combine: noise modulates intensity, motion and edges boost it
+    let intensity = noiseIntensity * (1.0 + motionMag * 1.5 + edgeGlow * 0.6);
+    let blend = strength * fd.dyeScale * boundaryFade * fd.frameTimeScale * intensity;
+    dye = vec4f(dye.rgb + finalColor * blend, 1.0);
   }
   textureStore(dyeDst, id.xy, dye);
 }
@@ -4395,7 +4459,7 @@ async function main() {
     ],
   });
   const faceMeshDyeBuf = device.createBuffer({
-    label: 'faceMeshDye', size: 32,
+    label: 'faceMeshDye', size: 64,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   const faceMeshInjectDyePipe = device.createComputePipeline({
@@ -4411,7 +4475,7 @@ async function main() {
     bg(faceMeshInjectDyeBGL, [ubuf(paramBuf), faceMeshTexView, tview(dyeB), tview(dyeA), ubuf(faceMeshDyeBuf)]),
   ];
   const faceMeshForceData = new Float32Array(8);
-  const faceMeshDyeData = new Float32Array(8);
+  const faceMeshDyeData = new Float32Array(16);
   let faceMeshActive = false;
 
   const compactModule = device.createShaderModule({ code: makeParticleCompactShader(state.particleCount), label: 'particleCompact' });
@@ -6440,12 +6504,25 @@ async function main() {
 
     const blend = faceTracking.blendshapeScores;
     const smile = ((blend?.mouthSmileLeft ?? 0) + (blend?.mouthSmileRight ?? 0)) * 0.5;
-    const fillCol = palette(time * (0.026 + smile * 0.018), 2);
-    faceMeshDyeData[0] = fillCol[0];
-    faceMeshDyeData[1] = fillCol[1];
-    faceMeshDyeData[2] = fillCol[2];
+    const browLift = blend?.browInnerUp ?? 0;
+    // 3 colors from different palette positions for variety
+    const col1 = palette(time * (0.026 + smile * 0.018), 2);
+    const col2 = palette(time * 0.072 + browLift * 0.08, 5);
+    const col3 = palette(time * 0.11 + smile * 0.22, 1);
+    // color1 (base) + dyeScale
+    faceMeshDyeData[0] = col1[0]; faceMeshDyeData[1] = col1[1]; faceMeshDyeData[2] = col1[2];
     faceMeshDyeData[3] = contribution * fillGain;
-    faceMeshDyeData[4] = frameTimeScale;
+    // color2 (secondary) + frameTimeScale
+    faceMeshDyeData[4] = col2[0]; faceMeshDyeData[5] = col2[1]; faceMeshDyeData[6] = col2[2];
+    faceMeshDyeData[7] = frameTimeScale;
+    // color3 (edge/motion) + noiseFreq
+    faceMeshDyeData[8] = col3[0]; faceMeshDyeData[9] = col3[1]; faceMeshDyeData[10] = col3[2];
+    faceMeshDyeData[11] = Math.max(0.1, state.faceMeshNoiseFreq ?? 12.0);
+    // faceCenterX, faceCenterY, time, noiseSpeed
+    faceMeshDyeData[12] = face.centerX;
+    faceMeshDyeData[13] = face.centerY;
+    faceMeshDyeData[14] = time;
+    faceMeshDyeData[15] = Math.max(0, state.faceMeshNoiseSpeed ?? 1.0);
     device.queue.writeBuffer(faceMeshDyeBuf, 0, faceMeshDyeData);
 
     faceMeshActive = true;
