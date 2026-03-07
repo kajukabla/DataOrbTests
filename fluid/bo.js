@@ -93,16 +93,34 @@ export const SLIDER_SPACE = {
   faceMeshNoiseSpeed: { min: 0, max: 5, step: 0.01 },
   faceMeshNoiseDir: { min: 0, max: 1, step: 0.01 },
   faceMouthSimBoost: { min: 0, max: 1, step: 0.01 },
+  faceDyeContribution: { min: 0, max: 2, step: 0.01 },
+  faceDyeFill:       { min: 0, max: 5, step: 0.01 },
+  faceEdgeBoost:     { min: 0, max: 3, step: 0.01 },
+  faceFlowCarry:     { min: 0, max: 1.5, step: 0.01 },
+  faceEyeOpenSize:   { min: 0, max: 2, step: 0.01 },
+  faceMouthOpenSize: { min: 0, max: 2, step: 0.01 },
+  faceMouthClosedSize: { min: 0, max: 2, step: 0.01 },
+  faceMouthBoost:    { min: 0, max: 3, step: 0.01 },
+  faceMaskDetail:    { min: 0.2, max: 1, step: 0.01 },
+  faceStampSize:     { min: 0.5, max: 3, step: 0.01 },
+  faceDebugMode:     { min: 0, max: 2, step: 1    },
+  faceMeshEyeScale:  { min: 0.5, max: 3, step: 0.01 },
   // Transfer function
   colormapMode:      { min: 0, max: 6, step: 1    },
   colorSource:       { min: 0, max: 3, step: 1    },
   colorGain:         { min: 0, max: 1, step: 0.01 },
   colormapCompress:  { min: 0, max: 1, step: 1    },
   // Particle overdraw cap
+  particleCount:     { min: 65536, max: 4194304, step: 65536 },
+  particleSize:      { min: 0.1, max: 4, step: 0.01 },
   glitterCap:        { min: 0.01, max: 3, step: 0.01 },
   streakGlow:        { min: 0, max: 20, step: 0.1 },
   densitySize:       { min: 0, max: 4, step: 0.1 },
   glitterFloor:      { min: 0.001, max: 0.2, step: 0.001 },
+  glintBrightness:   { min: 0, max: 1, step: 0.01 },
+  splatRadius:       { min: 0.0001, max: 0.01, step: 0.0001 },
+  masterSpeed:       { min: 0, max: 1, step: 0.01 },
+  noiseMapping:      { min: 0, max: 1, step: 1    },
   sphereMode:        { min: 0, max: 1, step: 1    },
   shadowExtend:      { min: 0, max: 1, step: 0.01 },
   sphereSize:        { min: 0.5, max: 2, step: 0.01 },
@@ -110,6 +128,68 @@ export const SLIDER_SPACE = {
 
 export const SLIDER_KEYS = Object.keys(SLIDER_SPACE);
 export const D = SLIDER_KEYS.length;
+
+// Sensible defaults for params that shouldn't reset to min when loading old presets
+const SLIDER_DEFAULTS = {
+  particleCount: 4194304,
+  particleSize: 0.9,
+  glitterCap: 1.0,
+  streakGlow: 10.0,
+  densitySize: 1.5,
+  glitterFloor: 0.01,
+  glintBrightness: 0.1,
+  splatRadius: 0.0015,
+  masterSpeed: 1.0,
+  sphereSize: 1.0,
+  shadowExtend: 0.5,
+  simSpeed: 1.0,
+  colorBlend: 0.5,
+  clickSize: 0.5,
+  clickStrength: 0.5,
+  velDissipation: 0.998,
+  dyeDissipation: 0.993,
+  pressureIters: 30,
+  pressureDecay: 0.8,
+  curlStrength: 15,
+  prismaticAmount: 20.0,
+  bloomThreshold: 0.4,
+  bloomRadius: 0.5,
+  colorGain: 0.5,
+  tempBuoyancy: 0.5,
+  tempDissipation: 0.99,
+  moodSpeed: 0.3,
+  faceDyeContribution: 1.1,
+  faceDyeFill: 1.8,
+  faceEdgeBoost: 0.9,
+  faceFlowCarry: 0.12,
+  faceEyeOpenSize: 1.0,
+  faceMouthOpenSize: 1.0,
+  faceMouthClosedSize: 1.0,
+  faceMouthBoost: 1.0,
+  faceMaskDetail: 0.68,
+  faceStampSize: 1.35,
+  faceMeshEyeScale: 1.4,
+  faceMeshNoiseAmount: 0.5,
+  faceMeshNoiseFreq: 12.0,
+  faceMeshNoiseSpeed: 1.0,
+  faceMouthSimBoost: 0.3,
+  noiseWarp: 0.35,
+  noiseSharpness: 0.5,
+  noiseAnisotropy: 0.5,
+  noiseBlend: 0.5,
+  burstForce: 0.8,
+  burstForceRandomness: 0.25,
+  burstDyeIntensity: 1.0,
+  burstSpeed: 0.4,
+  burstTravelSpeed: 1.2,
+  burstDuration: 0.8,
+  burstWidth: 0.35,
+  burstRadialAngle: 45,
+  sheenStrength: 1.5,
+  metallic: 0.3,
+  roughness: 0.4,
+  paletteIndex: -1,
+};
 
 export const COLOR_KEYS = [
   'baseColor', 'accentColor', 'tipColor', 'glitterColor',
@@ -458,10 +538,11 @@ export class BOController {
   }
 
   loadExample(example, state, syncAllUI) {
-    // Reset ALL slider params to defaults before applying preset
+    // Reset ALL slider params to sensible defaults before applying preset
     for (const key of SLIDER_KEYS) {
       const s = SLIDER_SPACE[key];
-      setStateVal(state, key, s.min);
+      const def = SLIDER_DEFAULTS[key];
+      setStateVal(state, key, def !== undefined ? def : s.min);
     }
     // Apply saved preset values
     for (const key of SLIDER_KEYS) {

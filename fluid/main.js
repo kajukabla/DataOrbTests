@@ -119,6 +119,7 @@ const state = {
   faceMaskDetail: 0.68,
   faceStampSize: 1.35,
   faceDebugMode: 0,
+  faceMeshEyeScale: 1.4,
   // Face mesh noise
   faceMeshNoiseAmount: 0.5,
   faceMeshNoiseFreq: 12.0,
@@ -155,8 +156,8 @@ const FACE_IDX = {
   mouthHole: [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415],
   leftBrow: [70, 63, 105, 66, 107],
   rightBrow: [300, 293, 334, 296, 336],
-  leftEye: [33, 160, 158, 133, 153, 144],
-  rightEye: [263, 387, 385, 362, 380, 373],
+  leftEye: [33, 246, 161, 160, 159, 158, 157, 173, 133, 155, 154, 153, 145, 144, 163, 7],
+  rightEye: [263, 466, 388, 387, 386, 385, 384, 398, 362, 382, 381, 380, 374, 373, 390, 249],
   nose: [1, 4, 6, 168, 195, 5, 98, 327],
   cheeks: [50, 123, 117, 346, 352, 280],
   fill: [
@@ -296,9 +297,11 @@ const FACE_MESH_TRIS = new Uint16Array([
 ]);
 const FACE_MESH_VERT_COUNT = 468;
 const FACE_MESH_TRI_COUNT = FACE_MESH_TRIS.length / 3;
-const FACE_MESH_VOID_SET = new Set([
-  ...FACE_IDX.leftEye, ...FACE_IDX.rightEye, ...FACE_IDX.mouthHole,
+const FACE_MESH_OUTLINE_SET = new Set([
+  ...FACE_IDX.leftEye, ...FACE_IDX.rightEye,
+  ...FACE_IDX.mouthHole,
 ]);
+const FACE_MESH_CONTOUR_SET = new Set(FACE_IDX.contour);
 
 function uniqueIndices(...groups) {
   const out = [];
@@ -1823,45 +1826,30 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   var dye = textureLoad(dyeSrc, id.xy, 0);
   let face = textureLoad(faceTex, id.xy, 0);
   let mask = face.b;
+
+  // Only outline vertices (eyes, mouth, face contour) emit dye
   if (mask > 0.01) {
     let vis = max(face.a, 0.0);
     let strength = mask * vis;
     let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS - 0.02, dist);
 
-    let faceCenter = vec2f(fd.faceCenterX, fd.faceCenterY);
-    let toFace = uv - faceCenter;
-    let faceR = length(toFace);
-    let faceAngle = atan2(toFace.y, toFace.x);
-
-    // Noise-based intensity variation (same field as vel noise for coherence)
+    // Noise-based intensity variation
     let t = fd.time * fd.noiseSpeed;
     let nUV = uv * fd.noiseFreq;
     let n1 = dfbm(nUV + vec2f(t * 0.7, t * 0.3));
     let n2 = dfbm(nUV * 0.6 + vec2f(-t * 0.4, t * 0.55) + vec2f(33.0, 17.0));
-    let noiseIntensity = 0.3 + n1 * 0.7; // 0.3–1.0 range
-    let noiseHueShift = n2;              // 0–1 for color mixing
+    let noiseIntensity = 0.3 + n1 * 0.7;
+    let noiseHueShift = n2;
 
-    // Radial gradient: stronger at edges of face region
-    let edgeness = smoothstep(0.0, 0.08, faceR);
+    // Motion brightness
+    let motionMag = min(length(face.rg) * 40.0, 1.5);
 
-    // Edge glow: where mask transitions (near voids and face boundary)
-    let maskEdge = smoothstep(0.0, 0.3, mask) * (1.0 - smoothstep(0.7, 1.0, mask));
-    let edgeGlow = maskEdge * 2.0 + edgeness * 0.5;
-
-    // Motion-based brightness: moving face parts glow brighter
-    let faceVel = face.rg;
-    let motionMag = min(length(faceVel) * 40.0, 1.5);
-
-    // Blend between 3 colors based on position, noise, and motion
-    // color1 = base (fills most of face)
-    // color2 = secondary (noise-driven patches)
-    // color3 = edge/motion accent
-    let colorMix = clamp(noiseHueShift * 0.6 + edgeness * 0.3, 0.0, 1.0);
+    // 3-color blend
+    let colorMix = clamp(noiseHueShift * 0.6 + noiseIntensity * 0.4, 0.0, 1.0);
     let baseColor = mix(fd.color1, fd.color2, colorMix);
-    let finalColor = mix(baseColor, fd.color3, clamp(edgeGlow * 0.3 + motionMag * 0.4, 0.0, 0.6));
+    let finalColor = mix(baseColor, fd.color3, clamp(motionMag * 0.5, 0.0, 0.6));
 
-    // Combine: noise modulates intensity, motion and edges boost it
-    let intensity = noiseIntensity * (1.0 + motionMag * 1.5 + edgeGlow * 0.6);
+    let intensity = noiseIntensity * (1.0 + motionMag * 1.5);
     let blend = strength * fd.dyeScale * boundaryFade * fd.frameTimeScale * intensity;
     dye = vec4f(dye.rgb + finalColor * blend, 1.0);
   }
@@ -6458,9 +6446,32 @@ async function main() {
     }
 
     const invDt = 1.0 / Math.max(dt, 0.001);
+    const eyeScale = Math.max(0.5, Math.min(3, state.faceMeshEyeScale ?? 1.4));
+
+    // Compute eye centers for scaling
+    const eyeCenters = [FACE_IDX.leftEye, FACE_IDX.rightEye].map(eyeIdxs => {
+      let cx = 0, cy = 0, n = 0;
+      for (const idx of eyeIdxs) {
+        if (idx < count) { cx += face.mapped[idx * 2]; cy += face.mapped[idx * 2 + 1]; n++; }
+      }
+      return n > 0 ? { x: cx / n, y: cy / n, set: new Set(eyeIdxs) } : null;
+    }).filter(Boolean);
+
     for (let i = 0; i < count; i++) {
-      const x = face.mapped[i * 2];
-      const y = face.mapped[i * 2 + 1];
+      let x = face.mapped[i * 2];
+      let y = face.mapped[i * 2 + 1];
+
+      // Scale eye vertices outward from eye center
+      if (eyeScale !== 1.0) {
+        for (const ec of eyeCenters) {
+          if (ec.set.has(i)) {
+            x = ec.x + (x - ec.x) * eyeScale;
+            y = ec.y + (y - ec.y) * eyeScale;
+            break;
+          }
+        }
+      }
+
       let vx = 0, vy = 0;
       if (hasPrev) {
         const px = prevMapped[i * 2];
@@ -6470,7 +6481,9 @@ async function main() {
           vy = (y - py) * invDt;
         }
       }
-      const mask = FACE_MESH_VOID_SET.has(i) ? 0.0 : 1.0;
+      const mask = FACE_MESH_CONTOUR_SET.has(i) ? 2.0
+                 : FACE_MESH_OUTLINE_SET.has(i) ? 1.0
+                 : 0.0;
       const v = (vis && Number.isFinite(vis[i])) ? vis[i] : 1.0;
       const off = i * 6;
       faceMeshVertexData[off] = x;
@@ -8675,7 +8688,7 @@ async function main() {
   });
 
   // Load default preset on startup
-  const defaultIdx = bo.examples.findIndex(e => e.name === 'GlitterGooInferno1');
+  const defaultIdx = bo.examples.findIndex(e => e.name === 'face ghost1');
   if (defaultIdx >= 0) {
     currentPresetIdx = defaultIdx;
     bo.loadExample(bo.examples[defaultIdx], state, syncAllUI);
