@@ -5749,6 +5749,10 @@ async function main() {
       mouthInflate
     );
     const contourSamples = sampleClosedLoop(FACE_IDX.contour, Math.round(42 + detail01 * 118));
+    const leftEyeSamples = sampleClosedLoop(FACE_IDX.leftEye, Math.round(12 + detail01 * 20));
+    const rightEyeSamples = sampleClosedLoop(FACE_IDX.rightEye, Math.round(12 + detail01 * 20));
+    const mouthHoleSamples = sampleClosedLoop(FACE_IDX.mouthHole, Math.round(14 + detail01 * 26));
+    const lipSamples = sampleClosedLoop(FACE_IDX.lips, Math.round(18 + detail01 * 30));
     const holeFeather = 0.1 + (1.0 - detailScale) * 0.14;
     const blinkGateL = 1.0 - Math.pow(clamp01(blinkL), 1.2);
     const blinkGateR = 1.0 - Math.pow(clamp01(blinkR), 1.2);
@@ -5772,14 +5776,32 @@ async function main() {
         : false;
       return eyeCutL || eyeCutR || mouthCut;
     };
-    const activeBudget = MAX_SPLATS;
+    const holeMaskAt = (x, y) => {
+      if (holeCarve <= 0.001) return 1.0;
+      const cutFrom = (feature, weight) => {
+        if (!feature || weight <= 0.001) return 0;
+        const q = ellipseQ(feature, x, y);
+        const inner = 1.0 - holeFeather;
+        const t = smooth01((q - inner) / Math.max(holeFeather, 1e-5));
+        return (1.0 - t) * weight;
+      };
+      const cut = Math.max(
+        cutFrom(leftEyeFeature, eyeHoleL),
+        cutFrom(rightEyeFeature, eyeHoleR),
+        cutFrom(mouthFeature, mouthHole)
+      );
+      return clamp01(1.0 - Math.min(1.0, cut * 1.16));
+    };
+    const carveReserve = Math.max(16, Math.min(32, Math.round(30 - detail01 * 14)));
+    const activeBudget = Math.max(0, MAX_SPLATS - carveReserve);
     const anchorBudget = Math.max(1, Math.min(2, activeBudget));
-    const featureBudget = 30; // eye + mouth stamps
-    const edgeBudget = Math.max(12, Math.floor((activeBudget - anchorBudget - featureBudget) * (0.24 + detail01 * 0.03)));
-    const fillBudget = Math.max(16, activeBudget - anchorBudget - featureBudget - edgeBudget);
+    const edgeBudget = Math.max(12, Math.floor(activeBudget * (0.24 + detail01 * 0.03)));
+    const rimBudget = Math.max(9, Math.floor(activeBudget * (0.17 - detail01 * 0.03)));
+    const fillBudget = Math.max(16, activeBudget - anchorBudget - edgeBudget - rimBudget);
     const anchorStageCap = Math.min(MAX_SPLATS, splatCount + anchorBudget);
-    const fillStageCap = Math.min(MAX_SPLATS, anchorStageCap + featureBudget);
+    const fillStageCap = Math.min(MAX_SPLATS, anchorStageCap + fillBudget);
     const edgeStageCap = Math.min(MAX_SPLATS, fillStageCap + edgeBudget);
+    const rimStageCap = Math.min(MAX_SPLATS, edgeStageCap + rimBudget);
     const pickLoopIndex = (sampleLen, i, count) => {
       if (sampleLen <= 0 || count <= 0) return -1;
       return Math.floor((i * sampleLen) / count) % sampleLen;
@@ -5805,41 +5827,31 @@ async function main() {
       );
     }
 
-    // 1) Big feature stamps for eyes and mouth — placed at ellipse positions.
-    const eyeCol = [...palette(modeTime * 0.045 + eyeOpenAvg * 0.15, 3)];
-    const featureStampGain = contribution * fillGain;
-    const addFeatureStamps = (feature, amount, col, radiusMul, openY = 1.0) => {
-      if (!feature || amount <= 0.001 || splatCount >= fillStageCap) return;
-      const stamps = [
-        [0.0, 0.0, 1.0],
-        [0.55, 0.0, 0.85], [-0.55, 0.0, 0.85],
-        [0.0, 0.48, 0.80], [0.0, -0.48, 0.80],
-        [0.38, 0.34, 0.72], [-0.38, 0.34, 0.72],
-        [0.38, -0.34, 0.72], [-0.38, -0.34, 0.72],
-      ];
-      for (let i = 0; i < stamps.length; i++) {
-        if (splatCount >= fillStageCap) break;
-        const s = stamps[i];
-        const lx = s[0] * feature.rx;
-        const ly = s[1] * feature.ry * openY;
-        const [x, y] = toWorldFromLocal(lx, ly, feature.cx, feature.cy);
-        const g = featureStampGain * amount * s[2] * 0.06;
-        const stampR = state.splatRadius * radiusMul * (0.9 + s[2] * 0.5);
-        addFaceSplat(
-          x, y,
-          flowX * 0.3, flowY * 0.3,
-          col[0] * g, col[1] * g, col[2] * g,
-          stampR
-        );
-      }
-    };
-    addFeatureStamps(leftEyeFeature, eyeOpenGateL, eyeCol,
-      (2.8 + stampSize * 0.9) * eyeSizeScale, 0.15 + eyeOpenGateL * 1.05);
-    addFeatureStamps(rightEyeFeature, eyeOpenGateR, eyeCol,
-      (2.8 + stampSize * 0.9) * eyeSizeScale, 0.15 + eyeOpenGateR * 1.05);
-    addFeatureStamps(mouthFeature, 0.15 + mouthDrive * 1.1, mouthCol,
-      (2.5 + stampSize * 0.85 + mouthDrive * 1.1) * mouthSizeScale,
-      (0.18 + mouthDrive * 1.2) * mouthSizeScale);
+    // 1) Landmark-based interior fill — points track the face surface.
+    const fillIndices = FACE_IDX.fill;
+    for (let i = 0; i < fillIndices.length; i++) {
+      if (splatCount >= fillStageCap) break;
+      const idx = fillIndices[i];
+      const pt = getPoint(idx, 0.12);
+      if (!pt) continue;
+      if (isInsideFeatureVoid(pt[0], pt[1])) continue;
+      const holeMask = holeMaskAt(pt[0], pt[1]);
+      if (holeMask <= 0.065) continue;
+      const [rx, ry] = direction(face.centerX, face.centerY, pt[0], pt[1]);
+      const distToCenter = Math.hypot(pt[0] - face.centerX, pt[1] - face.centerY);
+      const edgeness = clamp01(distToCenter / Math.max(face.radius, 1e-6));
+      const g = (0.032 + edgeness * 0.044 + mouth * 0.018 + poseMotion * 0.018) * holeMask;
+      const drift = 0.11 + edgeness * 0.25;
+      const outflow = 0.2 + edgeness * 0.8;
+      const stampMul = 1.8 + edgeness * 0.9 + smile * 0.22;
+      addFaceSplat(
+        pt[0], pt[1],
+        flowX * drift + rx * FACE_SPLAT_FORCE_BASE * 0.0012 * outflow,
+        flowY * drift + ry * FACE_SPLAT_FORCE_BASE * 0.0012 * outflow,
+        fillCol[0] * g, fillCol[1] * g, fillCol[2] * g,
+        state.splatRadius * stampMul * (0.86 + holeMask * 0.24)
+      );
+    }
 
     // 2) Add a controlled contour accent so the head boundary reads clearly.
     const edgePointCount = Math.max(12, Math.min(contourSamples.length, Math.max(0, edgeStageCap - splatCount)));
@@ -5860,6 +5872,108 @@ async function main() {
         state.splatRadius * (2.55 + edgeGain * 1.6 + cheekPuff * 0.42)
       );
     }
+
+    // 3) Draw smoother feature rims (eyes/lips) to avoid hole-punch artifacts.
+    const loopRim = (samples, center, color, gain, radiusMul, flowMix = 0.58, forceMul = 1.0, maxPoints = samples.length) => {
+      if (gain <= 0.0005 || !samples || samples.length < 3) return;
+      const n = samples.length;
+      const pointCount = Math.max(3, Math.min(n, Math.round(maxPoints)));
+      for (let i = 0; i < pointCount; i++) {
+        if (splatCount >= rimStageCap) break;
+        const idx = pickLoopIndex(n, i, pointCount);
+        if (idx < 0) continue;
+        const pt = samples[idx];
+        const prev = samples[(idx - 1 + n) % n];
+        const next = samples[(idx + 1) % n];
+        const tx = next[0] - prev[0];
+        const ty = next[1] - prev[1];
+        const tl = Math.hypot(tx, ty) || 1;
+        const tangentX = tx / tl;
+        const tangentY = ty / tl;
+        const [nx, ny] = direction(center[0], center[1], pt[0], pt[1]);
+        const swirl = Math.sin(modeTime * 1.9 + i * 0.73) * 0.5 + 0.5;
+        const tint = gain * (0.84 + swirl * 0.32);
+        const tangentForce = FACE_SPLAT_FORCE_BASE * (0.0007 + 0.00035 * forceMul);
+        const normalForce = FACE_SPLAT_FORCE_BASE * (0.00045 + 0.00025 * forceMul);
+        addFaceSplat(
+          pt[0], pt[1],
+          flowX * flowMix + tangentX * tangentForce + nx * normalForce * 0.45,
+          flowY * flowMix + tangentY * tangentForce + ny * normalForce * 0.45,
+          color[0] * tint, color[1] * tint, color[2] * tint,
+          state.splatRadius * radiusMul
+        );
+      }
+    };
+
+    const leftEyeCenter = leftEyeFeature ? [leftEyeFeature.cx, leftEyeFeature.cy] : [face.centerX, face.centerY];
+    const rightEyeCenter = rightEyeFeature ? [rightEyeFeature.cx, rightEyeFeature.cy] : [face.centerX, face.centerY];
+    const mouthCenterForRim = mouthFeature ? [mouthFeature.cx, mouthFeature.cy] : mouthCenter;
+    const eyeRimGain = edgeGain * (0.028 + poseMotion * 0.018) * (0.65 + holeCarve * 0.7);
+    const leftEyeRimPts = Math.max(3, Math.floor(rimBudget * 0.22));
+    const rightEyeRimPts = Math.max(3, Math.floor(rimBudget * 0.22));
+    const mouthRimPts = Math.max(4, Math.floor(rimBudget * 0.32));
+    const lipRimPts = Math.max(4, rimBudget - leftEyeRimPts - rightEyeRimPts - mouthRimPts);
+    loopRim(leftEyeSamples, leftEyeCenter, edgeCol,
+      eyeRimGain * eyeOpenGateL, 2.05 + stampSize * 0.52 + eyeLeftOpen * 1.05,
+      0.54, 0.95, leftEyeRimPts);
+    loopRim(rightEyeSamples, rightEyeCenter, edgeCol,
+      eyeRimGain * eyeOpenGateR, 2.05 + stampSize * 0.52 + eyeRightOpen * 1.05,
+      0.54, 0.95, rightEyeRimPts);
+
+    // 4) Keep mouth as a soft lip rim injector instead of center bursts.
+    const mouthRimGain = (0.008 + mouthDrive * 0.12 * mouthBoost + smile * 0.02) * (0.6 + holeCarve * 0.68);
+    loopRim(mouthHoleSamples, mouthCenterForRim, mouthCol,
+      mouthRimGain, 2.85 + stampSize * 0.7 + mouthDrive * 1.85 * mouthBoost,
+      0.6 * mouthFlowBoost, 1.1 * mouthFlowBoost, mouthRimPts);
+    loopRim(lipSamples, mouthCenterForRim, mouthCol,
+      mouthRimGain * 0.62, 2.55 + stampSize * 0.65 + mouthDrive * 1.35,
+      0.55 * (1.0 + mouthBoostN * 0.9), 0.85 * (1.0 + mouthBoostN * 1.1), lipRimPts);
+
+    // 5) Explicit subtractive hole carving so eyes/mouth remain visible voids.
+    const fromFaceLocal = (lx, ly, cx, cy) => [cx + lx * cosR - ly * sinR, cy + lx * sinR + ly * cosR];
+    const carveSplat = (x, y, amount, radiusMul) => {
+      if (amount <= 0.0005 || splatCount >= MAX_SPLATS) return;
+      const a = clamp01(amount);
+      const dark = 0.00008 + (1.0 - a) * 0.00006;
+      const carveRadius = Math.max(1e-5, state.splatRadius * radiusMul * (0.78 + a * 1.18));
+      addSplat(x, y, 0, 0, dark, dark, dark, carveRadius);
+      if (Math.round(state.faceDebugMode || 0) > 0) {
+        pushFaceStampDebug(1, x, y, 0, 0, carveRadius, a);
+      }
+    };
+    const carveFeatureVoid = (feature, amount, radiusMul, openY = 1.0) => {
+      if (!feature || amount <= 0.001 || splatCount >= MAX_SPLATS) return;
+      const stamps = detailScale > 0.66
+        ? [
+            [0.0, 0.0, 1.0],
+            [0.52, 0.0, 0.88], [-0.52, 0.0, 0.88],
+            [0.0, 0.44, 0.84], [0.0, -0.44, 0.84],
+            [0.36, 0.3, 0.78], [-0.36, 0.3, 0.78],
+            [0.36, -0.3, 0.78], [-0.36, -0.3, 0.78],
+            [0.68, 0.0, 0.62], [-0.68, 0.0, 0.62],
+          ]
+        : [
+            [0.0, 0.0, 1.0],
+            [0.48, 0.0, 0.82], [-0.48, 0.0, 0.82],
+            [0.0, 0.36, 0.78], [0.0, -0.36, 0.78],
+          ];
+      for (let i = 0; i < stamps.length; i++) {
+        if (splatCount >= MAX_SPLATS) break;
+        const s = stamps[i];
+        const lx = s[0] * feature.rx;
+        const ly = s[1] * feature.ry * openY;
+        const [x, y] = fromFaceLocal(lx, ly, feature.cx, feature.cy);
+        carveSplat(x, y, amount * (0.75 + s[2] * 0.5), radiusMul * (0.92 + s[2] * 0.45));
+      }
+    };
+
+    const eyeVoidL = holeCarve * eyeOpenGateL;
+    const eyeVoidR = holeCarve * eyeOpenGateR;
+    const mouthVoid = 0.05 + holeCarve * (0.18 + mouthDrive * 0.95);
+    carveFeatureVoid(leftEyeFeature, eyeVoidL, (2.45 + stampSize * 0.85) * eyeSizeScale, 0.12 + eyeOpenGateL * 1.08);
+    carveFeatureVoid(rightEyeFeature, eyeVoidR, (2.45 + stampSize * 0.85) * eyeSizeScale, 0.12 + eyeOpenGateR * 1.08);
+    carveFeatureVoid(mouthFeature, mouthVoid, (2.2 + stampSize * 0.82 + mouthDrive * 1.05) * mouthSizeScale,
+      (0.16 + mouthDrive * 1.16) * mouthSizeScale);
 
     for (let i = 0; i < face.count; i++) {
       const off = i * 2;
