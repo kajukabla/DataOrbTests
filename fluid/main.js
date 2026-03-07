@@ -1471,7 +1471,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= dims.x || id.y >= dims.y) { return; }
   let dye = textureLoad(dyeTex, vec2i(id.xy), 0).rgb;
   let density = dot(dye, vec3f(0.3, 0.6, 0.1));
-  if (density < 0.001) { return; }  // skip empty texels
+  // Skip empty/near-zero texels so min reflects where real fluid data starts
+  if (density < 0.01) { return; }
   let bits = bitcast<u32>(density);
   atomicMin(&rawStats[0], bits);
   atomicMax(&rawStats[1], bits);
@@ -1489,7 +1490,7 @@ fn main() {
   let rawMax = bitcast<f32>(rawStats[1]);
   // If no valid pixels this frame, keep previous values
   if (rawMin > rawMax) { return; }
-  let alpha = 0.05;  // EMA blend: lower = smoother adaptation
+  let alpha = 0.1;  // EMA blend: lower = smoother adaptation
   smoothStats[0] = mix(smoothStats[0], rawMin, alpha);
   smoothStats[1] = mix(smoothStats[1], rawMax, alpha);
 }
@@ -2272,11 +2273,11 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   var mappedVal = max(sourceVal, 0.0);
 
   // Auto-range compressor: remap to smoothed min/max density range
+  // Stats are in raw density space; apply same gain transform to match mappedVal
   if (du.extraParams.x > 0.5) {
-    let rMin = densityRange[0];
-    let rMax = densityRange[1];
-    let span = max(rMax - rMin, 0.001);
-    mappedVal = clamp((mappedVal - rMin) / span, 0.0, 1.5);
+    let rMax = densityRange[1] / gainMul;
+    // Map from [0, smoothMax] to [0, 1] — stretches the full range into the gradient
+    mappedVal = clamp(mappedVal / max(rMax, 0.001), 0.0, 1.5);
   }
 
   // Colormap mode selection
