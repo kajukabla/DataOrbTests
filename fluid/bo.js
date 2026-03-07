@@ -39,6 +39,8 @@ export const SLIDER_SPACE = {
   curlStrength:      { min: 0,    max: 50,    step: 1    },
   velDissipation:    { min: 0.99, max: 1.0,   step: 0.001 },
   dyeDissipation:    { min: 0.98, max: 1.0,   step: 0.001 },
+  dyeSoftCap:        { min: 0,    max: 1,     step: 1    },
+  dyeCeiling:        { min: 0.3,  max: 3.0,   step: 0.01 },
   pressureIters:     { min: 10,   max: 60,    step: 1    },
   pressureDecay:     { min: 0,    max: 1,     step: 0.01 },
   prismaticAmount:   { min: 0,    max: 20,    step: 0.1  },
@@ -133,6 +135,8 @@ export const D = SLIDER_KEYS.length;
 const SLIDER_DEFAULTS = {
   particleCount: 4194304,
   particleSize: 0.9,
+  dyeSoftCap: 1,
+  dyeCeiling: 1.2,
   glitterCap: 1.0,
   streakGlow: 10.0,
   densitySize: 1.5,

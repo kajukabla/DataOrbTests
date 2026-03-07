@@ -79,6 +79,8 @@ const state = {
   pressureDecay: 0.8,
   velDissipation: 0.998,
   dyeDissipation: 0.993,
+  dyeSoftCap: 1,       // 0=hard clamp (old behavior), 1=soft saturation curve
+  dyeCeiling: 1.2,     // max dye brightness (soft or hard depending on dyeSoftCap)
   // Dye-coupled noise
   noiseDyeIntensity: 0.0,
   dyeNoiseAmount: 0.0,
@@ -931,7 +933,7 @@ ${commonHeader}
 
 struct TempParams {
   dt: f32, dx: f32, simRes: f32, dissipation: f32,
-  dyeHeat: f32, edgeCool: f32, tempActive: f32, pad2: f32,
+  dyeHeat: f32, edgeCool: f32, tempActive: f32, dyeCeiling: f32,
 };
 
 @group(0) @binding(1) var velTex: texture_2d<f32>;
@@ -974,7 +976,19 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let advected = textureSampleLevel(dyeSrc, sampl, clamped, 0.0);
   var dye = advected.rgb * p.dyeDissipation * edgeFade;
   let maxC = max(dye.r, max(dye.g, dye.b));
-  if (maxC > 1.2) { dye *= 1.2 / maxC; }
+  let ceiling = tp.dyeCeiling;
+  if (ceiling > 0.01) {
+    // Soft saturation: smoothly compress approaching ceiling
+    let knee = ceiling * 0.667;
+    if (maxC > knee) {
+      let excess = (maxC - knee) / (ceiling - knee);
+      let compressed = knee + (ceiling - knee) * (excess / (1.0 + excess));
+      dye *= compressed / maxC;
+    }
+  } else {
+    // Hard clamp (legacy behavior)
+    if (maxC > 1.2) { dye *= 1.2 / maxC; }
+  }
   let minC = min(dye.r, min(dye.g, dye.b));
   dye -= vec3f(minC * 0.08);
   textureStore(dst, id.xy, vec4f(max(dye, vec3f(0.0)), 1.0));
@@ -1477,10 +1491,10 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let vD = sampleSymVel(uvD, idD, behavior, dp.simRes);
   let div = (vR.x - vL.x + vU.y - vD.y) * 0.5;
 
-  // Don't inject into already-bright areas — preserves contrast
+  // Smooth headroom gate — taper injection as dye gets bright
   let existingBrightness = max(dye.r, max(dye.g, dye.b));
-  let headroom = max(1.0 - existingBrightness, 0.0);
-  if (headroom < 0.05) {
+  let headroom = smoothstep(0.0, 0.4, max(1.0 - existingBrightness, 0.0));
+  if (headroom < 0.001) {
     textureStore(dyeDst, id.xy, dye);
     return;
   }
@@ -7304,6 +7318,7 @@ async function main() {
       tempParamData[4] = state.tempDyeHeat;
       tempParamData[5] = state.tempEdgeCool;
       tempParamData[6] = tempActive ? 1.0 : 0.0;
+      tempParamData[7] = (state.dyeSoftCap > 0.5) ? Math.max(0.3, state.dyeCeiling) : 0.0;
       device.queue.writeBuffer(tempParamBuf, 0, tempParamData);
       const p = enc.beginComputePass();
       p.setPipeline(advectDyePipe.pipeline);
@@ -8068,6 +8083,17 @@ async function main() {
   wireSlider('curlStrength', 'curlStrength', v => Math.round(v));
   wireSlider('velDissipation', 'velDissipation', v => v.toFixed(3));
   wireSlider('dyeDissipation', 'dyeDissipation', v => v.toFixed(3));
+  wireSlider('dyeCeiling', 'dyeCeiling', v => v.toFixed(2));
+  // Dye Soft Cap toggle
+  const dyeSoftCapEl = document.getElementById('dyeSoftCap');
+  if (dyeSoftCapEl) {
+    dyeSoftCapEl.value = String(Math.round(state.dyeSoftCap || 0));
+    dyeSoftCapEl.addEventListener('change', () => {
+      state.dyeSoftCap = parseInt(dyeSoftCapEl.value, 10);
+      const valEl = document.getElementById('dyeSoftCapVal');
+      if (valEl) valEl.textContent = state.dyeSoftCap ? 'On' : 'Off';
+    });
+  }
   wireSlider('pressureIters', 'pressureIters', v => Math.round(v));
   wireSlider('pressureDecay', 'pressureDecay', v => v.toFixed(2));
   wireSlider('simSpeed', 'simSpeed');
@@ -8219,6 +8245,12 @@ async function main() {
     syncSlider('curlStrength', 'curlStrength', v => Math.round(v));
     syncSlider('velDissipation', 'velDissipation', v => v.toFixed(3));
     syncSlider('dyeDissipation', 'dyeDissipation', v => v.toFixed(3));
+    syncSlider('dyeCeiling', 'dyeCeiling', v => v.toFixed(2));
+    if (dyeSoftCapEl) {
+      dyeSoftCapEl.value = String(Math.round(state.dyeSoftCap || 0));
+      const valEl = document.getElementById('dyeSoftCapVal');
+      if (valEl) valEl.textContent = state.dyeSoftCap ? 'On' : 'Off';
+    }
     syncSlider('pressureIters', 'pressureIters', v => Math.round(v));
     syncSlider('pressureDecay', 'pressureDecay', v => v.toFixed(2));
     syncSlider('noiseDyeIntensity', 'noiseDyeIntensity');
