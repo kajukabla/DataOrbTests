@@ -1464,16 +1464,35 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 const densityStatsShader = /* wgsl */`
 @group(0) @binding(0) var dyeTex: texture_2d<f32>;
 @group(0) @binding(1) var<storage, read_write> rawStats: array<atomic<u32>, 2>;
+@group(0) @binding(2) var velTex: texture_2d<f32>;
+@group(0) @binding(3) var pressTex: texture_2d<f32>;
+@group(0) @binding(4) var curlTex: texture_2d<f32>;
+@group(0) @binding(5) var<uniform> statsSource: u32;
 
 @compute @workgroup_size(16, 16)
 fn main(@builtin(global_invocation_id) id: vec3u) {
   let dims = textureDimensions(dyeTex);
   if (id.x >= dims.x || id.y >= dims.y) { return; }
-  let dye = textureLoad(dyeTex, vec2i(id.xy), 0).rgb;
-  let density = dot(dye, vec3f(0.3, 0.6, 0.1));
-  // Skip empty/near-zero texels so min reflects where real fluid data starts
-  if (density < 0.01) { return; }
-  let bits = bitcast<u32>(density);
+  let coord = vec2i(id.xy);
+  var val: f32;
+  if (statsSource == 1u) {
+    let v = textureLoad(velTex, coord, 0).rg;
+    val = length(v) / 100.0;
+  } else if (statsSource == 2u) {
+    val = abs(textureLoad(pressTex, coord, 0).r) / 100.0;
+  } else if (statsSource == 3u) {
+    let c0 = textureLoad(curlTex, coord, 0).r;
+    let c1 = textureLoad(curlTex, coord + vec2i(1, 0), 0).r;
+    let c2 = textureLoad(curlTex, coord - vec2i(1, 0), 0).r;
+    let c3 = textureLoad(curlTex, coord + vec2i(0, 1), 0).r;
+    let c4 = textureLoad(curlTex, coord - vec2i(0, 1), 0).r;
+    val = abs((c0 * 2.0 + c1 + c2 + c3 + c4) / 6.0) / 50.0;
+  } else {
+    let dye = textureLoad(dyeTex, coord, 0).rgb;
+    val = dot(dye, vec3f(0.3, 0.6, 0.1));
+  }
+  if (val < 0.001) { return; }
+  let bits = bitcast<u32>(val);
   atomicMin(&rawStats[0], bits);
   atomicMax(&rawStats[1], bits);
 }
@@ -3941,11 +3960,21 @@ async function main() {
   // Reset values: min=0xFFFFFFFF (max float bits), max=0
   const rawStatsReset = new Uint32Array([0xFFFFFFFF, 0]);
 
+  const statsSourceBuf = device.createBuffer({
+    label: 'statsSource', size: 4,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const statsSourceData = new Uint32Array(1);
+
   const densityStatsBGL = device.createBindGroupLayout({
     label: 'densityStats_bgl',
     entries: [
       { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
       { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 2, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
     ],
   });
   const densitySmoothBGL = device.createBindGroupLayout({
@@ -3974,23 +4003,22 @@ async function main() {
       { binding: 1, resource: { buffer: smoothStatsBuf } },
     ],
   });
-  // Stats bind groups: one per dye flip state
-  const densityStatsBGs = [
-    device.createBindGroup({
-      layout: densityStatsBGL,
-      entries: [
-        { binding: 0, resource: tview(dyeA) },
-        { binding: 1, resource: { buffer: rawStatsBuf } },
-      ],
-    }),
-    device.createBindGroup({
-      layout: densityStatsBGL,
-      entries: [
-        { binding: 0, resource: tview(dyeB) },
-        { binding: 1, resource: { buffer: rawStatsBuf } },
-      ],
-    }),
-  ];
+  // Stats bind groups: indexed by [dyeFlip][velFlip][pressFlip] = 8 variants
+  const densityStatsBGs = [];
+  for (let d = 0; d < 2; d++)
+    for (let v = 0; v < 2; v++)
+      for (let p = 0; p < 2; p++)
+        densityStatsBGs.push(device.createBindGroup({
+          layout: densityStatsBGL,
+          entries: [
+            { binding: 0, resource: tview(d ? dyeB : dyeA) },
+            { binding: 1, resource: { buffer: rawStatsBuf } },
+            { binding: 2, resource: tview(v ? velB : velA) },
+            { binding: 3, resource: tview(p ? pressB : pressA) },
+            { binding: 4, resource: tview(curlTex) },
+            { binding: 5, resource: { buffer: statsSourceBuf } },
+          ],
+        }));
 
   const compactModule = device.createShaderModule({ code: makeParticleCompactShader(state.particleCount), label: 'particleCompact' });
   checkShader(compactModule, 'particleCompact');
@@ -6706,10 +6734,13 @@ async function main() {
     // ── Pass 11: Display Render (fluid base → sceneRT) ──
     // ── Density auto-range stats (only when compressor is on) ──
     if (state.colormapCompress) {
+      const src = Math.round(state.colorSource || 0);
+      statsSourceData[0] = src;
+      device.queue.writeBuffer(statsSourceBuf, 0, statsSourceData);
       device.queue.writeBuffer(rawStatsBuf, 0, rawStatsReset);
       const sp = enc.beginComputePass();
       sp.setPipeline(densityStatsPipeline);
-      sp.setBindGroup(0, densityStatsBGs[dyeFlip]);
+      sp.setBindGroup(0, densityStatsBGs[(dyeFlip << 2) | (velFlip << 1) | pressFlip]);
       sp.dispatchWorkgroups(Math.ceil(SIM_RES / 16), Math.ceil(SIM_RES / 16));
       sp.setPipeline(densitySmoothPipeline);
       sp.setBindGroup(0, densitySmoothBG);
