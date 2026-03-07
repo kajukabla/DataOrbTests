@@ -92,6 +92,8 @@ export const SLIDER_SPACE = {
   colormapMode:      { min: 0, max: 4, step: 1    },
   colorSource:       { min: 0, max: 3, step: 1    },
   colorGain:         { min: 0, max: 1, step: 0.01 },
+  // Particle overdraw cap
+  glitterCap:        { min: 0.01, max: 1, step: 0.01 },
 };
 
 export const SLIDER_KEYS = Object.keys(SLIDER_SPACE);

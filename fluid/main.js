@@ -31,6 +31,7 @@ const FACE_MIRROR_X = true;
 const state = {
   particleCount: 4194304,   // 4M default
   particleSize: 0.9,
+  glitterCap: 1.0,       // max per-pixel particle brightness (overdraw clamp)
   sizeRandomness: 0.3,
   glintBrightness: 0.1,
   prismaticAmount: 20.0,
@@ -2001,6 +2002,31 @@ fn frag(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 }
 `;
 
+// Particle composite: scene + min(particles, cap)
+const particleCompositeShader = /* wgsl */`
+@group(0) @binding(0) var sceneTex: texture_2d<f32>;
+@group(0) @binding(1) var particleTex: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+@group(0) @binding(3) var<uniform> cap: f32;
+
+@vertex
+fn vert(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+  let x = f32(i32(vi) / 2) * 4.0 - 1.0;
+  let y = f32(i32(vi) % 2) * 4.0 - 1.0;
+  return vec4f(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn frag(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let texSize = vec2f(textureDimensions(sceneTex));
+  let uv = pos.xy / texSize;
+  let scene = textureSampleLevel(sceneTex, samp, uv, 0.0).rgb;
+  let particles = textureSampleLevel(particleTex, samp, uv, 0.0).rgb;
+  let capped = min(particles, vec3f(cap));
+  return vec4f(scene + capped, 1.0);
+}
+`;
+
 function makeDisplayShaderFrag(hdr) {
   // Oklab→linear matrix: P3 for HDR, sRGB for SDR
   const M = hdr
@@ -3587,6 +3613,57 @@ async function main() {
     bloomResources = null;
     lastBloomW = 0;
     lastBloomH = 0;
+  }
+
+  // ─── Particle Composite (overdraw cap) ──────────────────────────────────
+  const particleCompositeBGL = device.createBindGroupLayout({
+    label: 'particleComposite_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+    ],
+  });
+
+  const particleCompositeModule = device.createShaderModule({ code: particleCompositeShader, label: 'particleComposite' });
+  const particleCompositePipe = device.createRenderPipeline({
+    label: 'particleComposite',
+    layout: device.createPipelineLayout({ bindGroupLayouts: [particleCompositeBGL] }),
+    vertex: { module: particleCompositeModule, entryPoint: 'vert' },
+    fragment: {
+      module: particleCompositeModule,
+      entryPoint: 'frag',
+      targets: [{ format: canvasFmt }],
+    },
+    primitive: { topology: 'triangle-list' },
+  });
+
+  const particleCapUB = device.createBuffer({
+    label: 'particleCapUB',
+    size: 4,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  const particleCapData = new Float32Array(1);
+
+  // Offscreen textures for particle composite (recreated on resize)
+  let particleRT = null;   // particles rendered here (additive, cleared)
+  let particleRTView = null;
+  let sceneRT = null;      // display (fluid) rendered here
+  let sceneRTView = null;
+  let lastCompW = 0, lastCompH = 0;
+
+  function ensureCompositeTex(w, h) {
+    if (particleRT && lastCompW === w && lastCompH === h) return;
+    if (particleRT) particleRT.destroy();
+    if (sceneRT) sceneRT.destroy();
+    lastCompW = w;
+    lastCompH = h;
+    const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
+    particleRT = device.createTexture({ label: 'particleRT', size: [w, h], format: canvasFmt, usage });
+    particleRTView = particleRT.createView();
+    sceneRT = device.createTexture({ label: 'sceneRT', size: [w, h], format: canvasFmt, usage });
+    sceneRTView = sceneRT.createView();
   }
 
   // ─── Bind group helpers ─────────────────────────────────────────────────
@@ -6363,6 +6440,7 @@ async function main() {
     } else if (bloomResources) {
       destroyBloomResources();
     }
+    ensureCompositeTex(canvas.width, canvas.height);
     let canvasView;
     try {
       canvasView = ctx.getCurrentTexture().createView();
@@ -6372,13 +6450,12 @@ async function main() {
       gpuFramesPending--;
       return;
     }
-    const renderTarget = bloomActive ? bloomResources.sceneView : canvasView;
 
-    // ── Pass 11: Display Render (fluid base) ──
+    // ── Pass 11: Display Render (fluid base → sceneRT) ──
     {
       const rp = enc.beginRenderPass({
         colorAttachments: [{
-          view: renderTarget,
+          view: sceneRTView,
           loadOp: 'clear',
           storeOp: 'store',
           clearValue: { r: 0, g: 0, b: 0, a: 1 },
@@ -6390,18 +6467,47 @@ async function main() {
       rp.end();
     }
 
-    // ── Pass 12: Particle Render (additive glitter layer) ──
+    // ── Pass 12: Particle Render (additive → particleRT) ──
     {
       const rp = enc.beginRenderPass({
         colorAttachments: [{
-          view: renderTarget,
-          loadOp: 'load',
+          view: particleRTView,
+          loadOp: 'clear',
           storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
         }],
       });
       rp.setPipeline(particleRenderPipeline);
       rp.setBindGroup(0, particleRenderBG);
       rp.drawIndirect(drawIndirectBuf, 0);
+      rp.end();
+    }
+
+    // ── Pass 12b: Particle Composite (scene + clamped particles → output) ──
+    {
+      particleCapData[0] = state.glitterCap;
+      device.queue.writeBuffer(particleCapUB, 0, particleCapData);
+      const compositeTarget = bloomActive ? bloomResources.sceneView : canvasView;
+      const compositeBG = device.createBindGroup({
+        layout: particleCompositeBGL,
+        entries: [
+          { binding: 0, resource: sceneRTView },
+          { binding: 1, resource: particleRTView },
+          { binding: 2, resource: linearSampler },
+          { binding: 3, resource: { buffer: particleCapUB } },
+        ],
+      });
+      const rp = enc.beginRenderPass({
+        colorAttachments: [{
+          view: compositeTarget,
+          loadOp: 'clear',
+          storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+      });
+      rp.setPipeline(particleCompositePipe);
+      rp.setBindGroup(0, compositeBG);
+      rp.draw(3);
       rp.end();
     }
 
@@ -6980,6 +7086,7 @@ async function main() {
   wireSlider('bloomIntensity', 'bloomIntensity', v => v.toFixed(2));
   wireSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
   wireSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
+  wireSlider('glitterCap', 'glitterCap', v => v.toFixed(2));
   if (faceTrackingToggleBtn) {
     faceTrackingToggleBtn.addEventListener('click', () => {
       if (faceTracking.initializing) {
@@ -7116,6 +7223,7 @@ async function main() {
     syncSlider('bloomIntensity', 'bloomIntensity', v => v.toFixed(2));
     syncSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
     syncSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
+    syncSlider('glitterCap', 'glitterCap', v => v.toFixed(2));
     // Start/stop face tracking to match preset
     if ((state.faceEffectorMode > 0 || state.faceDebugMode > 0) && !faceTracking.enabled && !faceTracking.initializing) {
       startFaceTracking();
