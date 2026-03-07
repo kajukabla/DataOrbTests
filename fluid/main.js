@@ -33,6 +33,7 @@ const state = {
   particleSize: 0.9,
   glitterCap: 1.0,       // per-tile particle budget scale (0=minimal, 1=200/tile)
   streakGlow: 10.0,      // density-based brightness boost for particles in dense flows
+  densitySize: 1.5,      // density-based particle size boost strength
   glitterFloor: 0.01,    // minimum brightness to render a particle (cull below this)
   sphereMode: 0,         // 0=off, 1=on (planet-like shading)
   shadowExtend: 0.5,     // 0=hard shadow, 1=no shadow
@@ -1851,8 +1852,9 @@ fn main(
   let sizeRand = pp.extra3.x;
   // Per-particle size variation: seed drives a 0.2..1.8 range scaled by randomness
   let sizeScale = mix(1.0, 0.2 + part.seed * 1.6, sizeRand);
-  // Density size boost: brighter particles (dense flows) grow slightly larger
-  let densitySizeBoost = 1.0 + clamp(col.a * 0.3, 0.0, 0.6);
+  // Density size boost: smoothstep transfer function scales particles up in dense flows
+  let densityT = smoothstep(0.1, 2.0, col.a);
+  let densitySizeBoost = 1.0 + densityT * pp.extra4.y;
   let pixelSize = basePixelSize * sizeScale * densitySizeBoost;
   let aspect = screenSize.x / screenSize.y;
   let clipSize = vec2f(pixelSize * 2.0 / screenSize.x, pixelSize * 2.0 / screenSize.y);
@@ -6262,6 +6264,7 @@ async function main() {
     particleUBData[14] = _oklabOut[1];
     particleUBData[15] = _oklabOut[2];
     particleUBData[16] = state.streakGlow;
+    particleUBData[17] = state.densitySize;
     device.queue.writeBuffer(particleUB, 0, particleUBData);
 
     displayUBData[0] = canvas.width;
@@ -7211,6 +7214,7 @@ async function main() {
   wireSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
   wireSlider('glitterCap', 'glitterCap', v => v.toFixed(2));
   wireSlider('streakGlow', 'streakGlow', v => v.toFixed(1));
+  wireSlider('densitySize', 'densitySize', v => v.toFixed(1));
   wireSlider('glitterFloor', 'glitterFloor', v => v.toFixed(3));
   wireSelect('sphereMode', 'sphereMode', () => {
     const on = state.sphereMode > 0;
@@ -7361,6 +7365,7 @@ async function main() {
     syncSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
     syncSlider('glitterCap', 'glitterCap', v => v.toFixed(2));
     syncSlider('streakGlow', 'streakGlow', v => v.toFixed(1));
+    syncSlider('densitySize', 'densitySize', v => v.toFixed(1));
     syncSlider('glitterFloor', 'glitterFloor', v => v.toFixed(3));
     { const sel = document.getElementById('sphereMode'); if (sel) sel.value = String(Math.round(state.sphereMode || 0)); }
     syncSlider('shadowExtend', 'shadowExtend');
