@@ -92,6 +92,7 @@ export const SLIDER_SPACE = {
   colormapMode:      { min: 0, max: 6, step: 1    },
   colorSource:       { min: 0, max: 3, step: 1    },
   colorGain:         { min: 0, max: 1, step: 0.01 },
+  colormapCompress:  { min: 0, max: 1, step: 1    },
   // Particle overdraw cap
   glitterCap:        { min: 0.01, max: 3, step: 0.01 },
   streakGlow:        { min: 0, max: 20, step: 0.1 },

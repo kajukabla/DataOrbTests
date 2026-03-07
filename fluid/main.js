@@ -103,6 +103,7 @@ const state = {
   // Palette
   paletteIndex: -1,
   colormapMode: 0,     // 0=palette gradient, 1=viridis, 2=inferno, 3=plasma, 4=magma, 5=rainbow HDR, 6=rainbow HDR inv
+  colormapCompress: 0, // 0=off, 1=on — auto-range compressor for colormap
   colorSource: 0,      // 0=density, 1=velocity, 2=pressure, 3=vorticity
   colorGain: 0.5,      // 0-1 slider, 0.5 = 1x gain, log-scale multiplier
   // Face effector
@@ -1459,6 +1460,41 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
 // (tempSplatShader removed — fused into batchSplatShaderDye)
 
+// ─── Density Stats Compute Shader (finds min/max density for auto-range) ──
+const densityStatsShader = /* wgsl */`
+@group(0) @binding(0) var dyeTex: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> rawStats: array<atomic<u32>, 2>;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let dims = textureDimensions(dyeTex);
+  if (id.x >= dims.x || id.y >= dims.y) { return; }
+  let dye = textureLoad(dyeTex, vec2i(id.xy), 0).rgb;
+  let density = dot(dye, vec3f(0.3, 0.6, 0.1));
+  if (density < 0.001) { return; }  // skip empty texels
+  let bits = bitcast<u32>(density);
+  atomicMin(&rawStats[0], bits);
+  atomicMax(&rawStats[1], bits);
+}
+`;
+
+// ─── Density Smooth Compute Shader (EMA blend of min/max over time) ──
+const densitySmoothShader = /* wgsl */`
+@group(0) @binding(0) var<storage, read> rawStats: array<u32, 2>;
+@group(0) @binding(1) var<storage, read_write> smoothStats: array<f32, 2>;
+
+@compute @workgroup_size(1)
+fn main() {
+  let rawMin = bitcast<f32>(rawStats[0]);
+  let rawMax = bitcast<f32>(rawStats[1]);
+  // If no valid pixels this frame, keep previous values
+  if (rawMin > rawMax) { return; }
+  let alpha = 0.05;  // EMA blend: lower = smoother adaptation
+  smoothStats[0] = mix(smoothStats[0], rawMin, alpha);
+  smoothStats[1] = mix(smoothStats[1], rawMax, alpha);
+}
+`;
+
 // ─── Particle Compact Shader (GPU indirect draw — builds visible index list) ──
 const TILE_GRID = 128; // 128x128 tile grid for per-tile particle budgets
 const TILE_COUNT = TILE_GRID * TILE_GRID;
@@ -2093,12 +2129,14 @@ struct DisplayUniforms {
   tipColor: vec4f,    // xyz=tipColor RGB, w=roughness
   tempParams: vec4f,  // x=symmetryFlag, y=tempColorShift, z=colormapMode, w=colorSource
   cmapParams: vec4f,  // x=colorGain, y=sphereMode, z=shadowExtend, w=sphereSize
+  extraParams: vec4f, // x=colormapCompress
 };
 @group(0) @binding(2) var<uniform> du: DisplayUniforms;
 @group(0) @binding(3) var tempTex: texture_2d<f32>;
 @group(0) @binding(4) var velTex: texture_2d<f32>;
 @group(0) @binding(5) var pressTex: texture_2d<f32>;
 @group(0) @binding(6) var curlTex: texture_2d<f32>;
+@group(0) @binding(7) var<storage, read> densityRange: array<f32, 2>;
 
 ${hdr ? `fn tonemap(x: vec3f) -> vec3f {
   let peak = 4.0;
@@ -2232,6 +2270,14 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     sourceVal = abs((c0v * 2.0 + c1v + c2v + c3v + c4v) / 6.0) / (50.0 * gainMul);
   }
   var mappedVal = max(sourceVal, 0.0);
+
+  // Auto-range compressor: remap to smoothed min/max density range
+  if (du.extraParams.x > 0.5) {
+    let rMin = densityRange[0];
+    let rMax = densityRange[1];
+    let span = max(rMax - rMin, 0.001);
+    mappedVal = clamp((mappedVal - rMin) / span, 0.0, 1.5);
+  }
 
   // Colormap mode selection
   let cmapMode = i32(du.tempParams.z);
@@ -3253,9 +3299,9 @@ async function main() {
 
   // displayUB: [width, height, time, sheenStrength, baseR, baseG, baseB, hdrHeadroom, accentR, accentG, accentB, colorBlend, sheenR, sheenG, sheenB, metallic, tipR, tipG, tipB, roughness, symmetryBehavior, tempColorShift, colormapMode, colorSource, colorMapRange, pad, pad, pad]
   const displayUB = device.createBuffer({
-    size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const displayUBData = new Float32Array(28);
+  const displayUBData = new Float32Array(32);
   const bloomParamData = new Float32Array(8);
   const bloomCompositeData = new Float32Array(1);
 
@@ -3494,6 +3540,7 @@ async function main() {
       { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
       { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
       { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
     ],
   });
 
@@ -3878,6 +3925,71 @@ async function main() {
   let lastTileBudget = -1;
   let lastGlitterFloor = -1;
 
+  // ── Density auto-range compressor (GPU min/max + temporal EMA) ──
+  const rawStatsBuf = device.createBuffer({
+    label: 'densityRawStats', size: 8,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  const smoothStatsBuf = device.createBuffer({
+    label: 'densitySmoothStats', size: 8,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  // Initialize smooth stats to reasonable defaults
+  device.queue.writeBuffer(smoothStatsBuf, 0, new Float32Array([0.0, 1.0]));
+  // Reset values: min=0xFFFFFFFF (max float bits), max=0
+  const rawStatsReset = new Uint32Array([0xFFFFFFFF, 0]);
+
+  const densityStatsBGL = device.createBindGroupLayout({
+    label: 'densityStats_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+    ],
+  });
+  const densitySmoothBGL = device.createBindGroupLayout({
+    label: 'densitySmooth_bgl',
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+    ],
+  });
+  const densityStatsModule = device.createShaderModule({ code: densityStatsShader, label: 'densityStats' });
+  const densitySmoothModule = device.createShaderModule({ code: densitySmoothShader, label: 'densitySmooth' });
+  const densityStatsPipeline = device.createComputePipeline({
+    label: 'densityStats',
+    layout: device.createPipelineLayout({ bindGroupLayouts: [densityStatsBGL] }),
+    compute: { module: densityStatsModule, entryPoint: 'main' },
+  });
+  const densitySmoothPipeline = device.createComputePipeline({
+    label: 'densitySmooth',
+    layout: device.createPipelineLayout({ bindGroupLayouts: [densitySmoothBGL] }),
+    compute: { module: densitySmoothModule, entryPoint: 'main' },
+  });
+  const densitySmoothBG = device.createBindGroup({
+    layout: densitySmoothBGL,
+    entries: [
+      { binding: 0, resource: { buffer: rawStatsBuf } },
+      { binding: 1, resource: { buffer: smoothStatsBuf } },
+    ],
+  });
+  // Stats bind groups: one per dye flip state
+  const densityStatsBGs = [
+    device.createBindGroup({
+      layout: densityStatsBGL,
+      entries: [
+        { binding: 0, resource: tview(dyeA) },
+        { binding: 1, resource: { buffer: rawStatsBuf } },
+      ],
+    }),
+    device.createBindGroup({
+      layout: densityStatsBGL,
+      entries: [
+        { binding: 0, resource: tview(dyeB) },
+        { binding: 1, resource: { buffer: rawStatsBuf } },
+      ],
+    }),
+  ];
+
   const compactModule = device.createShaderModule({ code: makeParticleCompactShader(state.particleCount), label: 'particleCompact' });
   checkShader(compactModule, 'particleCompact');
   let particleCompactPipeline = device.createComputePipeline({
@@ -4125,7 +4237,8 @@ async function main() {
           displayBGs.push(bg(displayBGL, [
             tview(d ? dyeB : dyeA), linearSampler, ubuf(displayUB),
             tview(t ? tempB : tempA), tview(v ? velB : velA),
-            tview(p ? pressB : pressA), tview(curlTex)
+            tview(p ? pressB : pressA), tview(curlTex),
+            { buffer: smoothStatsBuf }
           ]));
   // particleUpdate: reads vel[cur] + dye[cur] + curlTex — 4 variants [velFlip][dyeFlip]
   function makeParticleUpdateBGs(pBuf, cBuf) {
@@ -6313,6 +6426,8 @@ async function main() {
     displayUBData[25] = state.sphereMode ? 1.0 : 0.0;
     displayUBData[26] = state.shadowExtend;
     displayUBData[27] = state.sphereSize ?? 1.0;
+    // extraParams vec4f
+    displayUBData[28] = state.colormapCompress ? 1.0 : 0.0;
     device.queue.writeBuffer(displayUB, 0, displayUBData);
 
     // Collect splats into pre-allocated buffer
@@ -6587,6 +6702,19 @@ async function main() {
     }
 
     // ── Pass 11: Display Render (fluid base → sceneRT) ──
+    // ── Density auto-range stats (only when compressor is on) ──
+    if (state.colormapCompress) {
+      device.queue.writeBuffer(rawStatsBuf, 0, rawStatsReset);
+      const sp = enc.beginComputePass();
+      sp.setPipeline(densityStatsPipeline);
+      sp.setBindGroup(0, densityStatsBGs[dyeFlip]);
+      sp.dispatchWorkgroups(Math.ceil(SIM_RES / 16), Math.ceil(SIM_RES / 16));
+      sp.setPipeline(densitySmoothPipeline);
+      sp.setBindGroup(0, densitySmoothBG);
+      sp.dispatchWorkgroups(1);
+      sp.end();
+    }
+
     {
       const rp = enc.beginRenderPass({
         colorAttachments: [{
@@ -7220,6 +7348,8 @@ async function main() {
     if (cmapSel) cmapSel.addEventListener('change', () => { state.colormapMode = parseInt(cmapSel.value); });
     const srcSel = document.getElementById('colorSource');
     if (srcSel) srcSel.addEventListener('change', () => { state.colorSource = parseInt(srcSel.value); });
+    const compressChk = document.getElementById('colormapCompress');
+    if (compressChk) compressChk.addEventListener('change', () => { state.colormapCompress = compressChk.checked ? 1 : 0; });
   }
   wireSlider('colorGain', 'colorGain');
   wireSlider('bloomIntensity', 'bloomIntensity', v => v.toFixed(2));
@@ -7362,6 +7492,8 @@ async function main() {
       if (cmapSel) cmapSel.value = String(Math.round(state.colormapMode || 0));
       const srcSel = document.getElementById('colorSource');
       if (srcSel) srcSel.value = String(Math.round(state.colorSource || 0));
+      const compressChk = document.getElementById('colormapCompress');
+      if (compressChk) compressChk.checked = !!state.colormapCompress;
     }
     syncSlider('colorGain', 'colorGain');
     syncColor('baseColor', 'baseColor');
