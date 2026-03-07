@@ -32,6 +32,9 @@ const state = {
   particleCount: 4194304,   // 4M default
   particleSize: 0.9,
   glitterCap: 1.0,       // max per-pixel particle brightness (overdraw clamp)
+  sphereMode: 0,         // 0=off, 1=on (planet-like shading)
+  shadowExtend: 0.5,     // 0=hard shadow, 1=no shadow
+  sphereSize: 1.0,       // visual sphere size multiplier (0.5-2.0)
   sizeRandomness: 0.3,
   glintBrightness: 0.1,
   prismaticAmount: 20.0,
@@ -2044,7 +2047,7 @@ struct DisplayUniforms {
   sheenColor: vec4f,  // xyz=sheenColor RGB, w=metallic
   tipColor: vec4f,    // xyz=tipColor RGB, w=roughness
   tempParams: vec4f,  // x=symmetryFlag, y=tempColorShift, z=colormapMode, w=colorSource
-  cmapParams: vec4f,  // x=colorGain
+  cmapParams: vec4f,  // x=colorGain, y=sphereMode, z=shadowExtend, w=sphereSize
 };
 @group(0) @binding(2) var<uniform> du: DisplayUniforms;
 @group(0) @binding(3) var tempTex: texture_2d<f32>;
@@ -2269,8 +2272,24 @@ ${hdr ? `    color = cmapLinear * bloom * dataPresence * (1.0 + 0.5 * cmapT * cm
   }
 
   // Tone mapping
-  color = ${hdr ? 'tonemap(color * 1.6)' : 'aces(color * 1.6)'};
+  color =${hdr ? 'tonemap(color * 1.6)' : 'aces(color * 1.6)'};
 
+
+  // Sphere mode: lambertian hemisphere shading (post-tonemap, pre-gamma)
+  let sphereMode = du.cmapParams.y;
+  if (sphereMode > 0.5) {
+    let shadowExt = du.cmapParams.z;
+    let sphSize = du.cmapParams.w;
+    let sphRadius = screenRadius * sphSize;
+    let r = screenDist / sphRadius;
+    let z = sqrt(max(1.0 - r * r, 0.0));
+    let normal = normalize(vec3f(centered.x / sphRadius, centered.y / sphRadius, z));
+    let lightDir = normalize(vec3f(-0.6, 0.5, 0.7));
+    let NdotL = max(dot(normal, lightDir), 0.0);
+    let ambient = mix(0.05, 1.0, shadowExt);
+    let sphereShading = ambient + (1.0 - ambient) * NdotL;
+    color *= sphereShading;
+  }
 ${hdr ? '  // HDR: browser expects linear values, handles transfer function' : `  // Fast gamma approximation (max error ~0.003 vs pow(x, 0.4545))
   { let sq = sqrt(clamp(color, vec3f(0.0), vec3f(1.0))); color = sq * (0.585 + sq * 0.415); }`}
 
@@ -6187,9 +6206,9 @@ async function main() {
     displayUBData[23] = Math.round(state.colorSource || 0);
     // cmapParams vec4f
     displayUBData[24] = state.colorGain ?? 0.5;
-    displayUBData[25] = 0.0; // unused
-    displayUBData[26] = 0;
-    displayUBData[27] = 0;
+    displayUBData[25] = state.sphereMode ? 1.0 : 0.0;
+    displayUBData[26] = state.shadowExtend;
+    displayUBData[27] = state.sphereSize ?? 1.0;
     device.queue.writeBuffer(displayUB, 0, displayUBData);
 
     // Collect splats into pre-allocated buffer
@@ -7087,6 +7106,17 @@ async function main() {
   wireSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
   wireSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
   wireSlider('glitterCap', 'glitterCap', v => v.toFixed(2));
+  wireSelect('sphereMode', 'sphereMode', () => {
+    const on = state.sphereMode > 0;
+    document.querySelectorAll('.sphere-setting').forEach(el => el.style.display = on ? '' : 'none');
+  });
+  wireSlider('shadowExtend', 'shadowExtend');
+  wireSlider('sphereSize', 'sphereSize');
+  // Init visibility
+  {
+    const on = state.sphereMode > 0;
+    document.querySelectorAll('.sphere-setting').forEach(el => el.style.display = on ? '' : 'none');
+  }
   if (faceTrackingToggleBtn) {
     faceTrackingToggleBtn.addEventListener('click', () => {
       if (faceTracking.initializing) {
@@ -7224,6 +7254,13 @@ async function main() {
     syncSlider('bloomThreshold', 'bloomThreshold', v => v.toFixed(2));
     syncSlider('bloomRadius', 'bloomRadius', v => v.toFixed(2));
     syncSlider('glitterCap', 'glitterCap', v => v.toFixed(2));
+    { const sel = document.getElementById('sphereMode'); if (sel) sel.value = String(Math.round(state.sphereMode || 0)); }
+    syncSlider('shadowExtend', 'shadowExtend');
+    syncSlider('sphereSize', 'sphereSize');
+    {
+      const on = state.sphereMode > 0;
+      document.querySelectorAll('.sphere-setting').forEach(el => el.style.display = on ? '' : 'none');
+    }
     // Start/stop face tracking to match preset
     if ((state.faceEffectorMode > 0 || state.faceDebugMode > 0) && !faceTracking.enabled && !faceTracking.initializing) {
       startFaceTracking();
