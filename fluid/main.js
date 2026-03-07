@@ -1490,13 +1490,10 @@ fn main() {
   let rawMax = bitcast<f32>(rawStats[1]);
   // If no valid pixels this frame, keep previous values
   if (rawMin > rawMax) { return; }
-  // Asymmetric EMA: expand range fast, contract slow (prevents flicker)
-  let expandAlpha = 0.15;
-  let contractAlpha = 0.02;
-  let alphaMin = select(contractAlpha, expandAlpha, rawMin < smoothStats[0]);
-  let alphaMax = select(contractAlpha, expandAlpha, rawMax > smoothStats[1]);
-  smoothStats[0] = mix(smoothStats[0], rawMin, alphaMin);
-  smoothStats[1] = mix(smoothStats[1], rawMax, alphaMax);
+  // Very slow EMA for both attack and release — keeps gradient stable
+  let alpha = 0.005;
+  smoothStats[0] = mix(smoothStats[0], rawMin, alpha);
+  smoothStats[1] = mix(smoothStats[1], rawMax, alpha);
 }
 `;
 
