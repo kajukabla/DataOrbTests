@@ -974,16 +974,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
   // ── Dye advection ──
   let advected = textureSampleLevel(dyeSrc, sampl, clamped, 0.0);
-  // Divergence-based mass correction: semi-Lagrangian advection duplicates dye
-  // in convergence zones. Attenuate proportionally to negative divergence.
-  let vR = textureLoad(velTex, vec2u(min(id.x + 1u, res - 1u), id.y), 0).x;
-  let vL = textureLoad(velTex, vec2u(max(id.x, 1u) - 1u, id.y), 0).x;
-  let vT = textureLoad(velTex, vec2u(id.x, min(id.y + 1u, res - 1u)), 0).y;
-  let vB = textureLoad(velTex, vec2u(id.x, max(id.y, 1u) - 1u), 0).y;
-  let divUV = (vR - vL + vT - vB) * 0.5 * p.dx; // divergence in UV space
-  // Convergence (divUV < 0) means backtrace duplication. Scale down dye.
-  let massScale = clamp(1.0 + divUV * p.dt, 0.5, 1.0);
-  var dye = advected.rgb * p.dyeDissipation * edgeFade * massScale;
+  var dye = advected.rgb * p.dyeDissipation * edgeFade;
   let maxC = max(dye.r, max(dye.g, dye.b));
   let ceiling = tp.dyeCeiling;
   if (ceiling > 0.01) {
