@@ -23,7 +23,7 @@ const MIME = {
 
 function sanitizeRunName(name) {
   if (typeof name !== 'string') return null;
-  const clean = name.replace(/[^a-zA-Z0-9_-]/g, '');
+  const clean = name.replace(/[^a-zA-Z0-9_ -]/g, '').trim();
   if (!clean || clean.length > 64) return null;
   return clean;
 }

@@ -91,12 +91,12 @@ export const SLIDER_SPACE = {
   bloomRadius:       { min: 0, max: 1, step: 0.01 },
   // Face tracking
   faceEffectorMode:  { min: 0, max: 2, step: 1    },
-  faceMeshNoiseAmount: { min: 0, max: 3, step: 0.01 },
+  faceMeshNoiseAmount: { min: 0, max: 6, step: 0.01 },
   faceMeshNoiseFreq: { min: 1, max: 60, step: 0.5 },
   faceMeshNoiseSpeed: { min: 0, max: 5, step: 0.01 },
   faceMeshNoiseDir: { min: 0, max: 1, step: 0.01 },
-  faceMouthSimBoost: { min: 0, max: 1, step: 0.01 },
-  faceDyeContribution: { min: 0, max: 2, step: 0.01 },
+  faceMouthSimBoost: { min: 0, max: 2, step: 0.01 },
+  faceDyeContribution: { min: 0, max: 4, step: 0.01 },
   faceDyeFill:       { min: 0, max: 5, step: 0.01 },
   faceEdgeBoost:     { min: 0, max: 3, step: 0.01 },
   faceFlowCarry:     { min: 0, max: 1.5, step: 0.01 },
@@ -109,6 +109,8 @@ export const SLIDER_SPACE = {
   faceDebugMode:     { min: 0, max: 2, step: 1    },
   faceMeshEyeScale:  { min: 0.5, max: 3, step: 0.01 },
   faceDyeNoise:      { min: 0, max: 1, step: 1    },
+  faceMeshThickness: { min: 0.5, max: 3, step: 0.01 },
+  radialMask:        { min: 0.5, max: 1, step: 0.001 },
   // Transfer function
   colormapMode:      { min: 0, max: 17, step: 1    },
   colorSource:       { min: 0, max: 8, step: 1    },
@@ -179,6 +181,8 @@ const SLIDER_DEFAULTS = {
   faceMeshNoiseFreq: 12.0,
   faceMeshNoiseSpeed: 1.0,
   faceMouthSimBoost: 0.3,
+  faceMeshThickness: 1.0,
+  radialMask: 1.0,
   noiseWarp: 0.35,
   noiseSharpness: 0.5,
   noiseAnisotropy: 0.5,
@@ -526,12 +530,27 @@ export class BOController {
     const params = {};
     for (const key of SLIDER_KEYS) params[key] = getStateVal(state, key);
     canonicalizeNoiseFields(params);
-    await fetch('/api/examples', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, params }),
-    });
-    await this.refreshExamples();
+    try {
+      const res = await fetch('/api/examples', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, params }),
+      });
+      if (res.ok) {
+        await this.refreshExamples();
+        return;
+      }
+    } catch { /* server not available, fall through */ }
+    // Fallback: update in-memory examples and offer download
+    this.examples = this.examples.filter(e => e.name !== name);
+    this.examples.push({ name, params, timestamp: Date.now() });
+    const blob = new Blob([JSON.stringify(this.examples, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'examples.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+    console.warn(`Server not available. Downloaded examples.json — place it in fluid/data/`);
   }
 
   async deleteExample(name) {

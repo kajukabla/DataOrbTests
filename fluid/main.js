@@ -38,6 +38,8 @@ const state = {
   sphereMode: 0,         // 0=off, 1=on (planet-like shading)
   shadowExtend: 0.5,     // 0=hard shadow, 1=no shadow
   sphereSize: 1.0,       // visual sphere size multiplier (0.5-2.0)
+  radialMask: 1.0,       // visual radial clip (0.5-1.0)
+  faceMeshThickness: 1.0, // contour edge thickness (0.5-3.0)
   sizeRandomness: 0.3,
   glintBrightness: 0.1,
   prismaticAmount: 20.0,
@@ -2272,7 +2274,9 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   // ── Color computation (moved from vertex shader) ──
   let particleUV = vec2f(part.posX, part.posY);
   let centered = particleUV - vec2f(0.5, 0.5);
-  if (length(centered) > ${VISIBLE_SPHERE_RADIUS}) {
+  let pRadialMask = pp.extra4.z;
+  let pVisRadius = ${VISIBLE_SPHERE_RADIUS} * select(pRadialMask, 1.0, pRadialMask <= 0.0);
+  if (length(centered) > pVisRadius) {
     colors[idx] = vec4f(0.0);
     return;
   }
@@ -2646,7 +2650,7 @@ struct DisplayUniforms {
   tipColor: vec4f,    // xyz=tipColor RGB, w=roughness
   tempParams: vec4f,  // x=symmetryFlag, y=tempColorShift, z=colormapMode, w=colorSource
   cmapParams: vec4f,  // x=colorGain, y=sphereMode, z=shadowExtend, w=sphereSize
-  extraParams: vec4f, // x=colormapCompress
+  extraParams: vec4f, // x=colormapCompress, y=radialMask
 };
 @group(0) @binding(2) var<uniform> du: DisplayUniforms;
 @group(0) @binding(3) var tempTex: texture_2d<f32>;
@@ -2888,7 +2892,8 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   // Sphere mask in simulation UV space (already 1:1)
   let centered = uv - vec2f(0.5, 0.5);
   let screenDist = length(centered);
-  let screenRadius = ${VISIBLE_SPHERE_RADIUS};
+  let radialMask = du.extraParams.y;
+  let screenRadius = ${VISIBLE_SPHERE_RADIUS} * select(radialMask, 1.0, radialMask <= 0.0);
   if (screenDist > screenRadius) {
     return vec4f(0.0, 0.0, 0.0, 1.0);
   }
@@ -6331,7 +6336,7 @@ async function main() {
     if (Math.round(state.faceEffectorMode || 0) <= 0) return;
     const face = faceTracking.face;
     if (!face) return;
-    const contribution = Math.max(0, Math.min(2, state.faceDyeContribution ?? 1));
+    const contribution = Math.max(0, Math.min(4, state.faceDyeContribution ?? 1));
     if (contribution <= 0.001) return;
     const fillGain = Math.max(0, state.faceDyeFill ?? 1.8);
     const edgeGain = Math.max(0, state.faceEdgeBoost ?? 0.9);
@@ -6531,8 +6536,10 @@ async function main() {
     const holeFeather = 0.1 + (1.0 - detailScale) * 0.14;
     const blinkGateL = 1.0 - Math.pow(clamp01(blinkL), 1.2);
     const blinkGateR = 1.0 - Math.pow(clamp01(blinkR), 1.2);
-    const eyeOpenGateL = Math.pow(smooth01((eyeLeftOpen - 0.03) / 0.3), 1.15) * Math.pow(clamp01(blinkGateL), 1.75);
-    const eyeOpenGateR = Math.pow(smooth01((eyeRightOpen - 0.03) / 0.3), 1.15) * Math.pow(clamp01(blinkGateR), 1.75);
+    let eyeOpenGateL = Math.pow(smooth01((eyeLeftOpen - 0.03) / 0.3), 1.15) * Math.pow(clamp01(blinkGateL), 1.75);
+    let eyeOpenGateR = Math.pow(smooth01((eyeRightOpen - 0.03) / 0.3), 1.15) * Math.pow(clamp01(blinkGateR), 1.75);
+    if (eyeOpenGateL < 0.05) eyeOpenGateL = 0;
+    if (eyeOpenGateR < 0.05) eyeOpenGateR = 0;
     const eyeHoleL = holeCarve * eyeOpenGateL;
     const eyeHoleR = holeCarve * eyeOpenGateR;
     const mouthHole = holeCarve * (0.06 + mouthDrive * 1.24);
@@ -6629,6 +6636,7 @@ async function main() {
     }
 
     // 2) Add a controlled contour accent so the head boundary reads clearly.
+    const meshThickness = Math.max(0.5, Math.min(3, state.faceMeshThickness ?? 1.0));
     const edgePointCount = Math.max(12, Math.min(contourSamples.length, Math.max(0, edgeStageCap - splatCount)));
     for (let i = 0; i < edgePointCount; i++) {
       if (splatCount >= edgeStageCap) break;
@@ -6636,15 +6644,19 @@ async function main() {
       if (idx < 0) continue;
       const pt = contourSamples[idx];
       const [nx, ny] = direction(face.centerX, face.centerY, pt[0], pt[1]);
-      const upperBoost = 1.0 + Math.max(0, (pt[1] - face.centerY) / Math.max(face.radius, 1e-6)) * 0.3;
+      // Push contour points outward by meshThickness
+      const thicknessInflate = (meshThickness - 1.0) * 0.012 * stampSize;
+      const px = pt[0] + nx * thicknessInflate;
+      const py = pt[1] + ny * thicknessInflate;
+      const upperBoost = 1.0 + Math.max(0, (py - face.centerY) / Math.max(face.radius, 1e-6)) * 0.3;
       const edgeTint = edgeGain * (0.052 + smile * 0.032 + poseMotion * 0.02) * upperBoost;
       const edgeNudge = FACE_SPLAT_FORCE_BASE * 0.0041 * edgeGain;
       addFaceSplat(
-        pt[0], pt[1],
+        px, py,
         flowX * 1.05 + nx * edgeNudge * 0.36,
         flowY * 1.05 + ny * edgeNudge * 0.36,
         edgeCol[0] * edgeTint, edgeCol[1] * edgeTint, edgeCol[2] * edgeTint,
-        state.splatRadius * (2.55 + edgeGain * 1.6 + cheekPuff * 0.42)
+        state.splatRadius * (2.55 + edgeGain * 1.6 + cheekPuff * 0.42) * meshThickness
       );
     }
 
@@ -6764,7 +6776,7 @@ async function main() {
     const prevMapped = faceTracking.prevMapped;
     const hasPrev = prevMapped && prevMapped.length >= count * 2;
     const vis = face.visibility;
-    const contribution = Math.max(0, Math.min(2, state.faceDyeContribution ?? 1));
+    const contribution = Math.max(0, Math.min(4, state.faceDyeContribution ?? 1));
     if (contribution <= 0.001) { faceMeshActive = false; return; }
 
     if (!hasPrev) {
@@ -6776,6 +6788,17 @@ async function main() {
 
     const invDt = 1.0 / Math.max(dt, 0.001);
     const eyeScale = Math.max(0.5, Math.min(3, state.faceMeshEyeScale ?? 1.4));
+
+    // Eye blink gating for mesh mode — zero out eye vertex visibility when eyes closed
+    const blendScores = faceTracking.blendshapeScores;
+    const blinkL = blendScores?.eyeBlinkLeft ?? (1 - (face.eyeLeftOpen ?? 0.5));
+    const blinkR = blendScores?.eyeBlinkRight ?? (1 - (face.eyeRightOpen ?? 0.5));
+    const eyeLeftOpen = Math.max(0, Math.min(1, face.eyeLeftOpen ?? (1 - blinkL)));
+    const eyeRightOpen = Math.max(0, Math.min(1, face.eyeRightOpen ?? (1 - blinkR)));
+    const leftEyeIdxSet = new Set(FACE_IDX.leftEye);
+    const rightEyeIdxSet = new Set(FACE_IDX.rightEye);
+    const eyeGateL = eyeLeftOpen < 0.15 ? 0 : Math.min(1, (eyeLeftOpen - 0.1) / 0.3);
+    const eyeGateR = eyeRightOpen < 0.15 ? 0 : Math.min(1, (eyeRightOpen - 0.1) / 0.3);
 
     // Compute eye centers for scaling
     const eyeCenters = [FACE_IDX.leftEye, FACE_IDX.rightEye].map(eyeIdxs => {
@@ -6813,7 +6836,10 @@ async function main() {
       const mask = FACE_MESH_CONTOUR_SET.has(i) ? 2.0
                  : FACE_MESH_OUTLINE_SET.has(i) ? 1.0
                  : 0.0;
-      const v = (vis && Number.isFinite(vis[i])) ? vis[i] : 1.0;
+      let v = (vis && Number.isFinite(vis[i])) ? vis[i] : 1.0;
+      // Gate eye vertex visibility by blink state
+      if (leftEyeIdxSet.has(i)) v *= eyeGateL;
+      else if (rightEyeIdxSet.has(i)) v *= eyeGateR;
       const off = i * 6;
       faceMeshVertexData[off] = x;
       faceMeshVertexData[off + 1] = y;
@@ -7518,6 +7544,7 @@ async function main() {
     particleUBData[15] = _oklabOut[2];
     particleUBData[16] = state.streakGlow;
     particleUBData[17] = state.densitySize;
+    particleUBData[18] = state.radialMask ?? 1.0;
     device.queue.writeBuffer(particleUB, 0, particleUBData);
 
     displayUBData[0] = canvas.width;
@@ -7555,6 +7582,7 @@ async function main() {
     displayUBData[27] = state.sphereSize ?? 1.0;
     // extraParams vec4f
     displayUBData[28] = state.colormapCompress ? 1.0 : 0.0;
+    displayUBData[29] = state.radialMask ?? 1.0;
     device.queue.writeBuffer(displayUB, 0, displayUBData);
 
     // Collect splats into pre-allocated buffer
@@ -8451,6 +8479,7 @@ async function main() {
   wireSlider('faceMeshNoiseSpeed', 'faceMeshNoiseSpeed', v => v.toFixed(2));
   wireSlider('faceMeshNoiseDir', 'faceMeshNoiseDir', v => v.toFixed(2));
   wireSlider('faceMouthSimBoost', 'faceMouthSimBoost', v => v.toFixed(2));
+  wireSlider('faceMeshThickness', 'faceMeshThickness', v => v.toFixed(2));
   wireSelect('faceDebugMode', 'faceDebugMode', v => {
     state.faceDebugMode = Math.max(0, Math.min(2, Math.round(v)));
     if ((state.faceDebugMode > 0 || state.faceEffectorMode > 0) && !faceTracking.enabled) {
@@ -8552,6 +8581,7 @@ async function main() {
   });
   wireSlider('shadowExtend', 'shadowExtend');
   wireSlider('sphereSize', 'sphereSize');
+  wireSlider('radialMask', 'radialMask');
   // Init visibility
   {
     const on = state.sphereMode > 0;
@@ -9136,7 +9166,7 @@ async function main() {
   });
 
   // Load default preset on startup
-  const defaultIdx = bo.examples.findIndex(e => e.name === 'GooInferno');
+  const defaultIdx = bo.examples.findIndex(e => e.name === 'FaceInferno3');
   if (defaultIdx >= 0) {
     currentPresetIdx = defaultIdx;
     bo.loadExample(bo.examples[defaultIdx], state, syncAllUI);
