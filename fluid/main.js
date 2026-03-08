@@ -79,6 +79,7 @@ const state = {
   pressureDecay: 0.8,
   velDissipation: 0.998,
   dyeDissipation: 0.993,
+  maccormack: 0,         // 0=off (pure semi-Lagrangian), 1=full MacCormack correction
   dyeSoftCap: 1,       // 0=hard clamp (old behavior), 1=soft saturation curve
   dyeCeiling: 1.2,     // max dye brightness (soft or hard depending on dyeSoftCap)
   // Dye-coupled noise
@@ -104,9 +105,9 @@ const state = {
   moodSpeed: 0.3,
   // Palette
   paletteIndex: -1,
-  colormapMode: 0,     // 0=palette gradient, 1=viridis, 2=inferno, 3=plasma, 4=magma, 5=rainbow HDR, 6=rainbow HDR inv
+  colormapMode: 0,     // 0=palette gradient, 1=viridis, 2=inferno, 3=plasma, 4=magma, 5=rainbow HDR, 6=rainbow HDR inv, 7-16=new
   colormapCompress: 0, // 0=off, 1=on — auto-range compressor for colormap
-  colorSource: 0,      // 0=density, 1=velocity, 2=pressure, 3=vorticity
+  colorSource: 0,      // 0=density, 1=velocity, 2=pressure, 3=vorticity, 4=temp, 5=divergence, 6=kinetic energy, 7=strain, 8=flow dir
   colorGain: 0.5,      // 0-1 slider, 0.5 = 1x gain, log-scale multiplier
   // Face effector
   faceEffectorMode: 2,
@@ -558,6 +559,8 @@ struct Params {
   pressureDecay: f32,
   velDissipation: f32,
   dyeDissipation: f32,
+  maccormack: f32,  // 0=off, 1=full MacCormack correction
+  _pad0: f32, _pad1: f32, _pad2: f32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -912,6 +915,37 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let clamped = clamp(sampUV, vec2f(0.5 / p.simRes), vec2f(1.0 - 0.5 / p.simRes));
   var advected = textureSampleLevel(src, sampl, clamped, 0.0).xy;
 
+  // MacCormack correction: reduce numerical diffusion
+  if (p.maccormack > 0.001) {
+    // Forward trace from backtrace position (should return to original position if exact)
+    let velBack = textureSampleLevel(src, sampl, clamped, 0.0).xy;
+    let fwdUV = sampUV + p.dt * velBack * p.dx;
+    let fwdToCenter = fwdUV - SPHERE_CENTER;
+    let fwdDist = length(fwdToCenter);
+    var fwdSampUV = fwdUV;
+    if (fwdDist > SPHERE_RADIUS) {
+      fwdSampUV = SPHERE_CENTER + fwdToCenter / fwdDist * SPHERE_RADIUS;
+    }
+    let fwdClamped = clamp(fwdSampUV, vec2f(0.5 / p.simRes), vec2f(1.0 - 0.5 / p.simRes));
+    let roundTripped = textureSampleLevel(src, sampl, fwdClamped, 0.0).xy;
+    let original = vel;
+    let correction = 0.5 * (original - roundTripped);
+    advected += correction * p.maccormack;
+    // Clamp to neighborhood min/max to prevent new extrema
+    let px = 1.0 / p.simRes;
+    let n0 = textureSampleLevel(src, sampl, clamped + vec2f(px, 0.0), 0.0).xy;
+    let n1 = textureSampleLevel(src, sampl, clamped - vec2f(px, 0.0), 0.0).xy;
+    let n2 = textureSampleLevel(src, sampl, clamped + vec2f(0.0, px), 0.0).xy;
+    let n3 = textureSampleLevel(src, sampl, clamped - vec2f(0.0, px), 0.0).xy;
+    let n4 = textureSampleLevel(src, sampl, clamped + vec2f(px, px), 0.0).xy;
+    let n5 = textureSampleLevel(src, sampl, clamped - vec2f(px, px), 0.0).xy;
+    let n6 = textureSampleLevel(src, sampl, clamped + vec2f(px, -px), 0.0).xy;
+    let n7 = textureSampleLevel(src, sampl, clamped + vec2f(-px, px), 0.0).xy;
+    let nMin = min(min(min(n0, n1), min(n2, n3)), min(min(n4, n5), min(n6, n7)));
+    let nMax = max(max(max(n0, n1), max(n2, n3)), max(max(n4, n5), max(n6, n7)));
+    advected = clamp(advected, nMin, nMax);
+  }
+
   // Boundary interaction: reflect and repulse near edge
   let boundaryZone = SPHERE_RADIUS - 0.05;
   if (dist > boundaryZone) {
@@ -974,12 +1008,44 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let clamped = clamp(sampUV, vec2f(0.5 / p.simRes), vec2f(1.0 - 0.5 / p.simRes));
 
   // ── Dye advection ──
-  let advected = textureSampleLevel(dyeSrc, sampl, clamped, 0.0);
+  var advectedDye = textureSampleLevel(dyeSrc, sampl, clamped, 0.0).rgb;
+
+  // MacCormack correction for dye
+  if (p.maccormack > 0.001) {
+    // Use velocity at backtrace position for forward trace
+    let velBack = textureSampleLevel(velTex, sampl, clamped, 0.0).xy;
+    let fwdUV = sampUV + p.dt * velBack * p.dx;
+    let fwdToCenter = fwdUV - SPHERE_CENTER;
+    let fwdDist = length(fwdToCenter);
+    var fwdSampUV = fwdUV;
+    if (fwdDist > SPHERE_RADIUS) {
+      fwdSampUV = SPHERE_CENTER + fwdToCenter / fwdDist * SPHERE_RADIUS;
+    }
+    let fwdClamped = clamp(fwdSampUV, vec2f(0.5 / p.simRes), vec2f(1.0 - 0.5 / p.simRes));
+    let roundTripped = textureSampleLevel(dyeSrc, sampl, fwdClamped, 0.0).rgb;
+    let originalDye = textureLoad(dyeSrc, id.xy, 0).rgb;
+    let correction = 0.5 * (originalDye - roundTripped);
+    advectedDye += correction * p.maccormack;
+    // Clamp to neighborhood min/max (8 neighbors for wider range)
+    let px = 1.0 / p.simRes;
+    let d0 = textureSampleLevel(dyeSrc, sampl, clamped + vec2f(px, 0.0), 0.0).rgb;
+    let d1 = textureSampleLevel(dyeSrc, sampl, clamped - vec2f(px, 0.0), 0.0).rgb;
+    let d2 = textureSampleLevel(dyeSrc, sampl, clamped + vec2f(0.0, px), 0.0).rgb;
+    let d3 = textureSampleLevel(dyeSrc, sampl, clamped - vec2f(0.0, px), 0.0).rgb;
+    let d4 = textureSampleLevel(dyeSrc, sampl, clamped + vec2f(px, px), 0.0).rgb;
+    let d5 = textureSampleLevel(dyeSrc, sampl, clamped - vec2f(px, px), 0.0).rgb;
+    let d6 = textureSampleLevel(dyeSrc, sampl, clamped + vec2f(px, -px), 0.0).rgb;
+    let d7 = textureSampleLevel(dyeSrc, sampl, clamped + vec2f(-px, px), 0.0).rgb;
+    let dMin = min(min(min(d0, d1), min(d2, d3)), min(min(d4, d5), min(d6, d7)));
+    let dMax = max(max(max(d0, d1), max(d2, d3)), max(max(d4, d5), max(d6, d7)));
+    advectedDye = clamp(advectedDye, dMin, dMax);
+  }
+
   // When backtrace goes outside sphere and gets clamped, multiple edge pixels
   // sample the same boundary point, duplicating dye. Attenuate to compensate.
   let backtraceOvershoot = max(backDist - SPHERE_RADIUS, 0.0);
   let clampFade = 1.0 / (1.0 + backtraceOvershoot * 30.0);
-  var dye = advected.rgb * p.dyeDissipation * edgeFade * clampFade;
+  var dye = advectedDye * p.dyeDissipation * edgeFade * clampFade;
   let maxC = max(dye.r, max(dye.g, dye.b));
   let ceiling = tp.dyeCeiling;
   if (ceiling > 0.01) {
@@ -1277,38 +1343,103 @@ fn noiseHybridField(uvRaw: vec2f, t: f32) -> f32 {
   return s;
 }
 
+fn jupiterVortex(uvRaw: vec2f, center: vec2f, sigma: vec2f, sign: f32) -> vec2f {
+  // Radially symmetric Gaussian bump — curl of this creates circular flow (a real vortex).
+  // sign > 0 = CCW rotation (southern anticyclones), sign < 0 = CW (northern anticyclones).
+  let delta = (uvRaw - center) / sigma;
+  let r2 = dot(delta, delta);
+  let bump = sign * exp(-r2);
+  return vec2f(bump, exp(-r2 * 0.5));  // (scalar bump, wider mask for visual reference)
+}
+
 fn noiseJupiterField(uvRaw: vec2f, t: f32) -> f32 {
   let pPlanet = uvRaw - SPHERE_CENTER;
   let latNorm = pPlanet.y / max(SPHERE_RADIUS, 1e-5);
-  let lon = (atan2(pPlanet.y, pPlanet.x) + PI) / TAU;
+  let lonNorm = pPlanet.x / max(SPHERE_RADIUS, 1e-5);
 
   let jetShear = np.warp;
   let stormDensity = np.sharpness;
   let vortexStrength = np.anisotropy;
   let bandContrast = np.blend;
 
-  let bandFreq = 14.0 + np.frequency * 30.0 + bandContrast * 18.0;
-  let shear = (vnoise(vec2f(latNorm * (2.5 + jetShear * 4.0) + 17.0, t * 0.12)) - 0.5) * (0.6 + jetShear * 2.8);
-  let bandPhase = latNorm * bandFreq + shear * 4.8 + t * (0.22 + np.speed * 1.3);
-  let bands = 0.5 + 0.5 * sin(bandPhase);
-  let jets = 0.5 + 0.5 * sin(latNorm * (28.0 + jetShear * 30.0) + t * 0.37 + shear * 1.7);
-  let storms = vnoise(vec2f(lon * (8.0 + stormDensity * 16.0) + t * 0.21, latNorm * (7.0 + stormDensity * 9.0) - t * 0.18));
-  let stormMask = smoothstep(0.45 - stormDensity * 0.25, 0.98, storms);
+  // Slow time — Jupiter moves stately
+  let tSlow = t * 0.15;
 
-  let grsCenter = vec2f(0.76, 0.44);
-  let grsScale = vec2f(max(0.045, 0.10 - vortexStrength * 0.03), max(0.028, 0.065 - vortexStrength * 0.02));
-  let grsDelta = (uvRaw - grsCenter) / grsScale;
-  let grsMask = exp(-dot(grsDelta, grsDelta));
-  let grsSwirl = 0.5 + 0.5 * sin(atan2(grsDelta.y, grsDelta.x) * (4.0 + vortexStrength * 5.0) + t * (1.4 + vortexStrength * 1.7));
+  // === BAND STRUCTURE: damped sinusoidal wind profile ===
+  let bandBase = 13.0 + np.frequency * 6.0;
+  let dampPole = exp(-2.5 * latNorm * latNorm);
 
-  let turbulence = (vnoise(vec2f(lon * 22.0 - t * 0.4, latNorm * 18.0 + t * 0.31)) - 0.5) * 2.0;
-  var s = mix(bands, jets, 0.22 + jetShear * 0.33);
-  s = mix(s, storms, 0.18 + stormDensity * 0.42);
-  s = mix(s, grsSwirl, grsMask * (0.35 + vortexStrength * 0.55));
-  s += (stormMask - 0.5) * (0.1 + stormDensity * 0.32);
-  s += turbulence * (0.04 + bandContrast * 0.14);
-  s = mix(0.5, s, 0.62 + bandContrast * 0.36);
-  return s;
+  // Primary bands (~12-14 alternating belts/zones)
+  let band1 = sin(latNorm * bandBase * 2.0 + tSlow * 0.2) * dampPole;
+  // Secondary: non-uniform band widths (SEB/NEB wider near equator)
+  let band2 = sin(latNorm * bandBase * 0.85 + 0.7 + tSlow * 0.1) * 0.4 * dampPole;
+  // Tertiary: fine structure
+  let band3 = sin(latNorm * bandBase * 4.0 + 2.1) * 0.08 * dampPole;
+
+  let rawBands = 0.5 + 0.42 * (band1 + band2 + band3);
+
+  // === EQUATORIAL ZONE: soften the harsh center jet ===
+  let eqSmooth = smoothstep(0.0, 0.12, abs(latNorm));
+  let bands = mix(0.62, rawBands, eqSmooth);
+
+  // === JET SHEAR: gentle latitude-dependent perturbation ===
+  let shear = (vnoise(vec2f(latNorm * 3.0 + 7.0, tSlow * 0.3)) - 0.5) * jetShear * 0.4;
+
+  // === STORM VORTICES — Gaussian bumps whose curl creates circular flow ===
+  // Positive sign = CCW (southern anticyclones), negative = CW (northern)
+
+  // GRS: 22°S (latNorm ~ -0.37), large, CCW — extra strong for visible vortex
+  let grs = jupiterVortex(uvRaw,
+    vec2f(SPHERE_CENTER.x + 0.06, SPHERE_CENTER.y - 0.37 * SPHERE_RADIUS),
+    vec2f(0.06 + vortexStrength * 0.02, 0.038 + vortexStrength * 0.012),
+    0.6 + vortexStrength * 0.4);
+
+  // White Oval: ~33°S, medium, CCW
+  let wo1 = jupiterVortex(uvRaw,
+    vec2f(SPHERE_CENTER.x - 0.08, SPHERE_CENTER.y - 0.55 * SPHERE_RADIUS),
+    vec2f(0.03, 0.02),
+    0.2 + vortexStrength * 0.15);
+
+  // North Temperate Storm: ~23°N, CW (negative for northern hemisphere)
+  let nts = jupiterVortex(uvRaw,
+    vec2f(SPHERE_CENTER.x + 0.1, SPHERE_CENTER.y + 0.38 * SPHERE_RADIUS),
+    vec2f(0.025, 0.018),
+    -(0.18 + vortexStrength * 0.12));
+
+  // Small SEB storm: ~10°S, CCW
+  let seb = jupiterVortex(uvRaw,
+    vec2f(SPHERE_CENTER.x - 0.12, SPHERE_CENTER.y - 0.18 * SPHERE_RADIUS),
+    vec2f(0.02, 0.015),
+    0.15 + vortexStrength * 0.1);
+
+  // === MULTI-SCALE TURBULENCE for fine detail ===
+  // Large-scale: slow drift in bands
+  let turb1 = (vnoise(vec2f(lonNorm * 8.0 - tSlow * 0.12, latNorm * 6.0 + tSlow * 0.08)) - 0.5) * 2.0;
+  // Medium-scale: eddies at band boundaries
+  let turb2 = (vnoise(vec2f(lonNorm * 18.0 + tSlow * 0.2, latNorm * 14.0 - tSlow * 0.15)) - 0.5) * 2.0;
+  // Fine-scale: texture detail
+  let turb3 = (vnoise(vec2f(lonNorm * 35.0 - tSlow * 0.3, latNorm * 28.0 + tSlow * 0.22)) - 0.5) * 2.0;
+
+  // === LONGITUDE-DEPENDENT BAND VARIATION ===
+  // Real Jupiter bands aren't perfectly uniform — they have festoons and chevrons
+  let festoon = (vnoise(vec2f(lonNorm * 12.0 + latNorm * 6.0, tSlow * 0.1 + 3.7)) - 0.5) * 0.08 * dampPole;
+
+  // === FINAL MIX ===
+  var s = bands + shear * 0.15 + festoon;
+  // Storm vortices — Gaussian bumps add directly to scalar field
+  // Their curl creates proper circular flow
+  s += grs.x * (2.5 + stormDensity * 1.2);
+  s += wo1.x * (0.8 + stormDensity * 0.4);
+  s += nts.x * (0.8 + stormDensity * 0.4);
+  s += seb.x * (0.6 + stormDensity * 0.3);
+  // Multi-scale turbulence — stronger at mid-latitudes
+  let midLatBoost = 1.0 - abs(latNorm) * 0.5;
+  s += turb1 * (0.012 + bandContrast * 0.03) * midLatBoost;
+  s += turb2 * (0.008 + bandContrast * 0.02) * midLatBoost;
+  s += turb3 * (0.004 + bandContrast * 0.01) * midLatBoost;
+  // Band contrast control
+  s = mix(0.5, s, 0.6 + bandContrast * 0.35);
+  return clamp(s, 0.0, 1.0);
 }
 
 fn scalarFieldCore(uvRaw: vec2f) -> f32 {
@@ -2597,12 +2728,146 @@ fn cmapRainbow(t: f32) -> vec3f {
   return vec3f(r, g, b);
 }
 
+fn cmapCividis(t: f32) -> vec3f {
+  let c0 = vec3f(0.0118, 0.1365, 0.2845);
+  let c1 = vec3f(-1.7675, 0.6084, 2.9457);
+  let c2 = vec3f(27.2759, 0.7066, -20.8675);
+  let c3 = vec3f(-99.6276, -2.7138, 66.5702);
+  let c4 = vec3f(169.6920, 5.1714, -102.6734);
+  let c5 = vec3f(-136.8732, -4.5348, 75.3209);
+  let c6 = vec3f(42.3212, 1.5370, -21.3691);
+  return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
+}
+
+fn cmapTurbo(t: f32) -> vec3f {
+  let c0 = vec3f(0.1695, 0.0646, 0.1908);
+  let c1 = vec3f(4.2981, 3.1627, 8.4247);
+  let c2 = vec3f(-45.8051, -5.0894, -18.0147);
+  let c3 = vec3f(161.2554, 26.3008, -56.4336);
+  let c4 = vec3f(-228.9764, -72.0879, 214.5408);
+  let c5 = vec3f(139.8151, 69.8321, -233.3300);
+  let c6 = vec3f(-30.2413, -22.1441, 84.6455);
+  return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
+}
+
+fn cmapTwilight(t: f32) -> vec3f {
+  let c0 = vec3f(0.9030, 0.8515, 0.9412);
+  let c1 = vec3f(-3.6605, -0.3096, -4.0021);
+  let c2 = vec3f(16.9169, -5.9994, 40.1627);
+  let c3 = vec3f(-71.4223, -7.5505, -177.5606);
+  let c4 = vec3f(156.0521, 53.7958, 332.9832);
+  let c5 = vec3f(-148.5457, -61.1882, -278.6118);
+  let c6 = vec3f(50.6458, 21.2911, 86.9936);
+  return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
+}
+
+fn cmapCoolWarm(t: f32) -> vec3f {
+  let c0 = vec3f(0.2290, 0.2807, 0.7545);
+  let c1 = vec3f(1.0634, 2.4719, 1.4381);
+  let c2 = vec3f(1.6752, -8.8387, -0.4910);
+  let c3 = vec3f(-4.1865, 38.5691, -7.1476);
+  let c4 = vec3f(6.6425, -87.0970, 6.3481);
+  let c5 = vec3f(-8.4946, 84.3136, 1.0286);
+  let c6 = vec3f(3.7738, -29.6923, -1.7824);
+  return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
+}
+
+fn cmapParula(t: f32) -> vec3f {
+  let c0 = vec3f(0.3076, 0.1581, 0.6756);
+  let c1 = vec3f(-2.4198, 0.1171, 2.1750);
+  let c2 = vec3f(37.1713, 13.1990, 5.2631);
+  let c3 = vec3f(-204.7459, -55.3360, -65.6626);
+  let c4 = vec3f(454.5859, 111.6119, 158.8787);
+  let c5 = vec3f(-430.4851, -112.2711, -160.8023);
+  let c6 = vec3f(146.5745, 43.0000, 59.7521);
+  return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
+}
+
+fn cmapOcean(t: f32) -> vec3f {
+  let c0 = vec3f(0.0033, 0.3884, -0.0034);
+  let c1 = vec3f(0.1223, 3.3475, 1.0784);
+  let c2 = vec3f(-5.2406, -49.1775, -0.5923);
+  let c3 = vec3f(40.9309, 181.9882, 1.6538);
+  let c4 = vec3f(-119.0150, -287.3440, -1.8884);
+  let c5 = vec3f(142.7142, 211.0243, 0.7553);
+  let c6 = vec3f(-58.6215, -59.2210, -0.0000);
+  return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
+}
+
+fn cmapHot(t: f32) -> vec3f {
+  let c0 = vec3f(0.1307, -0.0113, -0.0688);
+  let c1 = vec3f(-1.2313, 0.4351, 2.8980);
+  let c2 = vec3f(35.8805, -1.3049, -31.5646);
+  let c3 = vec3f(-119.7020, -23.6360, 140.5122);
+  let c4 = vec3f(167.7675, 113.7873, -291.6687);
+  let c5 = vec3f(-108.1641, -150.3936, 278.0787);
+  let c6 = vec3f(26.3120, 62.1851, -97.1968);
+  return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
+}
+
+fn cmapCopper(t: f32) -> vec3f {
+  let c0 = vec3f(0.0010, -0.0027, -0.0017);
+  let c1 = vec3f(0.9088, 0.8424, 0.5365);
+  let c2 = vec3f(4.2640, -0.4627, -0.2947);
+  let c3 = vec3f(-19.3395, 1.2919, 0.8228);
+  let c4 = vec3f(38.2314, -1.4752, -0.9395);
+  let c5 = vec3f(-33.1553, 0.5901, 0.3758);
+  let c6 = vec3f(10.0547, -0.0000, -0.0000);
+  return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
+}
+
+fn cmapCubehelix(t: f32) -> vec3f {
+  let c0 = vec3f(-0.0155, 0.0049, 0.0007);
+  let c1 = vec3f(4.1435, -0.4912, 0.6291);
+  let c2 = vec3f(-44.9785, 17.2184, 27.5656);
+  let c3 = vec3f(182.5358, -54.7812, -189.1731);
+  let c4 = vec3f(-305.9171, 64.4403, 453.5747);
+  let c5 = vec3f(225.5414, -23.3654, -452.3094);
+  let c6 = vec3f(-60.2432, -2.0791, 160.7356);
+  return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
+}
+
+fn cmapSpectral(t: f32) -> vec3f {
+  let c0 = vec3f(0.5675, 0.0151, 0.2259);
+  let c1 = vec3f(4.0665, 2.0707, 3.3389);
+  let c2 = vec3f(-17.6618, -1.5484, -44.4454);
+  let c3 = vec3f(41.8482, 19.3656, 219.8414);
+  let c4 = vec3f(-45.6985, -57.9659, -453.0748);
+  let c5 = vec3f(9.9559, 58.1645, 414.7922);
+  let c6 = vec3f(7.3099, -19.7990, -140.0635);
+  return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), vec3f(0.0), vec3f(1.0));
+}
+
+fn cmapJupiter(t: f32) -> vec3f {
+  // NASA Jupiter palette — values darkened to compensate for HDR boost in display shader
+  // cream zones (low t) → warm ochre → reddish-brown belts (high t)
+  let s = clamp(t, 0.0, 1.0);
+  if (s < 0.12) { return mix(vec3f(0.60,0.55,0.44), vec3f(0.62,0.57,0.43), s / 0.12); }
+  else if (s < 0.25) { return mix(vec3f(0.62,0.57,0.43), vec3f(0.58,0.50,0.36), (s - 0.12) / 0.13); }
+  else if (s < 0.38) { return mix(vec3f(0.60,0.52,0.38), vec3f(0.50,0.38,0.24), (s - 0.25) / 0.13); }
+  else if (s < 0.50) { return mix(vec3f(0.50,0.38,0.24), vec3f(0.42,0.30,0.17), (s - 0.38) / 0.12); }
+  else if (s < 0.65) { return mix(vec3f(0.42,0.30,0.17), vec3f(0.35,0.22,0.12), (s - 0.50) / 0.15); }
+  else if (s < 0.80) { return mix(vec3f(0.35,0.22,0.12), vec3f(0.45,0.16,0.08), (s - 0.65) / 0.15); }
+  else { return mix(vec3f(0.45,0.16,0.08), vec3f(0.38,0.12,0.06), (s - 0.80) / 0.20); }
+}
+
 fn evalColormap(t: f32, mode: i32) -> vec3f {
   if (mode == 1) { return cmapViridis(t); }
   else if (mode == 2) { return cmapInferno(t); }
   else if (mode == 3) { return cmapPlasma(t); }
   else if (mode == 5) { return cmapRainbow(t); }
   else if (mode == 6) { return cmapRainbow(1.0 - t); }
+  else if (mode == 7) { return cmapCividis(t); }
+  else if (mode == 8) { return cmapTurbo(t); }
+  else if (mode == 9) { return cmapTwilight(t); }
+  else if (mode == 10) { return cmapCoolWarm(t); }
+  else if (mode == 11) { return cmapParula(t); }
+  else if (mode == 12) { return cmapOcean(t); }
+  else if (mode == 13) { return cmapHot(t); }
+  else if (mode == 14) { return cmapCopper(t); }
+  else if (mode == 15) { return cmapCubehelix(t); }
+  else if (mode == 16) { return cmapSpectral(t); }
+  else if (mode == 17) { return cmapJupiter(t); }
   else { return cmapMagma(t); }
 }
 
@@ -2642,18 +2907,55 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let gainMul = pow(10.0, (0.5 - gainSlider) * 4.0);
   var sourceVal = intensity / gainMul; // density default — gain applies for colormaps
   if (colorSource == 1) {
+    // Velocity magnitude (speed)
     let vel = textureSampleLevel(velTex, samp, uv, 0.0).rg;
     sourceVal = length(vel) / (100.0 * gainMul);
   } else if (colorSource == 2) {
+    // Pressure (absolute)
     let press = textureSampleLevel(pressTex, samp, uv, 0.0).r;
     sourceVal = abs(press) / (100.0 * gainMul);
   } else if (colorSource == 3) {
+    // Vorticity (curl magnitude, smoothed)
     let c0v = textureSampleLevel(curlTex, samp, uv, 0.0).r;
     let c1v = textureSampleLevel(curlTex, samp, uv + vec2f(texel.x, 0.0), 0.0).r;
     let c2v = textureSampleLevel(curlTex, samp, uv - vec2f(texel.x, 0.0), 0.0).r;
     let c3v = textureSampleLevel(curlTex, samp, uv + vec2f(0.0, texel.y), 0.0).r;
     let c4v = textureSampleLevel(curlTex, samp, uv - vec2f(0.0, texel.y), 0.0).r;
     sourceVal = abs((c0v * 2.0 + c1v + c2v + c3v + c4v) / 6.0) / (50.0 * gainMul);
+  } else if (colorSource == 4) {
+    // Temperature
+    let temp = textureSampleLevel(tempTex, samp, uv, 0.0).r;
+    sourceVal = abs(temp - 0.5) * 2.0 / gainMul;
+  } else if (colorSource == 5) {
+    // Divergence (computed from velocity derivatives — shows sources/sinks)
+    let vR = textureSampleLevel(velTex, samp, uv + vec2f(texel.x, 0.0), 0.0).rg;
+    let vL = textureSampleLevel(velTex, samp, uv - vec2f(texel.x, 0.0), 0.0).rg;
+    let vU = textureSampleLevel(velTex, samp, uv + vec2f(0.0, texel.y), 0.0).rg;
+    let vD = textureSampleLevel(velTex, samp, uv - vec2f(0.0, texel.y), 0.0).rg;
+    let divVal = (vR.x - vL.x + vU.y - vD.y) * 0.5;
+    sourceVal = abs(divVal) / (50.0 * gainMul);
+  } else if (colorSource == 6) {
+    // Kinetic energy (vel² — highlights high-energy turbulent regions)
+    let vel = textureSampleLevel(velTex, samp, uv, 0.0).rg;
+    sourceVal = dot(vel, vel) / (5000.0 * gainMul);
+  } else if (colorSource == 7) {
+    // Strain rate (rate of deformation — highlights shearing flow)
+    let vR = textureSampleLevel(velTex, samp, uv + vec2f(texel.x, 0.0), 0.0).rg;
+    let vL = textureSampleLevel(velTex, samp, uv - vec2f(texel.x, 0.0), 0.0).rg;
+    let vU = textureSampleLevel(velTex, samp, uv + vec2f(0.0, texel.y), 0.0).rg;
+    let vD = textureSampleLevel(velTex, samp, uv - vec2f(0.0, texel.y), 0.0).rg;
+    let dudx = (vR.x - vL.x) * 0.5;
+    let dvdy = (vU.y - vD.y) * 0.5;
+    let dudy = (vU.x - vD.x) * 0.5;
+    let dvdx = (vR.y - vL.y) * 0.5;
+    let strainMag = sqrt(dudx * dudx + dvdy * dvdy + 0.5 * (dudy + dvdx) * (dudy + dvdx));
+    sourceVal = strainMag / (50.0 * gainMul);
+  } else if (colorSource == 8) {
+    // Velocity direction (angle mapped 0-1 for colormap — shows flow structure)
+    let vel = textureSampleLevel(velTex, samp, uv, 0.0).rg;
+    let speed = length(vel);
+    let angle = atan2(vel.y, vel.x); // -π to π
+    sourceVal = (angle / 6.2832 + 0.5) * speed / (50.0 * gainMul);
   }
   var mappedVal = max(sourceVal, 0.0);
 
@@ -3644,10 +3946,10 @@ async function main() {
 
   // ─── Uniform buffer (simulation params) ────────────────────────────────
   const paramBuf = device.createBuffer({
-    size: 64, // 16 floats × 4 bytes
+    size: 80, // 20 floats × 4 bytes
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const paramData = new Float32Array(16);
+  const paramData = new Float32Array(20);
 
   function writeParams(overrides = {}, buf = paramBuf) {
     const d = { dt: 0.016, dx: 1 / SIM_RES, simRes: SIM_RES, time: 0,
@@ -3656,6 +3958,7 @@ async function main() {
       splatRadius: state.splatRadius, curlStrength: state.curlStrength,
       pressureDecay: state.pressureDecay,
       velDissipation: state.velDissipation, dyeDissipation: state.dyeDissipation,
+      maccormack: state.maccormack,
       ...overrides };
     paramData[0]  = d.dt;
     paramData[1]  = d.dx;
@@ -3673,6 +3976,8 @@ async function main() {
     paramData[13] = d.pressureDecay;
     paramData[14] = d.velDissipation;
     paramData[15] = d.dyeDissipation;
+    paramData[16] = d.maccormack;
+    // [17-19] padding
     device.queue.writeBuffer(buf, 0, paramData);
   }
 
@@ -7029,7 +7334,95 @@ async function main() {
     return [r, g, b];
   }
 
-  const colormaps = [inferno, magma, plasma, viridis, liquidGold];
+  function cividis(t) {
+    t = clamp01(t);
+    const c0 = [0.0118, 0.1365, 0.2845], c1 = [-1.7675, 0.6084, 2.9457], c2 = [27.2759, 0.7066, -20.8675];
+    const c3 = [-99.6276, -2.7138, 66.5702], c4 = [169.6920, 5.1714, -102.6734];
+    const c5 = [-136.8732, -4.5348, 75.3209], c6 = [42.3212, 1.5370, -21.3691];
+    return [0,1,2].map(i => clamp01(c0[i]+t*(c1[i]+t*(c2[i]+t*(c3[i]+t*(c4[i]+t*(c5[i]+t*c6[i])))))));
+  }
+
+  function turbo(t) {
+    t = clamp01(t);
+    const c0 = [0.1695, 0.0646, 0.1908], c1 = [4.2981, 3.1627, 8.4247], c2 = [-45.8051, -5.0894, -18.0147];
+    const c3 = [161.2554, 26.3008, -56.4336], c4 = [-228.9764, -72.0879, 214.5408];
+    const c5 = [139.8151, 69.8321, -233.3300], c6 = [-30.2413, -22.1441, 84.6455];
+    return [0,1,2].map(i => clamp01(c0[i]+t*(c1[i]+t*(c2[i]+t*(c3[i]+t*(c4[i]+t*(c5[i]+t*c6[i])))))));
+  }
+
+  function twilight(t) {
+    t = clamp01(t);
+    const c0 = [0.9030, 0.8515, 0.9412], c1 = [-3.6605, -0.3096, -4.0021], c2 = [16.9169, -5.9994, 40.1627];
+    const c3 = [-71.4223, -7.5505, -177.5606], c4 = [156.0521, 53.7958, 332.9832];
+    const c5 = [-148.5457, -61.1882, -278.6118], c6 = [50.6458, 21.2911, 86.9936];
+    return [0,1,2].map(i => clamp01(c0[i]+t*(c1[i]+t*(c2[i]+t*(c3[i]+t*(c4[i]+t*(c5[i]+t*c6[i])))))));
+  }
+
+  function coolWarm(t) {
+    t = clamp01(t);
+    const c0 = [0.2290, 0.2807, 0.7545], c1 = [1.0634, 2.4719, 1.4381], c2 = [1.6752, -8.8387, -0.4910];
+    const c3 = [-4.1865, 38.5691, -7.1476], c4 = [6.6425, -87.0970, 6.3481];
+    const c5 = [-8.4946, 84.3136, 1.0286], c6 = [3.7738, -29.6923, -1.7824];
+    return [0,1,2].map(i => clamp01(c0[i]+t*(c1[i]+t*(c2[i]+t*(c3[i]+t*(c4[i]+t*(c5[i]+t*c6[i])))))));
+  }
+
+  function parula(t) {
+    t = clamp01(t);
+    const c0 = [0.3076, 0.1581, 0.6756], c1 = [-2.4198, 0.1171, 2.1750], c2 = [37.1713, 13.1990, 5.2631];
+    const c3 = [-204.7459, -55.3360, -65.6626], c4 = [454.5859, 111.6119, 158.8787];
+    const c5 = [-430.4851, -112.2711, -160.8023], c6 = [146.5745, 43.0000, 59.7521];
+    return [0,1,2].map(i => clamp01(c0[i]+t*(c1[i]+t*(c2[i]+t*(c3[i]+t*(c4[i]+t*(c5[i]+t*c6[i])))))));
+  }
+
+  function ocean(t) {
+    t = clamp01(t);
+    const c0 = [0.0033, 0.3884, -0.0034], c1 = [0.1223, 3.3475, 1.0784], c2 = [-5.2406, -49.1775, -0.5923];
+    const c3 = [40.9309, 181.9882, 1.6538], c4 = [-119.0150, -287.3440, -1.8884];
+    const c5 = [142.7142, 211.0243, 0.7553], c6 = [-58.6215, -59.2210, -0.0000];
+    return [0,1,2].map(i => clamp01(c0[i]+t*(c1[i]+t*(c2[i]+t*(c3[i]+t*(c4[i]+t*(c5[i]+t*c6[i])))))));
+  }
+
+  function hot(t) {
+    t = clamp01(t);
+    const c0 = [0.1307, -0.0113, -0.0688], c1 = [-1.2313, 0.4351, 2.8980], c2 = [35.8805, -1.3049, -31.5646];
+    const c3 = [-119.7020, -23.6360, 140.5122], c4 = [167.7675, 113.7873, -291.6687];
+    const c5 = [-108.1641, -150.3936, 278.0787], c6 = [26.3120, 62.1851, -97.1968];
+    return [0,1,2].map(i => clamp01(c0[i]+t*(c1[i]+t*(c2[i]+t*(c3[i]+t*(c4[i]+t*(c5[i]+t*c6[i])))))));
+  }
+
+  function copper(t) {
+    t = clamp01(t);
+    const c0 = [0.0010, -0.0027, -0.0017], c1 = [0.9088, 0.8424, 0.5365], c2 = [4.2640, -0.4627, -0.2947];
+    const c3 = [-19.3395, 1.2919, 0.8228], c4 = [38.2314, -1.4752, -0.9395];
+    const c5 = [-33.1553, 0.5901, 0.3758], c6 = [10.0547, -0.0000, -0.0000];
+    return [0,1,2].map(i => clamp01(c0[i]+t*(c1[i]+t*(c2[i]+t*(c3[i]+t*(c4[i]+t*(c5[i]+t*c6[i])))))));
+  }
+
+  function cubehelix(t) {
+    t = clamp01(t);
+    const c0 = [-0.0155, 0.0049, 0.0007], c1 = [4.1435, -0.4912, 0.6291], c2 = [-44.9785, 17.2184, 27.5656];
+    const c3 = [182.5358, -54.7812, -189.1731], c4 = [-305.9171, 64.4403, 453.5747];
+    const c5 = [225.5414, -23.3654, -452.3094], c6 = [-60.2432, -2.0791, 160.7356];
+    return [0,1,2].map(i => clamp01(c0[i]+t*(c1[i]+t*(c2[i]+t*(c3[i]+t*(c4[i]+t*(c5[i]+t*c6[i])))))));
+  }
+
+  function spectral(t) {
+    t = clamp01(t);
+    const c0 = [0.5675, 0.0151, 0.2259], c1 = [4.0665, 2.0707, 3.3389], c2 = [-17.6618, -1.5484, -44.4454];
+    const c3 = [41.8482, 19.3656, 219.8414], c4 = [-45.6985, -57.9659, -453.0748];
+    const c5 = [9.9559, 58.1645, 414.7922], c6 = [7.3099, -19.7990, -140.0635];
+    return [0,1,2].map(i => clamp01(c0[i]+t*(c1[i]+t*(c2[i]+t*(c3[i]+t*(c4[i]+t*(c5[i]+t*c6[i])))))));
+  }
+
+  function jupiter(t) {
+    t = clamp01(t);
+    const c0 = [0.1500, 0.0600, 0.0300], c1 = [2.2085, 0.8317, 1.1217], c2 = [-0.3088, 1.0547, -10.2843];
+    const c3 = [-10.1970, -3.1273, 45.0414], c4 = [22.8080, 4.4685, -88.6196];
+    const c5 = [-20.1050, -2.6386, 83.3206], c6 = [6.4244, 0.2910, -29.7598];
+    return [0,1,2].map(i => clamp01(c0[i]+t*(c1[i]+t*(c2[i]+t*(c3[i]+t*(c4[i]+t*(c5[i]+t*c6[i])))))));
+  }
+
+  const colormaps = [inferno, magma, plasma, viridis, liquidGold, cividis, turbo, twilight, coolWarm, parula, ocean, hot, copper, cubehelix, spectral, jupiter];
 
   const _palOut = [0, 0, 0];
   function palette(t, mapIndex) {
@@ -8093,6 +8486,7 @@ async function main() {
     });
   }
   wireSlider('curlStrength', 'curlStrength', v => Math.round(v));
+  wireSlider('maccormack', 'maccormack', v => v.toFixed(2));
   wireSlider('velDissipation', 'velDissipation', v => v.toFixed(3));
   wireSlider('dyeDissipation', 'dyeDissipation', v => v.toFixed(3));
   wireSlider('dyeCeiling', 'dyeCeiling', v => v.toFixed(2));
@@ -8259,6 +8653,7 @@ async function main() {
       if (faceDebugSel) faceDebugSel.value = String(Math.round(state.faceDebugMode || 0));
     }
     syncSlider('curlStrength', 'curlStrength', v => Math.round(v));
+    syncSlider('maccormack', 'maccormack', v => v.toFixed(2));
     syncSlider('velDissipation', 'velDissipation', v => v.toFixed(3));
     syncSlider('dyeDissipation', 'dyeDissipation', v => v.toFixed(3));
     syncSlider('dyeCeiling', 'dyeCeiling', v => v.toFixed(2));
@@ -8450,6 +8845,7 @@ async function main() {
     noiseAnisotropy: { min: 0, max: 1, step: 0.01 },
     noiseBlend: { min: 0, max: 1, step: 0.01 },
     curlStrength: { min: 0, max: 50, step: 1 },
+    maccormack: { min: 0, max: 1, step: 0.01 },
     velDissipation: { min: 0.99, max: 1.0, step: 0.001 },
     dyeDissipation: { min: 0.98, max: 1.0, step: 0.001 },
     pressureIters: { min: 10, max: 60, step: 1 },
@@ -8466,8 +8862,8 @@ async function main() {
     moodAmount: { min: 0, max: 1, step: 0.01 },
     moodSpeed: { min: 0, max: 1, step: 0.01 },
     paletteIndex: { min: -1, max: 49, step: 1 },
-    colormapMode: { min: 0, max: 6, step: 1 },
-    colorSource: { min: 0, max: 3, step: 1 },
+    colormapMode: { min: 0, max: 17, step: 1 },
+    colorSource: { min: 0, max: 8, step: 1 },
     colorGain: { min: 0, max: 1, step: 0.01 },
   };
   const morphColors = ['baseColor', 'accentColor', 'tipColor', 'glitterColor', 'glitterAccent', 'glitterTip', 'sheenColor'];
@@ -8740,7 +9136,7 @@ async function main() {
   });
 
   // Load default preset on startup
-  const defaultIdx = bo.examples.findIndex(e => e.name === 'face ghost1');
+  const defaultIdx = bo.examples.findIndex(e => e.name === 'GooInferno');
   if (defaultIdx >= 0) {
     currentPresetIdx = defaultIdx;
     bo.loadExample(bo.examples[defaultIdx], state, syncAllUI);

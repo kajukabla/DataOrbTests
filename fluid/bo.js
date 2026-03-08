@@ -37,6 +37,7 @@ export const SLIDER_SPACE = {
   noiseAnisotropy:   { min: 0,    max: 1,     step: 0.01 },
   noiseBlend:        { min: 0,    max: 1,     step: 0.01 },
   curlStrength:      { min: 0,    max: 50,    step: 1    },
+  maccormack:        { min: 0,    max: 1,     step: 0.01 },
   velDissipation:    { min: 0.99, max: 1.0,   step: 0.001 },
   dyeDissipation:    { min: 0.98, max: 1.0,   step: 0.001 },
   dyeSoftCap:        { min: 0,    max: 1,     step: 1    },
@@ -107,9 +108,10 @@ export const SLIDER_SPACE = {
   faceStampSize:     { min: 0.5, max: 3, step: 0.01 },
   faceDebugMode:     { min: 0, max: 2, step: 1    },
   faceMeshEyeScale:  { min: 0.5, max: 3, step: 0.01 },
+  faceDyeNoise:      { min: 0, max: 1, step: 1    },
   // Transfer function
-  colormapMode:      { min: 0, max: 6, step: 1    },
-  colorSource:       { min: 0, max: 3, step: 1    },
+  colormapMode:      { min: 0, max: 17, step: 1    },
+  colorSource:       { min: 0, max: 8, step: 1    },
   colorGain:         { min: 0, max: 1, step: 0.01 },
   colormapCompress:  { min: 0, max: 1, step: 1    },
   // Particle overdraw cap
