@@ -128,6 +128,7 @@ const state = {
   faceMeshNoiseSpeed: 1.0,
   faceMeshNoiseDir: 0.0,
   faceMouthSimBoost: 0.3,
+  faceDyeNoise: 1, // 0=constant white (stable), 1=noise-modulated colors (default, can oscillate)
 };
 
 const FACE_TRACKER_BUNDLE_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
@@ -1807,6 +1808,8 @@ struct FaceDyeParams {
   faceCenterY: f32,
   time: f32,
   noiseSpeed: f32,
+  useNoise: f32,     // 0=constant white injection, 1=noise-modulated colors
+  _pad1: f32, _pad2: f32, _pad3: f32,
 };
 
 @group(0) @binding(1) var faceTex: texture_2d<f32>;
@@ -1847,29 +1850,32 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
   // Only outline vertices (eyes, mouth, face contour) emit dye
   if (mask > 0.01) {
-    let vis = max(face.a, 0.0);
-    let strength = mask * vis;
-    let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS - 0.02, dist);
+    if (fd.useNoise > 0.5) {
+      // Noise-modulated colored injection (can cause brightness oscillation)
+      let vis = max(face.a, 0.0);
+      let strength = mask * vis;
+      let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS - 0.02, dist);
 
-    // Noise-based intensity variation
-    let t = fd.time * fd.noiseSpeed;
-    let nUV = uv * fd.noiseFreq;
-    let n1 = dfbm(nUV + vec2f(t * 0.7, t * 0.3));
-    let n2 = dfbm(nUV * 0.6 + vec2f(-t * 0.4, t * 0.55) + vec2f(33.0, 17.0));
-    let noiseIntensity = 0.3 + n1 * 0.7;
-    let noiseHueShift = n2;
+      let t = fd.time * fd.noiseSpeed;
+      let nUV = uv * fd.noiseFreq;
+      let n1 = dfbm(nUV + vec2f(t * 0.7, t * 0.3));
+      let n2 = dfbm(nUV * 0.6 + vec2f(-t * 0.4, t * 0.55) + vec2f(33.0, 17.0));
+      let noiseIntensity = 0.3 + n1 * 0.7;
+      let noiseHueShift = n2;
 
-    // Motion brightness
-    let motionMag = min(length(face.rg) * 40.0, 1.5);
+      let motionMag = min(length(face.rg) * 40.0, 1.5);
 
-    // 3-color blend
-    let colorMix = clamp(noiseHueShift * 0.6 + noiseIntensity * 0.4, 0.0, 1.0);
-    let baseColor = mix(fd.color1, fd.color2, colorMix);
-    let finalColor = mix(baseColor, fd.color3, clamp(motionMag * 0.5, 0.0, 0.6));
+      let colorMix = clamp(noiseHueShift * 0.6 + noiseIntensity * 0.4, 0.0, 1.0);
+      let baseColor = mix(fd.color1, fd.color2, colorMix);
+      let finalColor = mix(baseColor, fd.color3, clamp(motionMag * 0.5, 0.0, 0.6));
 
-    let intensity = noiseIntensity * (1.0 + motionMag * 1.5);
-    let blend = strength * fd.dyeScale * boundaryFade * fd.frameTimeScale * intensity;
-    dye = vec4f(dye.rgb + finalColor * blend, 1.0);
+      let intensity = noiseIntensity * (1.0 + motionMag * 1.5);
+      let blend = strength * fd.dyeScale * boundaryFade * fd.frameTimeScale * intensity;
+      dye = vec4f(dye.rgb + finalColor * blend, 1.0);
+    } else {
+      // Constant-rate white injection — stable, display shader applies palette coloring
+      dye = vec4f(dye.rgb + vec3f(0.01), 1.0);
+    }
   }
   textureStore(dyeDst, id.xy, dye);
 }
@@ -4465,7 +4471,7 @@ async function main() {
     ],
   });
   const faceMeshDyeBuf = device.createBuffer({
-    label: 'faceMeshDye', size: 64,
+    label: 'faceMeshDye', size: 80,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   const faceMeshInjectDyePipe = device.createComputePipeline({
@@ -4481,7 +4487,7 @@ async function main() {
     bg(faceMeshInjectDyeBGL, [ubuf(paramBuf), faceMeshTexView, tview(dyeB), tview(dyeA), ubuf(faceMeshDyeBuf)]),
   ];
   const faceMeshForceData = new Float32Array(8);
-  const faceMeshDyeData = new Float32Array(16);
+  const faceMeshDyeData = new Float32Array(20);
   let faceMeshActive = false;
 
   const compactModule = device.createShaderModule({ code: makeParticleCompactShader(state.particleCount), label: 'particleCompact' });
@@ -6554,6 +6560,8 @@ async function main() {
     faceMeshDyeData[13] = face.centerY;
     faceMeshDyeData[14] = time;
     faceMeshDyeData[15] = Math.max(0, state.faceMeshNoiseSpeed ?? 1.0);
+    faceMeshDyeData[16] = state.faceDyeNoise ? 1.0 : 0.0;
+    // [17-19] padding
     device.queue.writeBuffer(faceMeshDyeBuf, 0, faceMeshDyeData);
 
     faceMeshActive = true;
@@ -8168,6 +8176,10 @@ async function main() {
     });
   }
   syncFaceTrackingToggleButton();
+  {
+    const chk = document.getElementById('faceDyeNoise');
+    if (chk) chk.addEventListener('change', () => { state.faceDyeNoise = chk.checked ? 1 : 0; });
+  }
   setFaceStatus('Face tracking idle');
   window.addEventListener('beforeunload', () => {
     if (faceTracking.enabled) stopFaceTracking();
@@ -8285,6 +8297,10 @@ async function main() {
       if (srcSel) srcSel.value = String(Math.round(state.colorSource || 0));
       const compressChk = document.getElementById('colormapCompress');
       if (compressChk) compressChk.checked = !!state.colormapCompress;
+    }
+    {
+      const chk = document.getElementById('faceDyeNoise');
+      if (chk) chk.checked = !!state.faceDyeNoise;
     }
     syncSlider('colorGain', 'colorGain');
     syncColor('baseColor', 'baseColor');
