@@ -974,7 +974,11 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 
   // ── Dye advection ──
   let advected = textureSampleLevel(dyeSrc, sampl, clamped, 0.0);
-  var dye = advected.rgb * p.dyeDissipation * edgeFade;
+  // When backtrace goes outside sphere and gets clamped, multiple edge pixels
+  // sample the same boundary point, duplicating dye. Attenuate to compensate.
+  let backtraceOvershoot = max(backDist - SPHERE_RADIUS, 0.0);
+  let clampFade = 1.0 / (1.0 + backtraceOvershoot * 30.0);
+  var dye = advected.rgb * p.dyeDissipation * edgeFade * clampFade;
   let maxC = max(dye.r, max(dye.g, dye.b));
   let ceiling = tp.dyeCeiling;
   if (ceiling > 0.01) {
