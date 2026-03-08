@@ -530,35 +530,40 @@ export class BOController {
     const params = {};
     for (const key of SLIDER_KEYS) params[key] = getStateVal(state, key);
     canonicalizeNoiseFields(params);
-    try {
-      const res = await fetch('/api/examples', {
+    let res = await fetch('/api/examples', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, params }),
+    }).catch(() => null);
+    if (!res || !res.ok) {
+      // Current server doesn't support POST, try node server on 8081
+      res = await fetch('http://localhost:8081/api/examples', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, params }),
-      });
-      if (res.ok) {
-        await this.refreshExamples();
-        return;
-      }
-    } catch { /* server not available, fall through */ }
-    // Fallback: update in-memory examples and offer download
-    this.examples = this.examples.filter(e => e.name !== name);
-    this.examples.push({ name, params, timestamp: Date.now() });
-    const blob = new Blob([JSON.stringify(this.examples, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'examples.json';
-    a.click();
-    URL.revokeObjectURL(a.href);
-    console.warn(`Server not available. Downloaded examples.json — place it in fluid/data/`);
+      }).catch(() => null);
+    }
+    if (!res || !res.ok) {
+      alert('Save failed — make sure the node server is running (node fluid/server.js).');
+      return;
+    }
+    await this.refreshExamples();
   }
 
   async deleteExample(name) {
-    await fetch('/api/examples', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
+    try {
+      await fetch('/api/examples', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+    } catch {
+      await fetch('http://localhost:8081/api/examples', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+    }
     await this.refreshExamples();
   }
 

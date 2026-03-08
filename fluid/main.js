@@ -6695,16 +6695,18 @@ async function main() {
     const leftEyeCenter = leftEyeFeature ? [leftEyeFeature.cx, leftEyeFeature.cy] : [face.centerX, face.centerY];
     const rightEyeCenter = rightEyeFeature ? [rightEyeFeature.cx, rightEyeFeature.cy] : [face.centerX, face.centerY];
     const mouthCenterForRim = mouthFeature ? [mouthFeature.cx, mouthFeature.cy] : mouthCenter;
-    const eyeRimGain = edgeGain * (0.028 + poseMotion * 0.018) * (0.65 + holeCarve * 0.7);
+    const eyeRimBase = (0.008 + poseMotion * 0.018) * (0.65 + holeCarve * 0.7);
+    const leftEyeRimGain = eyeRimBase + eyeLeftOpen * 0.12 * edgeGain;
+    const rightEyeRimGain = eyeRimBase + eyeRightOpen * 0.12 * edgeGain;
     const leftEyeRimPts = Math.max(3, Math.floor(rimBudget * 0.22));
     const rightEyeRimPts = Math.max(3, Math.floor(rimBudget * 0.22));
     const mouthRimPts = Math.max(4, Math.floor(rimBudget * 0.32));
     const lipRimPts = Math.max(4, rimBudget - leftEyeRimPts - rightEyeRimPts - mouthRimPts);
     loopRim(leftEyeSamples, leftEyeCenter, edgeCol,
-      eyeRimGain * eyeOpenGateL, 2.05 + stampSize * 0.52 + eyeLeftOpen * 1.05,
+      leftEyeRimGain * eyeOpenGateL, 2.05 + stampSize * 0.52 + eyeLeftOpen * 1.05,
       0.54, 0.95, leftEyeRimPts);
     loopRim(rightEyeSamples, rightEyeCenter, edgeCol,
-      eyeRimGain * eyeOpenGateR, 2.05 + stampSize * 0.52 + eyeRightOpen * 1.05,
+      rightEyeRimGain * eyeOpenGateR, 2.05 + stampSize * 0.52 + eyeRightOpen * 1.05,
       0.54, 0.95, rightEyeRimPts);
 
     // 4) Keep mouth as a soft lip rim injector instead of center bursts.
@@ -6788,17 +6790,7 @@ async function main() {
 
     const invDt = 1.0 / Math.max(dt, 0.001);
     const eyeScale = Math.max(0.5, Math.min(3, state.faceMeshEyeScale ?? 1.4));
-
-    // Eye blink gating for mesh mode — zero out eye vertex visibility when eyes closed
-    const blendScores = faceTracking.blendshapeScores;
-    const blinkL = blendScores?.eyeBlinkLeft ?? (1 - (face.eyeLeftOpen ?? 0.5));
-    const blinkR = blendScores?.eyeBlinkRight ?? (1 - (face.eyeRightOpen ?? 0.5));
-    const eyeLeftOpen = Math.max(0, Math.min(1, face.eyeLeftOpen ?? (1 - blinkL)));
-    const eyeRightOpen = Math.max(0, Math.min(1, face.eyeRightOpen ?? (1 - blinkR)));
-    const leftEyeIdxSet = new Set(FACE_IDX.leftEye);
-    const rightEyeIdxSet = new Set(FACE_IDX.rightEye);
-    const eyeGateL = eyeLeftOpen < 0.15 ? 0 : Math.min(1, (eyeLeftOpen - 0.1) / 0.3);
-    const eyeGateR = eyeRightOpen < 0.15 ? 0 : Math.min(1, (eyeRightOpen - 0.1) / 0.3);
+    const meshThickness = Math.max(0.5, Math.min(3, state.faceMeshThickness ?? 1.0));
 
     // Compute eye centers for scaling
     const eyeCenters = [FACE_IDX.leftEye, FACE_IDX.rightEye].map(eyeIdxs => {
@@ -6824,6 +6816,16 @@ async function main() {
         }
       }
 
+      // Inflate ALL vertices outward from face center for chunkier mesh
+      // Remap 0.5-3.0 slider to 0.85-1.15 scale range (subtle inflation)
+      if (meshThickness !== 1.0) {
+        const inflateScale = 1.0 + (meshThickness - 1.0) * 0.075;
+        const dx = x - face.centerX;
+        const dy = y - face.centerY;
+        x = face.centerX + dx * inflateScale;
+        y = face.centerY + dy * inflateScale;
+      }
+
       let vx = 0, vy = 0;
       if (hasPrev) {
         const px = prevMapped[i * 2];
@@ -6836,10 +6838,7 @@ async function main() {
       const mask = FACE_MESH_CONTOUR_SET.has(i) ? 2.0
                  : FACE_MESH_OUTLINE_SET.has(i) ? 1.0
                  : 0.0;
-      let v = (vis && Number.isFinite(vis[i])) ? vis[i] : 1.0;
-      // Gate eye vertex visibility by blink state
-      if (leftEyeIdxSet.has(i)) v *= eyeGateL;
-      else if (rightEyeIdxSet.has(i)) v *= eyeGateR;
+      const v = (vis && Number.isFinite(vis[i])) ? vis[i] : 1.0;
       const off = i * 6;
       faceMeshVertexData[off] = x;
       faceMeshVertexData[off + 1] = y;
@@ -9166,7 +9165,7 @@ async function main() {
   });
 
   // Load default preset on startup
-  const defaultIdx = bo.examples.findIndex(e => e.name === 'FaceInferno3');
+  const defaultIdx = bo.examples.findIndex(e => e.name === 'FaceInferno4');
   if (defaultIdx >= 0) {
     currentPresetIdx = defaultIdx;
     bo.loadExample(bo.examples[defaultIdx], state, syncAllUI);
