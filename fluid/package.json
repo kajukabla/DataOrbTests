@@ -1,0 +1,41 @@
+{
+  "name": "dataorb",
+  "version": "1.0.0",
+  "description": "DataOrb — Interactive fluid simulation with face tracking",
+  "main": "electron-main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --mac",
+    "dev": "node server.js"
+  },
+  "author": "Aaron Lemke",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.dataorb.app",
+    "productName": "DataOrb",
+    "asar": false,
+    "mac": {
+      "category": "public.app-category.entertainment",
+      "icon": "build/icon.icns",
+      "target": "dir",
+      "entitlements": "build/entitlements.plist",
+      "entitlementsInherit": "build/entitlements.plist",
+      "extendInfo": {
+        "NSCameraUsageDescription": "DataOrb uses your camera for face tracking to drive the fluid simulation.",
+        "NSMicrophoneUsageDescription": "DataOrb may use the microphone for audio-reactive features."
+      }
+    },
+    "files": [
+      "**/*",
+      "!build/icon.iconset",
+      "!build/icon_1024.png",
+      "!icon-source.png",
+      "!dist",
+      "!node_modules/.cache"
+    ]
+  }
+}

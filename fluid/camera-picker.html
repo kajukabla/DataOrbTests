@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>DataOrb — Select Camera</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #111;
+    color: #eee;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    padding: 24px;
+  }
+  h1 {
+    font-size: 20px;
+    font-weight: 500;
+    margin-bottom: 20px;
+    color: #ff6a3a;
+  }
+  #preview {
+    width: 320px;
+    height: 240px;
+    background: #222;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    object-fit: cover;
+  }
+  select {
+    width: 320px;
+    padding: 10px 14px;
+    font-size: 14px;
+    background: #222;
+    color: #eee;
+    border: 1px solid #444;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    cursor: pointer;
+    outline: none;
+  }
+  select:focus { border-color: #ff6a3a; }
+  button {
+    width: 320px;
+    padding: 12px;
+    font-size: 15px;
+    font-weight: 600;
+    background: #ff6a3a;
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button:hover { background: #ff8855; }
+  button:disabled { background: #555; cursor: wait; }
+  .skip {
+    margin-top: 10px;
+    background: none;
+    color: #888;
+    font-size: 13px;
+    font-weight: 400;
+    width: auto;
+    padding: 6px 12px;
+  }
+  .skip:hover { color: #ccc; background: none; }
+</style>
+</head>
+<body>
+  <h1>Select Camera</h1>
+  <video id="preview" autoplay muted playsinline></video>
+  <select id="cameraList"><option value="">Loading cameras...</option></select>
+  <button id="startBtn" disabled>Launch DataOrb</button>
+  <button class="skip" id="skipBtn">Skip (no camera)</button>
+
+<script>
+  const preview = document.getElementById('preview');
+  const cameraList = document.getElementById('cameraList');
+  const startBtn = document.getElementById('startBtn');
+  const skipBtn = document.getElementById('skipBtn');
+  let currentStream = null;
+
+  async function enumCameras() {
+    console.log('[picker] enumCameras() starting...');
+    // Need a brief getUserMedia to get labeled devices
+    try {
+      console.log('[picker] requesting initial getUserMedia for permissions...');
+      const tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      const tmpTrack = tmp.getVideoTracks()[0];
+      console.log('[picker] initial getUserMedia OK, track:', tmpTrack?.label, 'settings:', JSON.stringify(tmpTrack?.getSettings()));
+      tmp.getTracks().forEach(t => t.stop());
+    } catch (e) {
+      console.error('[picker] initial getUserMedia FAILED:', e.name, e.message);
+    }
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const allDevices = devices.map(d => ({ kind: d.kind, label: d.label, deviceId: d.deviceId?.slice(0, 12) + '...' }));
+    console.log('[picker] all devices:', JSON.stringify(allDevices));
+    const cams = devices.filter(d => d.kind === 'videoinput');
+    console.log('[picker] found', cams.length, 'cameras');
+    cameraList.innerHTML = '';
+    if (cams.length === 0) {
+      cameraList.innerHTML = '<option value="">No cameras found</option>';
+      return;
+    }
+    // Prefer built-in/FaceTime camera over iPhone/external
+    let defaultIdx = 0;
+    for (let i = 0; i < cams.length; i++) {
+      const label = (cams[i].label || '').toLowerCase();
+      if (label.includes('facetime') || label.includes('built-in') || label.includes('isight')) {
+        defaultIdx = i;
+        break;
+      }
+    }
+    // If no built-in found, prefer anything that's NOT an iPhone
+    if (defaultIdx === 0 && cams.length > 1) {
+      for (let i = 0; i < cams.length; i++) {
+        if (!(cams[i].label || '').toLowerCase().includes('iphone')) {
+          defaultIdx = i;
+          break;
+        }
+      }
+    }
+    for (const cam of cams) {
+      console.log('[picker] camera:', cam.label, 'id:', cam.deviceId?.slice(0, 12) + '...');
+      const opt = document.createElement('option');
+      opt.value = cam.deviceId;
+      opt.textContent = cam.label || `Camera ${cameraList.options.length + 1}`;
+      cameraList.appendChild(opt);
+    }
+    startBtn.disabled = false;
+    cameraList.selectedIndex = defaultIdx;
+    switchPreview(cams[defaultIdx].deviceId);
+  }
+
+  async function switchPreview(deviceId) {
+    console.log('[picker] switchPreview, deviceId:', deviceId?.slice(0, 12) + '...');
+    if (currentStream) currentStream.getTracks().forEach(t => t.stop());
+    if (!deviceId) return;
+    try {
+      currentStream = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: { exact: deviceId }, width: { ideal: 320 }, height: { ideal: 240 } },
+        audio: false,
+      });
+      const track = currentStream.getVideoTracks()[0];
+      console.log('[picker] preview OK, track label:', track?.label, 'settings:', JSON.stringify(track?.getSettings()));
+      preview.srcObject = currentStream;
+    } catch (e) {
+      console.error('[picker] switchPreview FAILED:', e.name, e.message);
+    }
+  }
+
+  cameraList.addEventListener('change', () => switchPreview(cameraList.value));
+
+  startBtn.addEventListener('click', () => {
+    if (currentStream) currentStream.getTracks().forEach(t => t.stop());
+    // Communicate selection back to electron main via hash
+    const deviceId = cameraList.value;
+    const label = cameraList.options[cameraList.selectedIndex]?.textContent || '';
+    console.log('[picker] START clicked, deviceId:', deviceId, 'label:', label);
+    window.location.hash = `selected:${deviceId}:${encodeURIComponent(label)}`;
+  });
+
+  skipBtn.addEventListener('click', () => {
+    if (currentStream) currentStream.getTracks().forEach(t => t.stop());
+    window.location.hash = 'skip';
+  });
+
+  enumCameras();
+</script>
+</body>
+</html>

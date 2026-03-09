@@ -996,7 +996,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     if (doTemp) { textureStore(tempDst, id.xy, vec4f(0.5, 0.0, 0.0, 1.0)); }
     return;
   }
-  let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.04, dist);
+  let edgeFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.04, SPHERE_RADIUS, dist);
 
   // ── Shared backtrace ──
   let vel = textureLoad(velTex, id.xy, 0).xy;
@@ -1497,7 +1497,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     return;
   }
-  let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.08, dist);
+  let edgeFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS, dist);
 
   let frame = makeSymmetryFrame(uv);
   var vel = textureLoad(velSrc, id.xy, 0).xy;
@@ -1611,7 +1611,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     textureStore(dyeDst, id.xy, dye);
     return;
   }
-  let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.06, dist);
+  let edgeFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.06, SPHERE_RADIUS, dist);
 
   // Compute velocity divergence (negative = convergent flow = density buildup)
   let idR = vec2u(min(id.x + 1u, res - 1u), id.y);
@@ -1736,7 +1736,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     return;
   }
-  let edgeFade = smoothstep(SPHERE_RADIUS, SPHERE_RADIUS - 0.04, dist);
+  let edgeFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.04, SPHERE_RADIUS, dist);
   let temp = textureLoad(tempTex, id.xy, 0).r;
   var vel = textureLoad(velSrc, id.xy, 0).xy;
   // Blend between upward and radial-outward buoyancy
@@ -5111,6 +5111,33 @@ async function main() {
   }
 
   // ─── Face Tracking + Face Effector ------------------------------------------------
+  // Camera selector — enumerate video devices and populate dropdown
+  const cameraSelect = document.getElementById('cameraSelect');
+  async function populateCameras() {
+    try {
+      // Need a brief getUserMedia call to trigger permission prompt so enumerateDevices returns labels
+      const tempStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }).catch(() => null);
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter(d => d.kind === 'videoinput');
+      if (cameraSelect) {
+        const prev = cameraSelect.value;
+        cameraSelect.innerHTML = '<option value="">Default</option>';
+        for (const dev of videoDevices) {
+          const opt = document.createElement('option');
+          opt.value = dev.deviceId;
+          opt.textContent = dev.label || `Camera ${cameraSelect.options.length}`;
+          cameraSelect.appendChild(opt);
+        }
+        if (prev) cameraSelect.value = prev;
+      }
+      if (tempStream) tempStream.getTracks().forEach(t => t.stop());
+    } catch (e) { console.warn('Camera enumeration failed:', e); }
+  }
+  populateCameras();
+  if (navigator.mediaDevices?.addEventListener) {
+    navigator.mediaDevices.addEventListener('devicechange', populateCameras);
+  }
+
   const faceTrackingStatusEl = document.getElementById('faceTrackingStatus');
   const faceTrackingToggleBtn = document.getElementById('faceTrackingToggle');
   const faceEffectorModeSelect = document.getElementById('faceEffectorMode');
@@ -6030,15 +6057,18 @@ async function main() {
     setFaceStatus('Starting webcam + face tracker...');
     syncFaceTrackingToggleButton();
     try {
+      const selectedCameraId = cameraSelect?.value || window.__dataorbCameraId || '';
+      console.log('[camera] selectedCameraId:', selectedCameraId, 'cameraSelect.value:', cameraSelect?.value, '__dataorbCameraId:', window.__dataorbCameraId);
+      const videoConstraints = selectedCameraId
+        ? { deviceId: { exact: selectedCameraId }, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60, max: 120 } }
+        : { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 60, max: 120 } };
+      console.log('[camera] getUserMedia constraints:', JSON.stringify(videoConstraints));
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
-        video: {
-          facingMode: 'user',
-          width: { ideal: 640 },
-          height: { ideal: 480 },
-          frameRate: { ideal: 60, max: 120 },
-        },
+        video: videoConstraints,
       });
+      const camTrack = stream.getVideoTracks()[0];
+      console.log('[camera] getUserMedia OK, track label:', camTrack?.label, 'settings:', JSON.stringify(camTrack?.getSettings()));
       if (startToken !== faceTracking.startToken || !faceTracking.initializing) {
         for (const track of stream.getTracks()) track.stop();
         return;
@@ -9163,6 +9193,15 @@ async function main() {
       stepPreset(-1);
     }
   });
+
+  // Read camera device ID from URL hash BEFORE preset load (preset may auto-start face tracking)
+  console.log('[camera] window.location.hash at init:', window.location.hash);
+  const hashMatch = window.location.hash.match(/camera=([^&]*)/);
+  if (hashMatch && hashMatch[1]) {
+    window.__dataorbCameraId = hashMatch[1];
+    if (cameraSelect) cameraSelect.value = hashMatch[1];
+    console.log('[camera] set __dataorbCameraId from hash:', hashMatch[1]);
+  }
 
   // Load default preset on startup
   const defaultIdx = bo.examples.findIndex(e => e.name === 'FaceInferno4');
