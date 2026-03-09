@@ -9483,20 +9483,27 @@ async function main() {
   }
 
   // Load default preset on startup
-  const defaultIdx = bo.examples.findIndex(e => e.name === (isMobile ? 'FaceInferno4' : 'FaceInferno4'));
+  const mobilePresetName = 'MobileSlosher';
+  const desktopPresetName = 'FaceInferno4';
+  const defaultPresetName = isMobile ? mobilePresetName : desktopPresetName;
+  const defaultIdx = bo.examples.findIndex(e => e.name === defaultPresetName);
   if (defaultIdx >= 0) {
     currentPresetIdx = defaultIdx;
     bo.loadExample(bo.examples[defaultIdx], state, syncAllUI);
     if (presetNameEl) presetNameEl.textContent = bo.examples[defaultIdx].name;
+  } else {
+    // Fallback to FaceInferno4 if mobile preset not found
+    const fallbackIdx = bo.examples.findIndex(e => e.name === 'FaceInferno4');
+    if (fallbackIdx >= 0) {
+      currentPresetIdx = fallbackIdx;
+      bo.loadExample(bo.examples[fallbackIdx], state, syncAllUI);
+      if (presetNameEl) presetNameEl.textContent = bo.examples[fallbackIdx].name;
+    }
   }
 
-  // On mobile, apply overrides after preset load for a good sloshing demo
+  // On mobile, ensure rect mode is set after preset load
   if (isMobile) {
     state.boundaryMode = 1;
-    // Fill the screen with dye via high noise injection
-    state.dyeNoiseAmount = Math.max(state.dyeNoiseAmount || 0, 0.6);
-    state.noiseAmount = Math.max(state.noiseAmount || 0, 0.4);
-    state.velDissipation = Math.min(state.velDissipation || 1, 0.985);
     syncAllUI();
   }
 
