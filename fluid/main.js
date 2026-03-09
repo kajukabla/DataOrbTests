@@ -39,6 +39,7 @@ const state = {
   shadowExtend: 0.5,     // 0=hard shadow, 1=no shadow
   sphereSize: 1.0,       // visual sphere size multiplier (0.5-2.0)
   radialMask: 1.0,       // visual radial clip (0.5-1.0)
+  boundaryMode: 0,       // 0=sphere, 1=rectangular
   faceMeshThickness: 1.0, // contour edge thickness (0.5-3.0)
   sizeRandomness: 0.3,
   glintBrightness: 0.1,
@@ -562,13 +563,37 @@ struct Params {
   velDissipation: f32,
   dyeDissipation: f32,
   maccormack: f32,  // 0=off, 1=full MacCormack correction
-  _pad0: f32, _pad1: f32, _pad2: f32,
+  boundaryMode: f32, // 0=sphere, 1=rectangular
+  _pad1: f32, _pad2: f32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
 const SPHERE_RADIUS: f32 = ${SIM_SPHERE_RADIUS};
+
+// Boundary helpers — switch between sphere and rectangular mode
+fn isOutsideBoundary(uv: vec2f) -> bool {
+  if (p.boundaryMode > 0.5) { return false; } // rect mode: nothing is outside
+  return length(uv - SPHERE_CENTER) > SPHERE_RADIUS;
+}
+fn boundaryEdgeFade(uv: vec2f, margin: f32) -> f32 {
+  if (p.boundaryMode > 0.5) {
+    let edgeX = min(uv.x, 1.0 - uv.x);
+    let edgeY = min(uv.y, 1.0 - uv.y);
+    return smoothstep(0.0, margin, min(edgeX, edgeY));
+  }
+  return 1.0 - smoothstep(SPHERE_RADIUS - margin, SPHERE_RADIUS, length(uv - SPHERE_CENTER));
+}
+fn clampToBoundary(uv: vec2f) -> vec2f {
+  if (p.boundaryMode > 0.5) {
+    return clamp(uv, vec2f(0.0), vec2f(1.0));
+  }
+  let toC = uv - SPHERE_CENTER;
+  let d = length(toC);
+  if (d > SPHERE_RADIUS) { return SPHERE_CENTER + toC / d * SPHERE_RADIUS; }
+  return uv;
+}
 `;
 
 const MAX_SPLATS = 256;
@@ -591,14 +616,12 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let res = u32(p.simRes);
   if (id.x >= res || id.y >= res) { return; }
   let uv = (vec2f(id.xy) + 0.5) / p.simRes;
-  let toCenter = uv - SPHERE_CENTER;
-  let dist = length(toCenter);
-  if (dist > SPHERE_RADIUS) {
+  if (isOutsideBoundary(uv)) {
     textureStore(dst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     return;
   }
   var vel = textureLoad(src, id.xy, 0).xy;
-  let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS - 0.02, dist);
+  let boundaryFade = boundaryEdgeFade(uv, 0.06);
   let count = min(splatMeta.x, ${MAX_SPLATS}u);
   for (var i = 0u; i < count; i++) {
     let s = splats[i];
@@ -607,14 +630,25 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let strength = exp(-dist2 / (2.0 * s.radius * s.radius));
     vel += strength * boundaryFade * vec2f(s.dx, s.dy);
   }
-  if (dist > SPHERE_RADIUS - 0.04) {
-    let normal = toCenter / max(dist, 1e-5);
-    let outward = dot(vel, normal);
-    if (outward > 0.0) {
-      vel -= normal * outward;
+  // Wall reflection near boundary
+  if (p.boundaryMode < 0.5) {
+    let toCenter = uv - SPHERE_CENTER;
+    let dist = length(toCenter);
+    if (dist > SPHERE_RADIUS - 0.04) {
+      let normal = toCenter / max(dist, 1e-5);
+      let outward = dot(vel, normal);
+      if (outward > 0.0) {
+        vel -= normal * outward;
+      }
+      let wallT = clamp((dist - (SPHERE_RADIUS - 0.04)) / 0.04, 0.0, 1.0);
+      vel *= mix(1.0, 0.72, wallT);
     }
-    let wallT = clamp((dist - (SPHERE_RADIUS - 0.04)) / 0.04, 0.0, 1.0);
-    vel *= mix(1.0, 0.72, wallT);
+  } else {
+    let margin = 0.02;
+    if (uv.x < margin && vel.x < 0.0) { vel.x = 0.0; }
+    if (uv.x > 1.0 - margin && vel.x > 0.0) { vel.x = 0.0; }
+    if (uv.y < margin && vel.y < 0.0) { vel.y = 0.0; }
+    if (uv.y > 1.0 - margin && vel.y > 0.0) { vel.y = 0.0; }
   }
   textureStore(dst, id.xy, vec4f(vel, 0.0, 1.0));
 }
@@ -640,23 +674,21 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let res = u32(p.simRes);
   if (id.x >= res || id.y >= res) { return; }
   let uv = (vec2f(id.xy) + 0.5) / p.simRes;
-  let toCenter = uv - SPHERE_CENTER;
-  let dist = length(toCenter);
   let doTemp = splatMeta.y != 0u;
-  if (dist > SPHERE_RADIUS - 0.02) {
+  if (isOutsideBoundary(uv)) {
     textureStore(dst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
-    if (doTemp) {
-      if (dist > SPHERE_RADIUS) {
-        textureStore(tempDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
-      } else {
-        textureStore(tempDst, id.xy, vec4f(textureLoad(tempSrc, id.xy, 0).r, 0.0, 0.0, 1.0));
-      }
-    }
+    if (doTemp) { textureStore(tempDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0)); }
+    return;
+  }
+  let bFade = boundaryEdgeFade(uv, 0.06);
+  if (bFade < 0.01) {
+    textureStore(dst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+    if (doTemp) { textureStore(tempDst, id.xy, vec4f(textureLoad(tempSrc, id.xy, 0).r, 0.0, 0.0, 1.0)); }
     return;
   }
   var dye = textureLoad(src, id.xy, 0);
   var temp = select(0.0, textureLoad(tempSrc, id.xy, 0).r, doTemp);
-  let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS - 0.02, dist);
+  let boundaryFade = bFade;
   let count = min(splatMeta.x, ${MAX_SPLATS}u);
   for (var i = 0u; i < count; i++) {
     let s = splats[i];
@@ -738,11 +770,11 @@ fn main(
 
   // Vorticity confinement
   let uv = (vec2f(id.xy) + 0.5) / p.simRes;
-  let dist = length(uv - SPHERE_CENTER);
-  if (dist > SPHERE_RADIUS) {
+  if (isOutsideBoundary(uv)) {
     textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     return;
   }
+  let dist = length(uv - SPHERE_CENTER);
 
   // Compute curl at 4 neighbors from shared vel tile for vorticity N vector
   let curlL = 0.5 * ((vyTile[ly+2][lx+2] - vyTile[ly+2][lx]) - (vxTile[ly+3][lx+1] - vxTile[ly+1][lx+1]));
@@ -765,14 +797,22 @@ fn main(
   N = N / lenN;
   let force = vec2f(N.y, -N.x) * curl * p.curlStrength;
   var newVel = vel + force * p.dt;
-  if (dist > SPHERE_RADIUS - 0.04) {
-    let normal = (uv - SPHERE_CENTER) / max(dist, 1e-5);
-    let outward = dot(newVel, normal);
-    if (outward > 0.0) {
-      newVel -= normal * outward;
+  if (p.boundaryMode < 0.5) {
+    if (dist > SPHERE_RADIUS - 0.04) {
+      let normal = (uv - SPHERE_CENTER) / max(dist, 1e-5);
+      let outward = dot(newVel, normal);
+      if (outward > 0.0) {
+        newVel -= normal * outward;
+      }
+      let wallT = clamp((dist - (SPHERE_RADIUS - 0.04)) / 0.04, 0.0, 1.0);
+      newVel *= mix(1.0, 0.75, wallT);
     }
-    let wallT = clamp((dist - (SPHERE_RADIUS - 0.04)) / 0.04, 0.0, 1.0);
-    newVel *= mix(1.0, 0.75, wallT);
+  } else {
+    let margin = 0.02;
+    if (uv.x < margin && newVel.x < 0.0) { newVel.x = 0.0; }
+    if (uv.x > 1.0 - margin && newVel.x > 0.0) { newVel.x = 0.0; }
+    if (uv.y < margin && newVel.y < 0.0) { newVel.y = 0.0; }
+    if (uv.y > 1.0 - margin && newVel.y > 0.0) { newVel.y = 0.0; }
   }
   textureStore(velDst, id.xy, vec4f(newVel, 0.0, 1.0));
 }
@@ -861,9 +901,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let res = u32(p.simRes);
   if (id.x >= res || id.y >= res) { return; }
   let uv = (vec2f(id.xy) + 0.5) / p.simRes;
-  let toCenter = uv - SPHERE_CENTER;
-  let dist = length(toCenter);
-  if (dist > SPHERE_RADIUS) {
+  if (isOutsideBoundary(uv)) {
     textureStore(dst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     return;
   }
@@ -873,13 +911,23 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let pT = textureLoad(pressTex, vec2u(id.x, min(id.y+1, res-1)), 0).x;
   var vel = textureLoad(velTex, id.xy, 0).xy;
   vel -= 0.5 * vec2f(pR - pL, pT - pB);
-  // Enforce no-penetration at sphere boundary
-  if (dist > SPHERE_RADIUS - 0.02) {
-    let normal = toCenter / dist;
-    let outward = dot(vel, normal);
-    if (outward > 0.0) {
-      vel -= normal * outward;
+  // Enforce no-penetration at boundary
+  if (p.boundaryMode < 0.5) {
+    let toCenter = uv - SPHERE_CENTER;
+    let dist = length(toCenter);
+    if (dist > SPHERE_RADIUS - 0.02) {
+      let normal = toCenter / dist;
+      let outward = dot(vel, normal);
+      if (outward > 0.0) {
+        vel -= normal * outward;
+      }
     }
+  } else {
+    let margin = 0.01;
+    if (uv.x < margin && vel.x < 0.0) { vel.x = 0.0; }
+    if (uv.x > 1.0 - margin && vel.x > 0.0) { vel.x = 0.0; }
+    if (uv.y < margin && vel.y < 0.0) { vel.y = 0.0; }
+    if (uv.y > 1.0 - margin && vel.y > 0.0) { vel.y = 0.0; }
   }
   textureStore(dst, id.xy, vec4f(vel, 0.0, 1.0));
 }
@@ -897,23 +945,15 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= res || id.y >= res) { return; }
   let uv = (vec2f(id.xy) + 0.5) / p.simRes;
 
-  // Sphere boundary: hard kill outside simulation circle
-  let toCenter = uv - SPHERE_CENTER;
-  let dist = length(toCenter);
-  if (dist > SPHERE_RADIUS) {
+  // Boundary: hard kill outside
+  if (isOutsideBoundary(uv)) {
     textureStore(dst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     return;
   }
 
   let vel = textureLoad(src, id.xy, 0).xy;
   let backUV = uv - p.dt * vel * p.dx;
-  // Clamp backtrace inside sphere so we never sample from outside
-  let backToCenter = backUV - SPHERE_CENTER;
-  let backDist = length(backToCenter);
-  var sampUV = backUV;
-  if (backDist > SPHERE_RADIUS) {
-    sampUV = SPHERE_CENTER + backToCenter / backDist * SPHERE_RADIUS;
-  }
+  var sampUV = clampToBoundary(backUV);
   let clamped = clamp(sampUV, vec2f(0.5 / p.simRes), vec2f(1.0 - 0.5 / p.simRes));
   var advected = textureSampleLevel(src, sampl, clamped, 0.0).xy;
 
@@ -922,12 +962,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     // Forward trace from backtrace position (should return to original position if exact)
     let velBack = textureSampleLevel(src, sampl, clamped, 0.0).xy;
     let fwdUV = sampUV + p.dt * velBack * p.dx;
-    let fwdToCenter = fwdUV - SPHERE_CENTER;
-    let fwdDist = length(fwdToCenter);
-    var fwdSampUV = fwdUV;
-    if (fwdDist > SPHERE_RADIUS) {
-      fwdSampUV = SPHERE_CENTER + fwdToCenter / fwdDist * SPHERE_RADIUS;
-    }
+    var fwdSampUV = clampToBoundary(fwdUV);
     let fwdClamped = clamp(fwdSampUV, vec2f(0.5 / p.simRes), vec2f(1.0 - 0.5 / p.simRes));
     let roundTripped = textureSampleLevel(src, sampl, fwdClamped, 0.0).xy;
     let original = vel;
@@ -949,16 +984,42 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   }
 
   // Boundary interaction: reflect and repulse near edge
-  let boundaryZone = SPHERE_RADIUS - 0.05;
-  if (dist > boundaryZone) {
-    let normal = toCenter / dist;
-    let outward = dot(advected, normal);
-    let proximity = (dist - boundaryZone) / (SPHERE_RADIUS - boundaryZone);
-    if (outward > 0.0) {
-      advected -= normal * outward * 2.0;
-      advected *= mix(1.0, 0.7, proximity);
+  if (p.boundaryMode < 0.5) {
+    let toCenter = uv - SPHERE_CENTER;
+    let dist = length(toCenter);
+    let boundaryZone = SPHERE_RADIUS - 0.05;
+    if (dist > boundaryZone) {
+      let normal = toCenter / dist;
+      let outward = dot(advected, normal);
+      let proximity = (dist - boundaryZone) / (SPHERE_RADIUS - boundaryZone);
+      if (outward > 0.0) {
+        advected -= normal * outward * 2.0;
+        advected *= mix(1.0, 0.7, proximity);
+      }
+      advected -= normal * proximity * proximity * 15.0 * p.dt;
     }
-    advected -= normal * proximity * proximity * 15.0 * p.dt;
+  } else {
+    let margin = 0.03;
+    let edgeX = min(uv.x, 1.0 - uv.x);
+    let edgeY = min(uv.y, 1.0 - uv.y);
+    if (edgeX < margin) {
+      let proximity = 1.0 - edgeX / margin;
+      if ((uv.x < 0.5 && advected.x < 0.0) || (uv.x > 0.5 && advected.x > 0.0)) {
+        advected.x *= -0.5;
+        advected *= mix(1.0, 0.7, proximity);
+      }
+      let pushDir = select(-1.0, 1.0, uv.x < 0.5);
+      advected.x -= pushDir * proximity * proximity * 15.0 * p.dt;
+    }
+    if (edgeY < margin) {
+      let proximity = 1.0 - edgeY / margin;
+      if ((uv.y < 0.5 && advected.y < 0.0) || (uv.y > 0.5 && advected.y > 0.0)) {
+        advected.y *= -0.5;
+        advected *= mix(1.0, 0.7, proximity);
+      }
+      let pushDir = select(-1.0, 1.0, uv.y < 0.5);
+      advected.y -= pushDir * proximity * proximity * 15.0 * p.dt;
+    }
   }
 
   textureStore(dst, id.xy, vec4f(advected * p.velDissipation, 0.0, 1.0));
@@ -988,25 +1049,18 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let uv = (vec2f(id.xy) + 0.5) / p.simRes;
   let doTemp = tp.tempActive > 0.5;
 
-  // Hard kill dye outside sphere
-  let toCenter = uv - SPHERE_CENTER;
-  let dist = length(toCenter);
-  if (dist > SPHERE_RADIUS) {
+  // Hard kill dye outside boundary
+  if (isOutsideBoundary(uv)) {
     textureStore(dst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     if (doTemp) { textureStore(tempDst, id.xy, vec4f(0.5, 0.0, 0.0, 1.0)); }
     return;
   }
-  let edgeFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.04, SPHERE_RADIUS, dist);
+  let edgeFade = boundaryEdgeFade(uv, 0.04);
 
   // ── Shared backtrace ──
   let vel = textureLoad(velTex, id.xy, 0).xy;
   let backUV = uv - p.dt * vel * p.dx;
-  let backToCenter = backUV - SPHERE_CENTER;
-  let backDist = length(backToCenter);
-  var sampUV = backUV;
-  if (backDist > SPHERE_RADIUS) {
-    sampUV = SPHERE_CENTER + backToCenter / backDist * SPHERE_RADIUS;
-  }
+  var sampUV = clampToBoundary(backUV);
   let clamped = clamp(sampUV, vec2f(0.5 / p.simRes), vec2f(1.0 - 0.5 / p.simRes));
 
   // ── Dye advection ──
@@ -1017,12 +1071,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     // Use velocity at backtrace position for forward trace
     let velBack = textureSampleLevel(velTex, sampl, clamped, 0.0).xy;
     let fwdUV = sampUV + p.dt * velBack * p.dx;
-    let fwdToCenter = fwdUV - SPHERE_CENTER;
-    let fwdDist = length(fwdToCenter);
-    var fwdSampUV = fwdUV;
-    if (fwdDist > SPHERE_RADIUS) {
-      fwdSampUV = SPHERE_CENTER + fwdToCenter / fwdDist * SPHERE_RADIUS;
-    }
+    var fwdSampUV = clampToBoundary(fwdUV);
     let fwdClamped = clamp(fwdSampUV, vec2f(0.5 / p.simRes), vec2f(1.0 - 0.5 / p.simRes));
     let roundTripped = textureSampleLevel(dyeSrc, sampl, fwdClamped, 0.0).rgb;
     let originalDye = textureLoad(dyeSrc, id.xy, 0).rgb;
@@ -1043,9 +1092,17 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     advectedDye = clamp(advectedDye, dMin, dMax);
   }
 
-  // When backtrace goes outside sphere and gets clamped, multiple edge pixels
+  // When backtrace goes outside boundary and gets clamped, multiple edge pixels
   // sample the same boundary point, duplicating dye. Attenuate to compensate.
-  let backtraceOvershoot = max(backDist - SPHERE_RADIUS, 0.0);
+  var backtraceOvershoot: f32;
+  if (p.boundaryMode < 0.5) {
+    let backDist = length(backUV - SPHERE_CENTER);
+    backtraceOvershoot = max(backDist - SPHERE_RADIUS, 0.0);
+  } else {
+    let ovX = max(-backUV.x, max(backUV.x - 1.0, 0.0));
+    let ovY = max(-backUV.y, max(backUV.y - 1.0, 0.0));
+    backtraceOvershoot = max(ovX, ovY);
+  }
   let clampFade = 1.0 / (1.0 + backtraceOvershoot * 30.0);
   var dye = advectedDye * p.dyeDissipation * edgeFade * clampFade;
   let maxC = max(dye.r, max(dye.g, dye.b));
@@ -1099,7 +1156,7 @@ struct NoiseParams {
   sharpness: f32,
   anisotropy: f32,
   blend: f32,
-  pad0: f32,
+  boundaryMode: f32,
   pad1: f32,
   pad2: f32,
   pad3: f32,
@@ -1113,6 +1170,19 @@ const PI: f32 = 3.14159265359;
 const TAU: f32 = 6.28318530718;
 const SPHERE_CENTER = vec2f(0.5, 0.5);
 const SPHERE_RADIUS = ${SIM_SPHERE_RADIUS};
+
+fn np_isOutsideBoundary(uv: vec2f) -> bool {
+  if (np.boundaryMode > 0.5) { return false; }
+  return length(uv - SPHERE_CENTER) > SPHERE_RADIUS;
+}
+fn np_boundaryEdgeFade(uv: vec2f, margin: f32) -> f32 {
+  if (np.boundaryMode > 0.5) {
+    let edgeX = min(uv.x, 1.0 - uv.x);
+    let edgeY = min(uv.y, 1.0 - uv.y);
+    return smoothstep(0.0, margin, min(edgeX, edgeY));
+  }
+  return 1.0 - smoothstep(SPHERE_RADIUS - margin, SPHERE_RADIUS, length(uv - SPHERE_CENTER));
+}
 
 fn hash(p: vec2f) -> f32 {
   var n = u32(dot(p, vec2f(127.1, 311.7)) * 43758.5453);
@@ -1493,11 +1563,11 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let uv = (vec2f(id.xy) + 0.5) / np.simRes;
 
   let dist = length(uv - SPHERE_CENTER);
-  if (dist > SPHERE_RADIUS) {
+  if (np_isOutsideBoundary(uv)) {
     textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     return;
   }
-  let edgeFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS, dist);
+  let edgeFade = np_boundaryEdgeFade(uv, 0.08);
 
   let frame = makeSymmetryFrame(uv);
   var vel = textureLoad(velSrc, id.xy, 0).xy;
@@ -1523,14 +1593,24 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let curl = (frame.basisX * curlCanonical.x + frame.basisY * curlCanonical.y) * frame.handedness;
   let layerBoost = 1.0 + (np.sharpness + np.warp + np.anisotropy + np.blend) * 0.35;
   vel += curl * np.amount * (7.0 + 2.0 * layerBoost) * edgeFade;
-  if (dist > SPHERE_RADIUS - 0.04) {
-    let normal = (uv - SPHERE_CENTER) / max(dist, 1e-5);
-    let outward = dot(vel, normal);
-    if (outward > 0.0) {
-      vel -= normal * outward;
+  if (np.boundaryMode < 0.5) {
+    // Sphere wall reflection
+    if (dist > SPHERE_RADIUS - 0.04) {
+      let normal = (uv - SPHERE_CENTER) / max(dist, 1e-5);
+      let outward = dot(vel, normal);
+      if (outward > 0.0) {
+        vel -= normal * outward;
+      }
+      let wallT = clamp((dist - (SPHERE_RADIUS - 0.04)) / 0.04, 0.0, 1.0);
+      vel *= mix(1.0, 0.8, wallT);
     }
-    let wallT = clamp((dist - (SPHERE_RADIUS - 0.04)) / 0.04, 0.0, 1.0);
-    vel *= mix(1.0, 0.8, wallT);
+  } else {
+    // Rect wall reflection
+    let margin = 0.02;
+    if (uv.x < margin && vel.x < 0.0) { vel.x = 0.0; }
+    if (uv.x > 1.0 - margin && vel.x > 0.0) { vel.x = 0.0; }
+    if (uv.y < margin && vel.y < 0.0) { vel.y = 0.0; }
+    if (uv.y > 1.0 - margin && vel.y > 0.0) { vel.y = 0.0; }
   }
   textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
 }
@@ -1544,6 +1624,8 @@ struct DyeNoiseParams {
   simRes: f32,
   curlDyeAmount: f32,
   color: vec4f, // rgb=tint, a=noise symmetry behavior (0=none, 1=mirror, 2+=n-fold)
+  boundaryMode: f32,
+  _pad1: f32, _pad2: f32, _pad3: f32,
 };
 
 @group(0) @binding(0) var<uniform> dp: DyeNoiseParams;
@@ -1605,13 +1687,21 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     dye = textureLoad(dyeSrc, symPx, 0);
   }
 
-  // Fade out near sphere edge to prevent bleed
+  // Fade out near boundary edge to prevent bleed
   let dist = length(uv - SPHERE_CENTER);
-  if (dist > SPHERE_RADIUS) {
+  let isRect = dp.boundaryMode > 0.5;
+  if (!isRect && dist > SPHERE_RADIUS) {
     textureStore(dyeDst, id.xy, dye);
     return;
   }
-  let edgeFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.06, SPHERE_RADIUS, dist);
+  var edgeFade: f32;
+  if (isRect) {
+    let edgeX = min(uv.x, 1.0 - uv.x);
+    let edgeY = min(uv.y, 1.0 - uv.y);
+    edgeFade = smoothstep(0.0, 0.06, min(edgeX, edgeY));
+  } else {
+    edgeFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.06, SPHERE_RADIUS, dist);
+  }
 
   // Compute velocity divergence (negative = convergent flow = density buildup)
   let idR = vec2u(min(id.x + 1u, res - 1u), id.y);
@@ -1667,7 +1757,7 @@ const SPHERE_CENTER = vec2f(0.5, 0.5);
 const SPHERE_RADIUS = ${SIM_SPHERE_RADIUS};
 const VISIBLE_RADIUS = ${VISIBLE_SPHERE_RADIUS};
 
-struct CleanupParams { simRes: f32, pad1: f32, pad2: f32, pad3: f32, };
+struct CleanupParams { simRes: f32, boundaryMode: f32, pad2: f32, pad3: f32, };
 @group(0) @binding(0) var<uniform> cp: CleanupParams;
 @group(0) @binding(1) var velSrc: texture_2d<f32>;
 @group(0) @binding(2) var dyeSrc: texture_2d<f32>;
@@ -1679,29 +1769,43 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let res = u32(cp.simRes);
   if (id.x >= res || id.y >= res) { return; }
   let uv = (vec2f(id.xy) + 0.5) / cp.simRes;
-  let dist = length(uv - SPHERE_CENTER);
   var vel = textureLoad(velSrc, id.xy, 0).xy;
   var dye = textureLoad(dyeSrc, id.xy, 0).rgb;
 
-  if (dist > VISIBLE_RADIUS || dist > SPHERE_RADIUS) {
-    textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
-    textureStore(dyeDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
-  } else {
-    if (dist > VISIBLE_RADIUS - 0.05) {
-      let normal = (uv - SPHERE_CENTER) / max(dist, 1e-5);
-      let outward = dot(vel, normal);
-      if (outward > 0.0) {
-        vel -= normal * outward;
-      }
-      let wallT = clamp((dist - (VISIBLE_RADIUS - 0.05)) / 0.05, 0.0, 1.0);
-      vel *= mix(1.0, 0.7, wallT);
+  if (cp.boundaryMode > 0.5) {
+    // Rectangular mode: reflect velocity at edges, clear dye at very edge
+    let margin = 0.006;
+    if (uv.x < margin || uv.x > 1.0 - margin || uv.y < margin || uv.y > 1.0 - margin) {
+      dye = vec3f(0.0);
     }
-    // Keep a narrow hard-clear band so RD/noise cannot form visible edge ridges.
-    if (dist > VISIBLE_RADIUS - 0.006) {
-      dye = vec3f(0.0, 0.0, 0.0);
-    }
+    let wallMargin = 0.02;
+    if (uv.x < wallMargin && vel.x < 0.0) { vel.x = 0.0; }
+    if (uv.x > 1.0 - wallMargin && vel.x > 0.0) { vel.x = 0.0; }
+    if (uv.y < wallMargin && vel.y < 0.0) { vel.y = 0.0; }
+    if (uv.y > 1.0 - wallMargin && vel.y > 0.0) { vel.y = 0.0; }
     textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
     textureStore(dyeDst, id.xy, vec4f(dye, 1.0));
+  } else {
+    let dist = length(uv - SPHERE_CENTER);
+    if (dist > VISIBLE_RADIUS || dist > SPHERE_RADIUS) {
+      textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+      textureStore(dyeDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+    } else {
+      if (dist > VISIBLE_RADIUS - 0.05) {
+        let normal = (uv - SPHERE_CENTER) / max(dist, 1e-5);
+        let outward = dot(vel, normal);
+        if (outward > 0.0) {
+          vel -= normal * outward;
+        }
+        let wallT = clamp((dist - (VISIBLE_RADIUS - 0.05)) / 0.05, 0.0, 1.0);
+        vel *= mix(1.0, 0.7, wallT);
+      }
+      if (dist > VISIBLE_RADIUS - 0.006) {
+        dye = vec3f(0.0, 0.0, 0.0);
+      }
+      textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
+      textureStore(dyeDst, id.xy, vec4f(dye, 1.0));
+    }
   }
 }
 `;
@@ -1715,6 +1819,8 @@ struct BuoyancyParams {
   dt: f32,
   buoyancy: f32,
   radialMix: f32,
+  boundaryMode: f32,
+  _pad1: f32, _pad2: f32, _pad3: f32,
 };
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
@@ -1732,28 +1838,44 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let uv = (vec2f(id.xy) + 0.5) / bp.simRes;
   let toCenter = uv - SPHERE_CENTER;
   let dist = length(toCenter);
-  if (dist > SPHERE_RADIUS) {
+  let isRect = bp.boundaryMode > 0.5;
+  if (!isRect && dist > SPHERE_RADIUS) {
     textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     return;
   }
-  let edgeFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.04, SPHERE_RADIUS, dist);
+  var edgeFade: f32;
+  if (isRect) {
+    let edgeX = min(uv.x, 1.0 - uv.x);
+    let edgeY = min(uv.y, 1.0 - uv.y);
+    edgeFade = smoothstep(0.0, 0.04, min(edgeX, edgeY));
+  } else {
+    edgeFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.04, SPHERE_RADIUS, dist);
+  }
   let temp = textureLoad(tempTex, id.xy, 0).r;
   var vel = textureLoad(velSrc, id.xy, 0).xy;
   // Blend between upward and radial-outward buoyancy
   let heatForce = bp.buoyancy * (temp - 0.5) * bp.dt * edgeFade;
   let upDir = vec2f(0.0, 1.0);
-  let radialDir = toCenter / max(dist, 0.001);
+  let radialDir = select(toCenter / max(dist, 0.001), vec2f(0.0, 1.0), isRect);
   let dir = mix(upDir, radialDir, bp.radialMix);
   vel += dir * heatForce;
   vel *= edgeFade;
-  if (dist > SPHERE_RADIUS - 0.04) {
-    let normal = toCenter / max(dist, 1e-5);
-    let outward = dot(vel, normal);
-    if (outward > 0.0) {
-      vel -= normal * outward;
+  if (!isRect) {
+    if (dist > SPHERE_RADIUS - 0.04) {
+      let normal = toCenter / max(dist, 1e-5);
+      let outward = dot(vel, normal);
+      if (outward > 0.0) {
+        vel -= normal * outward;
+      }
+      let wallT = clamp((dist - (SPHERE_RADIUS - 0.04)) / 0.04, 0.0, 1.0);
+      vel *= mix(1.0, 0.8, wallT);
     }
-    let wallT = clamp((dist - (SPHERE_RADIUS - 0.04)) / 0.04, 0.0, 1.0);
-    vel *= mix(1.0, 0.8, wallT);
+  } else {
+    let margin = 0.02;
+    if (uv.x < margin && vel.x < 0.0) { vel.x = 0.0; }
+    if (uv.x > 1.0 - margin && vel.x > 0.0) { vel.x = 0.0; }
+    if (uv.y < margin && vel.y < 0.0) { vel.y = 0.0; }
+    if (uv.y > 1.0 - margin && vel.y > 0.0) { vel.y = 0.0; }
   }
   textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
 }
@@ -1881,9 +2003,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let res = u32(p.simRes);
   if (id.x >= res || id.y >= res) { return; }
   let uv = (vec2f(id.xy) + 0.5) / p.simRes;
-  let toCenter = uv - SPHERE_CENTER;
-  let dist = length(toCenter);
-  if (dist > SPHERE_RADIUS) {
+  if (isOutsideBoundary(uv)) {
     textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     return;
   }
@@ -1893,7 +2013,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   if (mask > 0.01) {
     let vis = max(face.a, 0.0);
     let strength = mask * vis;
-    let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS - 0.02, dist);
+    let boundaryFade = boundaryEdgeFade(uv, 0.08);
 
     // Face motion velocity
     vel += face.rg * strength * ff.motionScale * boundaryFade;
@@ -1971,9 +2091,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let res = u32(p.simRes);
   if (id.x >= res || id.y >= res) { return; }
   let uv = (vec2f(id.xy) + 0.5) / p.simRes;
-  let toCenter = uv - SPHERE_CENTER;
-  let dist = length(toCenter);
-  if (dist > SPHERE_RADIUS - 0.02) {
+  if (isOutsideBoundary(uv)) {
     textureStore(dyeDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
     return;
   }
@@ -1987,7 +2105,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
       // Noise-modulated colored injection (can cause brightness oscillation)
       let vis = max(face.a, 0.0);
       let strength = mask * vis;
-      let boundaryFade = 1.0 - smoothstep(SPHERE_RADIUS - 0.08, SPHERE_RADIUS - 0.02, dist);
+      let boundaryFade = boundaryEdgeFade(uv, 0.08);
 
       let t = fd.time * fd.noiseSpeed;
       let nUV = uv * fd.noiseFreq;
@@ -2169,20 +2287,32 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   // Advect particle with fluid
   let dt = p.dt;
   var prePos = vec2f(part.posX, part.posY);
-  let preToCenter = prePos - SPHERE_CENTER;
-  let preDist = length(preToCenter);
-  if (preDist > SPHERE_RADIUS) {
-    let n = preToCenter / max(preDist, 1e-5);
-    prePos = SPHERE_CENTER + n * (SPHERE_RADIUS - 0.001);
+  let pIsRect = pp.extra4.w > 0.5;
+  if (pIsRect) {
+    prePos = clamp(prePos, vec2f(0.001), vec2f(0.999));
     part.posX = prePos.x;
     part.posY = prePos.y;
-  }
-  let nearDist = length(prePos - SPHERE_CENTER);
-  if (nearDist > SPHERE_RADIUS - 0.03) {
-    let n = (prePos - SPHERE_CENTER) / max(nearDist, 1e-5);
-    let outward = dot(vel, n);
-    if (outward > 0.0) {
-      vel -= n * outward;
+    let margin = 0.03;
+    if (prePos.x < margin && vel.x < 0.0) { vel.x = 0.0; }
+    if (prePos.x > 1.0 - margin && vel.x > 0.0) { vel.x = 0.0; }
+    if (prePos.y < margin && vel.y < 0.0) { vel.y = 0.0; }
+    if (prePos.y > 1.0 - margin && vel.y > 0.0) { vel.y = 0.0; }
+  } else {
+    let preToCenter = prePos - SPHERE_CENTER;
+    let preDist = length(preToCenter);
+    if (preDist > SPHERE_RADIUS) {
+      let n = preToCenter / max(preDist, 1e-5);
+      prePos = SPHERE_CENTER + n * (SPHERE_RADIUS - 0.001);
+      part.posX = prePos.x;
+      part.posY = prePos.y;
+    }
+    let nearDist = length(prePos - SPHERE_CENTER);
+    if (nearDist > SPHERE_RADIUS - 0.03) {
+      let n = (prePos - SPHERE_CENTER) / max(nearDist, 1e-5);
+      let outward = dot(vel, n);
+      if (outward > 0.0) {
+        vel -= n * outward;
+      }
     }
   }
   part.posX += vel.x * dt * p.dx;
@@ -2228,14 +2358,17 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   part.life -= dt;
 
   // Boundary / respawn check
-  let toCenter = vec2f(part.posX, part.posY) - SPHERE_CENTER;
-  var dist = length(toCenter);
-
-  if (dist > SPHERE_RADIUS) {
-    let n = toCenter / max(dist, 1e-5);
-    part.posX = SPHERE_CENTER.x + n.x * (SPHERE_RADIUS - 0.001);
-    part.posY = SPHERE_CENTER.y + n.y * (SPHERE_RADIUS - 0.001);
-    dist = SPHERE_RADIUS - 0.001;
+  if (pIsRect) {
+    part.posX = clamp(part.posX, 0.001, 0.999);
+    part.posY = clamp(part.posY, 0.001, 0.999);
+  } else {
+    let toCenter = vec2f(part.posX, part.posY) - SPHERE_CENTER;
+    let dist = length(toCenter);
+    if (dist > SPHERE_RADIUS) {
+      let n = toCenter / max(dist, 1e-5);
+      part.posX = SPHERE_CENTER.x + n.x * (SPHERE_RADIUS - 0.001);
+      part.posY = SPHERE_CENTER.y + n.y * (SPHERE_RADIUS - 0.001);
+    }
   }
 
   if (part.life <= 0.0) {
@@ -2247,11 +2380,16 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let h5 = pcg(h4);
     let h6 = pcg(h5);
 
-    // Random position inside sphere
-    let angle = randF(h1) * 6.2831853;
-    let radius = sqrt(randF(h2)) * SPHERE_RADIUS * 0.9;
-    part.posX = 0.5 + cos(angle) * radius;
-    part.posY = 0.5 + sin(angle) * radius;
+    // Random position inside boundary
+    if (pIsRect) {
+      part.posX = randF(h1) * 0.9 + 0.05;
+      part.posY = randF(h2) * 0.9 + 0.05;
+    } else {
+      let angle = randF(h1) * 6.2831853;
+      let radius = sqrt(randF(h2)) * SPHERE_RADIUS * 0.9;
+      part.posX = 0.5 + cos(angle) * radius;
+      part.posY = 0.5 + sin(angle) * radius;
+    }
 
     // Random hemisphere normal
     let phi = randF(h3) * 6.2831853;
@@ -2275,10 +2413,18 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let particleUV = vec2f(part.posX, part.posY);
   let centered = particleUV - vec2f(0.5, 0.5);
   let pRadialMask = pp.extra4.z;
-  let pVisRadius = ${VISIBLE_SPHERE_RADIUS} * select(pRadialMask, 1.0, pRadialMask <= 0.0);
-  if (length(centered) > pVisRadius) {
-    colors[idx] = vec4f(0.0);
-    return;
+  let pRectMode = pp.extra4.w > 0.5;
+  if (!pRectMode) {
+    let pVisRadius = ${VISIBLE_SPHERE_RADIUS} * select(pRadialMask, 1.0, pRadialMask <= 0.0);
+    if (length(centered) > pVisRadius) {
+      colors[idx] = vec4f(0.0);
+      return;
+    }
+  } else {
+    if (particleUV.x < 0.0 || particleUV.x > 1.0 || particleUV.y < 0.0 || particleUV.y > 1.0) {
+      colors[idx] = vec4f(0.0);
+      return;
+    }
   }
 
   let dye = textureSampleLevel(dyeTex, samp, particleUV, 0.0).rgb;
@@ -2419,10 +2565,18 @@ fn main(
 
 
   let rawClip = vec2f(part.posX, part.posY) * 2.0 - 1.0;
-  let clipPos = vec2f(
-    rawClip.x / (max(aspect, 1.0) * ${SIM_VIEW_SCALE}),
-    rawClip.y / (max(1.0 / aspect, 1.0) * ${SIM_VIEW_SCALE})
-  );
+  let pRectMode = pp.extra4.w > 0.5;
+  var clipPos: vec2f;
+  if (pRectMode) {
+    // Rect mode: sim UV maps directly to full screen
+    clipPos = rawClip;
+  } else {
+    // Sphere mode: aspect-corrected centered 1:1 square
+    clipPos = vec2f(
+      rawClip.x / (max(aspect, 1.0) * ${SIM_VIEW_SCALE}),
+      rawClip.y / (max(1.0 / aspect, 1.0) * ${SIM_VIEW_SCALE})
+    );
+  }
 
   out.pos = vec4f(clipPos + qp * clipSize, 0.0, 1.0);
   out.color = col.rgb;
@@ -2581,7 +2735,7 @@ const bloomCompositeShader = /* wgsl */`
 @group(0) @binding(0) var sceneTex: texture_2d<f32>;
 @group(0) @binding(1) var bloomTex: texture_2d<f32>;
 @group(0) @binding(2) var samp: sampler;
-@group(0) @binding(3) var<uniform> intensity: f32;
+@group(0) @binding(3) var<uniform> bloomParams: vec4f;
 const SCREEN_RADIUS = ${VISIBLE_SPHERE_RADIUS};
 
 @vertex
@@ -2597,14 +2751,16 @@ fn frag(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let uv = pos.xy / texSize;
   let scene = textureSampleLevel(sceneTex, samp, uv, 0.0).rgb;
   let bloom = textureSampleLevel(bloomTex, samp, uv, 0.0).rgb;
-  var color = scene + bloom * intensity;
-  let aspect = texSize.x / texSize.y;
-  let simUV = vec2f(
-    (uv.x - 0.5) * max(aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5,
-    (uv.y - 0.5) * max(1.0 / aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5
-  );
-  let dist = length(simUV - vec2f(0.5, 0.5));
-  if (dist > SCREEN_RADIUS) { color = vec3f(0.0); }
+  var color = scene + bloom * bloomParams.x;
+  if (bloomParams.y < 0.5) {
+    let aspect = texSize.x / texSize.y;
+    let simUV = vec2f(
+      (uv.x - 0.5) * max(aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5,
+      (uv.y - 0.5) * max(1.0 / aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5
+    );
+    let dist = length(simUV - vec2f(0.5, 0.5));
+    if (dist > SCREEN_RADIUS) { color = vec3f(0.0); }
+  }
   return vec4f(color, 1.0);
 }
 `;
@@ -2650,7 +2806,7 @@ struct DisplayUniforms {
   tipColor: vec4f,    // xyz=tipColor RGB, w=roughness
   tempParams: vec4f,  // x=symmetryFlag, y=tempColorShift, z=colormapMode, w=colorSource
   cmapParams: vec4f,  // x=colorGain, y=sphereMode, z=shadowExtend, w=sphereSize
-  extraParams: vec4f, // x=colormapCompress, y=radialMask
+  extraParams: vec4f, // x=colormapCompress, y=radialMask, z=boundaryMode
 };
 @group(0) @binding(2) var<uniform> du: DisplayUniforms;
 @group(0) @binding(3) var tempTex: texture_2d<f32>;
@@ -2882,20 +3038,38 @@ fn main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let sheenStrength = du.screen.w;
   let rawUV = vec2f(pos.x, screenSize.y - pos.y) / screenSize;
 
-  // Aspect-correct UV so simulation renders as centered 1:1 square
+  // Aspect-correct UV so simulation renders as centered 1:1 square (sphere mode)
+  // In rect mode, map directly to fill screen
   let aspect = screenSize.x / screenSize.y;
-  let uv = vec2f(
-    (rawUV.x - 0.5) * max(aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5,
-    (rawUV.y - 0.5) * max(1.0 / aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5
-  );
+  var uv: vec2f;
+  if (du.extraParams.z > 0.5) {
+    uv = rawUV;
+  } else {
+    uv = vec2f(
+      (rawUV.x - 0.5) * max(aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5,
+      (rawUV.y - 0.5) * max(1.0 / aspect, 1.0) * ${SIM_VIEW_SCALE} + 0.5
+    );
+  }
 
-  // Sphere mask in simulation UV space (already 1:1)
+  // Boundary mask
   let centered = uv - vec2f(0.5, 0.5);
   let screenDist = length(centered);
   let radialMask = du.extraParams.y;
-  let screenRadius = ${VISIBLE_SPHERE_RADIUS} * select(radialMask, 1.0, radialMask <= 0.0);
-  if (screenDist > screenRadius) {
-    return vec4f(0.0, 0.0, 0.0, 1.0);
+  let isRectMode = du.extraParams.z > 0.5;
+  let screenRadius = select(
+    ${VISIBLE_SPHERE_RADIUS} * select(radialMask, 1.0, radialMask <= 0.0),
+    0.75,
+    isRectMode
+  );
+  if (!isRectMode) {
+    if (screenDist > screenRadius) {
+      return vec4f(0.0, 0.0, 0.0, 1.0);
+    }
+  } else {
+    // In rect mode, clip to texture bounds
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+      return vec4f(0.0, 0.0, 0.0, 1.0);
+    }
   }
 
   // Sample fluid dye
@@ -3982,7 +4156,8 @@ async function main() {
     paramData[14] = d.velDissipation;
     paramData[15] = d.dyeDissipation;
     paramData[16] = d.maccormack;
-    // [17-19] padding
+    paramData[17] = state.boundaryMode ?? 0;
+    // [18-19] padding
     device.queue.writeBuffer(buf, 0, paramData);
   }
 
@@ -3999,7 +4174,7 @@ async function main() {
   });
   const displayUBData = new Float32Array(32);
   const bloomParamData = new Float32Array(8);
-  const bloomCompositeData = new Float32Array(1);
+  const bloomCompositeData = new Float32Array(4);
 
   // ─── Pipeline helpers ───────────────────────────────────────────────────
   function checkShader(module, label) {
@@ -4181,9 +4356,9 @@ async function main() {
     ['uniform', 'texture', 'texture', 'storage']);
 
   const dyeNoiseBuf = device.createBuffer({
-    size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const dyeNoiseData = new Float32Array(8); // [time, amount, simRes, curlDyeAmount, r, g, b, symmetryBehavior]
+  const dyeNoiseData = new Float32Array(12); // [time, amount, simRes, curlDyeAmount, r, g, b, symmetryBehavior, boundaryMode, pad, pad, pad]
 
   // ─── Sphere Cleanup pipeline (hard-zero outside sphere every frame) ─────
   const cleanupBGL = device.createBindGroupLayout({
@@ -4205,8 +4380,7 @@ async function main() {
   const cleanupBuf = device.createBuffer({
     size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const cleanupData = new Float32Array([SIM_RES, 0, 0, 0]);
-  device.queue.writeBuffer(cleanupBuf, 0, cleanupData);
+  const cleanupData = new Float32Array([SIM_RES, 0, 0, 0]); // [simRes, boundaryMode, pad, pad]
 
   // ─── Temperature/Buoyancy pipelines ─────────────────────────────────────
   // (tempAdvect pipeline removed — fused into advectDye)
@@ -4220,9 +4394,9 @@ async function main() {
     ['uniform', 'texture', 'texture', 'storage']);
 
   const buoyancyBuf = device.createBuffer({
-    size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const buoyancyData = new Float32Array(4); // [simRes, dt, buoyancy, pad]
+  const buoyancyData = new Float32Array(8); // [simRes, dt, buoyancy, radialMix, boundaryMode, pad, pad, pad]
 
   // (tempSplat is now fused into batchSplatDye — no separate pipeline needed)
 
@@ -4330,7 +4504,7 @@ async function main() {
   }
   const bloomCompositeUB = device.createBuffer({
     label: 'bloomCompositeUB',
-    size: 4,
+    size: 16,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
   // Bloom resource lifecycle
@@ -5065,31 +5239,42 @@ async function main() {
   let frameTimeScale = 1.0;
   function addSplat(x, y, dx, dy, r, g, b, radius) {
     // Containment at source: clamp splat center and remove outward force near wall.
-    const WALL_R = SIM_SPHERE_RADIUS;
-    const WALL_BAND = 0.04;
-    let ox = x - 0.5;
-    let oy = y - 0.5;
-    let d = Math.hypot(ox, oy);
-    if (d > WALL_R) {
-      const inv = WALL_R / Math.max(d, 1e-6);
-      ox *= inv;
-      oy *= inv;
-      x = 0.5 + ox;
-      y = 0.5 + oy;
-      d = WALL_R;
-    }
-    if (d > WALL_R - WALL_BAND) {
-      const nx = ox / Math.max(d, 1e-6);
-      const ny = oy / Math.max(d, 1e-6);
-      const outward = dx * nx + dy * ny;
-      if (outward > 0) {
-        dx -= nx * outward;
-        dy -= ny * outward;
+    const isRect = (state.boundaryMode ?? 0) === 1;
+    if (isRect) {
+      x = Math.max(0.01, Math.min(0.99, x));
+      y = Math.max(0.01, Math.min(0.99, y));
+      const margin = 0.04;
+      if (x < margin && dx < 0) dx = 0;
+      if (x > 1 - margin && dx > 0) dx = 0;
+      if (y < margin && dy < 0) dy = 0;
+      if (y > 1 - margin && dy > 0) dy = 0;
+    } else {
+      const WALL_R = SIM_SPHERE_RADIUS;
+      const WALL_BAND = 0.04;
+      let ox = x - 0.5;
+      let oy = y - 0.5;
+      let d = Math.hypot(ox, oy);
+      if (d > WALL_R) {
+        const inv = WALL_R / Math.max(d, 1e-6);
+        ox *= inv;
+        oy *= inv;
+        x = 0.5 + ox;
+        y = 0.5 + oy;
+        d = WALL_R;
       }
-      const wallT = Math.min(1, Math.max(0, (d - (WALL_R - WALL_BAND)) / WALL_BAND));
-      const damp = 1 - wallT * 0.35;
-      dx *= damp;
-      dy *= damp;
+      if (d > WALL_R - WALL_BAND) {
+        const nx = ox / Math.max(d, 1e-6);
+        const ny = oy / Math.max(d, 1e-6);
+        const outward = dx * nx + dy * ny;
+        if (outward > 0) {
+          dx -= nx * outward;
+          dy -= ny * outward;
+        }
+        const wallT = Math.min(1, Math.max(0, (d - (WALL_R - WALL_BAND)) / WALL_BAND));
+        const damp = 1 - wallT * 0.35;
+        dx *= damp;
+        dy *= damp;
+      }
     }
 
     // Master-speed scaling for impulse-style effectors so slowdown is uniform.
@@ -5329,6 +5514,12 @@ async function main() {
 
   function simUVToScreen(uvx, uvy) {
     const rect = canvas.getBoundingClientRect();
+    if ((state.boundaryMode ?? 0) === 1) {
+      return [
+        rect.left + uvx * rect.width,
+        rect.top + (1.0 - uvy) * rect.height,
+      ];
+    }
     const aspect = rect.width / Math.max(rect.height, 1e-6);
     const rawX = (uvx - 0.5) / (Math.max(aspect, 1.0) * SIM_VIEW_SCALE) + 0.5;
     const rawY = (uvy - 0.5) / (Math.max(1.0 / Math.max(aspect, 1e-6), 1.0) * SIM_VIEW_SCALE) + 0.5;
@@ -5666,6 +5857,9 @@ async function main() {
   }
 
   function clampFacePointToCircle(x, y, margin = 0.005) {
+    if ((state.boundaryMode ?? 0) === 1) {
+      return [Math.max(margin, Math.min(1 - margin, x)), Math.max(margin, Math.min(1 - margin, y))];
+    }
     const dx = x - 0.5;
     const dy = y - 0.5;
     const r = Math.hypot(dx, dy);
@@ -5719,14 +5913,15 @@ async function main() {
     const depthSign = nose[2] < ((cheekL[2] + cheekR[2]) * 0.5) ? -1 : 1;
     const toDepth = (z) => z * depthSign;
 
+    const boundaryR = (state.boundaryMode ?? 0) === 1 ? 0.5 : SIM_SPHERE_RADIUS;
     const targetRadius = Math.max(
       0.096,
-      Math.min(SIM_SPHERE_RADIUS - 0.03, 0.094 + Math.pow(proximity, 0.78) * 0.23)
+      Math.min(boundaryR - 0.03, 0.094 + Math.pow(proximity, 0.78) * 0.23)
     );
     let offsetX = (centerCamX - 0.5) * 0.8;
     let offsetY = -(centerCamY - 0.5) * 0.76;
     const offsetR = Math.hypot(offsetX, offsetY);
-    const offsetLimit = Math.max(0.03, SIM_SPHERE_RADIUS - targetRadius * 0.44 - 0.006);
+    const offsetLimit = Math.max(0.03, boundaryR - targetRadius * 0.44 - 0.006);
     const offsetSoft = offsetLimit * 0.82;
     if (offsetR > offsetSoft) {
       const over = offsetR - offsetSoft;
@@ -6961,6 +7156,9 @@ async function main() {
   }
 
   function clampPointToSphere(px, py, margin = 0.02) {
+    if ((state.boundaryMode ?? 0) === 1) {
+      return { x: Math.max(margin, Math.min(1 - margin, px)), y: Math.max(margin, Math.min(1 - margin, py)) };
+    }
     const maxR = Math.max(0.02, SIM_SPHERE_RADIUS - margin);
     let dx = px - 0.5;
     let dy = py - 0.5;
@@ -7165,7 +7363,10 @@ async function main() {
       s.life -= dt;
 
       const distC = Math.hypot(s.x - 0.5, s.y - 0.5);
-      if (s.life <= 0 || distC > SIM_SPHERE_RADIUS + 0.08) {
+      const outOfBounds = (state.boundaryMode ?? 0) === 1
+        ? (s.x < -0.08 || s.x > 1.08 || s.y < -0.08 || s.y > 1.08)
+        : (distC > SIM_SPHERE_RADIUS + 0.08);
+      if (s.life <= 0 || outOfBounds) {
         burstShots.splice(i, 1);
         continue;
       }
@@ -7296,6 +7497,9 @@ async function main() {
     const rect = canvas.getBoundingClientRect();
     const rawX = (clientX - rect.left) / rect.width;
     const rawY = 1.0 - (clientY - rect.top) / rect.height;
+    if ((state.boundaryMode ?? 0) === 1) {
+      return [rawX, rawY];
+    }
     const aspect = rect.width / rect.height;
     const simX = (rawX - 0.5) * Math.max(aspect, 1.0) * SIM_VIEW_SCALE + 0.5;
     const simY = (rawY - 0.5) * Math.max(1.0 / aspect, 1.0) * SIM_VIEW_SCALE + 0.5;
@@ -7574,6 +7778,7 @@ async function main() {
     particleUBData[16] = state.streakGlow;
     particleUBData[17] = state.densitySize;
     particleUBData[18] = state.radialMask ?? 1.0;
+    particleUBData[19] = state.boundaryMode ?? 0;
     device.queue.writeBuffer(particleUB, 0, particleUBData);
 
     displayUBData[0] = canvas.width;
@@ -7612,6 +7817,7 @@ async function main() {
     // extraParams vec4f
     displayUBData[28] = state.colormapCompress ? 1.0 : 0.0;
     displayUBData[29] = state.radialMask ?? 1.0;
+    displayUBData[30] = state.boundaryMode ?? 0;
     device.queue.writeBuffer(displayUB, 0, displayUBData);
 
     // Collect splats into pre-allocated buffer
@@ -7625,13 +7831,15 @@ async function main() {
     }
     updateBurstEmitters(dt);
 
-    // Mouse splat — clamp to sphere (tighter than visual edge to keep splat radius inside)
+    // Mouse splat — clamp to boundary
     const INTERACT_R = 0.35;
     const pdx = pointer.x - 0.5, pdy = pointer.y - 0.5;
     const pDist = Math.sqrt(pdx * pdx + pdy * pdy);
-    const inSphere = pDist < INTERACT_R;
+    const inBoundary = (state.boundaryMode === 1)
+      ? (pointer.x >= 0 && pointer.x <= 1 && pointer.y >= 0 && pointer.y <= 1)
+      : (pDist < INTERACT_R);
 
-    if (pointer.moved && pointer.down && inSphere) {
+    if (pointer.moved && pointer.down && inBoundary) {
       const speed = Math.sqrt(pointer.dx * pointer.dx + pointer.dy * pointer.dy);
       const col = palette(time * 0.3, 4);
       const str = state.clickStrength * 6.0;
@@ -7797,6 +8005,7 @@ async function main() {
       buoyancyData[1] = dt;
       buoyancyData[2] = state.tempBuoyancy * 500.0;
       buoyancyData[3] = state.tempRadialMix;
+      buoyancyData[4] = state.boundaryMode ?? 0;
       device.queue.writeBuffer(buoyancyBuf, 0, buoyancyData);
       const p = enc.beginComputePass();
       p.setPipeline(buoyancyPipe.pipeline);
@@ -7822,6 +8031,7 @@ async function main() {
       noiseData[9] = state.noiseSharpness;
       noiseData[10] = state.noiseAnisotropy;
       noiseData[11] = state.noiseBlend;
+      noiseData[12] = state.boundaryMode ?? 0;
       device.queue.writeBuffer(noiseBuf, 0, noiseData);
       const p = enc.beginComputePass();
       p.setPipeline(curlNoisePipe.pipeline);
@@ -7847,6 +8057,7 @@ async function main() {
       dyeNoiseData[5] = col[1];
       dyeNoiseData[6] = col[2];
       dyeNoiseData[7] = Math.round(state.noiseBehavior || 0);
+      dyeNoiseData[8] = state.boundaryMode ?? 0;
       device.queue.writeBuffer(dyeNoiseBuf, 0, dyeNoiseData);
       const p = enc.beginComputePass();
       p.setPipeline(dyeNoisePipe.pipeline);
@@ -7858,7 +8069,9 @@ async function main() {
 
     // Reaction-diffusion runtime pass is intentionally disabled.
 
-    // ── Sphere Cleanup (hard-zero vel+dye outside sphere) ──
+    // ── Boundary Cleanup (hard-zero vel+dye outside boundary) ──
+    cleanupData[1] = state.boundaryMode ?? 0;
+    device.queue.writeBuffer(cleanupBuf, 0, cleanupData);
     {
       const p = enc.beginComputePass();
       p.setPipeline(cleanupPipeline);
@@ -8039,6 +8252,7 @@ async function main() {
         }
 
         bloomCompositeData[0] = state.bloomIntensity;
+        bloomCompositeData[1] = state.boundaryMode ?? 0;
         device.queue.writeBuffer(bloomCompositeUB, 0, bloomCompositeData);
 
         lastBloomThreshold = state.bloomThreshold;
@@ -8126,7 +8340,7 @@ async function main() {
       hideTimer = setTimeout(() => settingsToggle.classList.add('hidden'), 3000);
     }
   }
-  document.addEventListener('mousemove', showSettingsIcon);
+  document.addEventListener('pointermove', showSettingsIcon);
   // Keep icon visible while panel is open
   settingsToggle.addEventListener('click', () => {
     if (settingsPanel.classList.contains('open')) {
@@ -8611,6 +8825,10 @@ async function main() {
   wireSlider('shadowExtend', 'shadowExtend');
   wireSlider('sphereSize', 'sphereSize');
   wireSlider('radialMask', 'radialMask');
+  wireSelect('boundaryMode', 'boundaryMode', v => {
+    const isRect = Math.round(v) === 1;
+    document.querySelectorAll('.sphere-only-setting').forEach(el => el.style.display = isRect ? 'none' : '');
+  });
   // Init visibility
   {
     const on = state.sphereMode > 0;
@@ -9151,7 +9369,7 @@ async function main() {
   }
   presetPrevBtn?.addEventListener('click', () => { stepPreset(-1); });
   presetNextBtn?.addEventListener('click', () => { stepPreset(1); });
-  document.addEventListener('mousemove', showPresetBrowser);
+  document.addEventListener('pointermove', showPresetBrowser);
   presetBrowserEl?.addEventListener('pointerdown', showPresetBrowser);
   if (presetBrowserEl) {
     showPresetBrowser();

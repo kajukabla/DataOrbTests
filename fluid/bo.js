@@ -111,6 +111,7 @@ export const SLIDER_SPACE = {
   faceDyeNoise:      { min: 0, max: 1, step: 1    },
   faceMeshThickness: { min: 0.5, max: 3, step: 0.01 },
   radialMask:        { min: 0.5, max: 1, step: 0.001 },
+  boundaryMode:      { min: 0, max: 1, step: 1 },
   // Transfer function
   colormapMode:      { min: 0, max: 17, step: 1    },
   colorSource:       { min: 0, max: 8, step: 1    },
@@ -183,6 +184,7 @@ const SLIDER_DEFAULTS = {
   faceMouthSimBoost: 0.3,
   faceMeshThickness: 1.0,
   radialMask: 1.0,
+  boundaryMode: 0,
   noiseWarp: 0.35,
   noiseSharpness: 0.5,
   noiseAnisotropy: 0.5,

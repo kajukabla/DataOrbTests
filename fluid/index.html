@@ -2,12 +2,18 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Fluid Simulation</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#000000">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="build/icon_1024.png">
+  <title>DataOrb</title>
   <style>
     * { margin: 0; padding: 0; }
     body { background: #000; overflow: hidden; }
-    canvas { display: block; width: 100vw; height: 100vh; }
+    canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
     #error {
       display: none;
       position: fixed; inset: 0;
@@ -20,8 +26,8 @@
       top: 12px;
       right: 12px;
       z-index: 100;
-      width: 36px;
-      height: 36px;
+      width: 44px;
+      height: 44px;
       border-radius: 50%;
       border: 1px solid rgba(255,255,255,0.25);
       background: rgba(0,0,0,0.5);
@@ -55,6 +61,8 @@
       box-sizing: border-box;
       padding: 48px 14px 20px;
       overflow-y: scroll;
+      -webkit-overflow-scrolling: touch;
+      touch-action: pan-y;
       color: #bbb;
       font: 11px/1.6 system-ui, -apple-system, sans-serif;
     }
@@ -110,8 +118,8 @@
     }
     .setting-group input[type="range"]::-webkit-slider-thumb {
       -webkit-appearance: none;
-      width: 14px;
-      height: 14px;
+      width: 20px;
+      height: 20px;
       border-radius: 50%;
       background: #c90;
       cursor: pointer;
@@ -164,9 +172,10 @@
       background: none;
       border: 1px solid #555;
       color: #aaa;
-      padding: 2px 8px;
+      padding: 6px 14px;
       cursor: pointer;
       border-radius: 4px;
+      font-size: 16px;
     }
     #presetBrowser button:hover {
       background: rgba(255,255,255,0.09);
@@ -265,11 +274,18 @@
         <label>Shadow Extend <span class="val" id="shadowExtendVal">0.50</span></label>
         <input type="range" id="shadowExtend" min="0.0" max="1.0" step="0.01" value="0.50">
       </div>
+      <div class="setting-group">
+        <label>Boundary</label>
+        <select id="boundaryMode">
+          <option value="0">Sphere</option>
+          <option value="1">Rectangle (Full Screen)</option>
+        </select>
+      </div>
       <div class="setting-group sphere-setting" style="display:none">
         <label>Sphere Size <span class="val" id="sphereSizeVal">1.00</span></label>
         <input type="range" id="sphereSize" min="0.5" max="2.0" step="0.01" value="1.0">
       </div>
-      <div class="setting-group">
+      <div class="setting-group sphere-only-setting">
         <label>Radial Mask <span class="val" id="radialMaskVal">1.00</span></label>
         <input type="range" id="radialMask" min="0.5" max="1.0" step="0.001" value="1.00">
       </div>
@@ -719,5 +735,6 @@
   </div>
 
   <script type="module" src="main.js"></script>
+  <script>if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});</script>
 </body>
 </html>

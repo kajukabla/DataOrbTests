@@ -1,0 +1,16 @@
+{
+  "name": "DataOrb",
+  "short_name": "DataOrb",
+  "description": "Interactive fluid simulation with face tracking",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    { "src": "build/icon_1024.png", "sizes": "1024x1024", "type": "image/png" },
+    { "src": "build/icon.iconset/icon_512x512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "build/icon.iconset/icon_256x256.png", "sizes": "256x256", "type": "image/png" },
+    { "src": "build/icon.iconset/icon_128x128.png", "sizes": "128x128", "type": "image/png" }
+  ]
+}
