@@ -564,7 +564,7 @@ struct Params {
   dyeDissipation: f32,
   maccormack: f32,  // 0=off, 1=full MacCormack correction
   boundaryMode: f32, // 0=sphere, 1=rectangular
-  _pad1: f32, _pad2: f32,
+  gravityX: f32, gravityY: f32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -1020,6 +1020,12 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
       let pushDir = select(-1.0, 1.0, uv.y < 0.5);
       advected.y -= pushDir * proximity * proximity * 15.0 * p.dt;
     }
+  }
+
+  // Direct gravity force (accelerometer-driven sloshing)
+  let gravLen = length(vec2f(p.gravityX, p.gravityY));
+  if (gravLen > 0.01) {
+    advected += vec2f(p.gravityX, p.gravityY) * 80.0 * p.dt;
   }
 
   textureStore(dst, id.xy, vec4f(advected * p.velDissipation, 0.0, 1.0));
@@ -4158,7 +4164,8 @@ async function main() {
     paramData[15] = d.dyeDissipation;
     paramData[16] = d.maccormack;
     paramData[17] = state.boundaryMode ?? 0;
-    // [18-19] padding
+    paramData[18] = state._gravityX ?? 0;
+    paramData[19] = state._gravityY ?? 0;
     device.queue.writeBuffer(buf, 0, paramData);
   }
 
@@ -7508,8 +7515,9 @@ async function main() {
   }
 
   // ── Device orientation (accelerometer gravity for mobile) ──
+  // Default to zero — no gravity force unless accelerometer provides input
   state._gravityX = 0;
-  state._gravityY = 1;
+  state._gravityY = 0;
   function handleOrientation(e) {
     // beta = front-back tilt (-180..180), gamma = left-right tilt (-90..90)
     const beta = (e.beta ?? 0) * Math.PI / 180;
@@ -7526,7 +7534,7 @@ async function main() {
       state._gravityY /= len;
     } else {
       state._gravityX = 0;
-      state._gravityY = 1;
+      state._gravityY = 0;
     }
   }
   if (typeof DeviceOrientationEvent !== 'undefined' &&
@@ -8047,7 +8055,7 @@ async function main() {
       buoyancyData[3] = state.tempRadialMix;
       buoyancyData[4] = state.boundaryMode ?? 0;
       buoyancyData[5] = state._gravityX ?? 0;
-      buoyancyData[6] = state._gravityY ?? 1;
+      buoyancyData[6] = state._gravityY ?? 0;
       device.queue.writeBuffer(buoyancyBuf, 0, buoyancyData);
       const p = enc.beginComputePass();
       p.setPipeline(buoyancyPipe.pipeline);
@@ -9463,12 +9471,33 @@ async function main() {
     console.log('[camera] set __dataorbCameraId from hash:', hashMatch[1]);
   }
 
+  // Detect mobile/touch device
+  const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+
+  // On mobile, default to rect boundary mode
+  if (isMobile) {
+    state.boundaryMode = 1;
+    const bmSelect = document.getElementById('boundaryMode');
+    if (bmSelect) bmSelect.value = '1';
+    document.querySelectorAll('.sphere-only-setting').forEach(el => el.style.display = 'none');
+  }
+
   // Load default preset on startup
-  const defaultIdx = bo.examples.findIndex(e => e.name === 'FaceInferno4');
+  const defaultIdx = bo.examples.findIndex(e => e.name === (isMobile ? 'FaceInferno4' : 'FaceInferno4'));
   if (defaultIdx >= 0) {
     currentPresetIdx = defaultIdx;
     bo.loadExample(bo.examples[defaultIdx], state, syncAllUI);
     if (presetNameEl) presetNameEl.textContent = bo.examples[defaultIdx].name;
+  }
+
+  // On mobile, apply overrides after preset load for a good sloshing demo
+  if (isMobile) {
+    state.boundaryMode = 1;
+    // Fill the screen with dye via high noise injection
+    state.dyeNoiseAmount = Math.max(state.dyeNoiseAmount || 0, 0.6);
+    state.noiseAmount = Math.max(state.noiseAmount || 0, 0.4);
+    state.velDissipation = Math.min(state.velDissipation || 1, 0.985);
+    syncAllUI();
   }
 
   loadStatus.textContent = 'Starting simulation...';
