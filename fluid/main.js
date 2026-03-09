@@ -7531,13 +7531,17 @@ async function main() {
   }
   if (typeof DeviceOrientationEvent !== 'undefined' &&
       typeof DeviceOrientationEvent.requestPermission === 'function') {
-    // iOS 13+ requires permission request on user gesture
+    // iOS 13+ requires permission request on user gesture — defer to second tap
+    // to avoid interrupting the first interaction
+    let accelTapCount = 0;
     canvas.addEventListener('pointerdown', function reqAccel() {
+      accelTapCount++;
+      if (accelTapCount < 2) return; // skip first tap so interaction isn't interrupted
       DeviceOrientationEvent.requestPermission().then(perm => {
         if (perm === 'granted') window.addEventListener('deviceorientation', handleOrientation);
       }).catch(() => {});
       canvas.removeEventListener('pointerdown', reqAccel);
-    }, { once: true });
+    });
   } else if ('DeviceOrientationEvent' in window) {
     window.addEventListener('deviceorientation', handleOrientation);
   }

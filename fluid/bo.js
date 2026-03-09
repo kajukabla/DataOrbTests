@@ -600,18 +600,28 @@ export class BOController {
   }
 
   loadExample(example, state, syncAllUI) {
+    // Preserve display/mode settings that shouldn't be overridden by presets
+    const preserveKeys = new Set(['boundaryMode']);
+    const preserved = {};
+    for (const key of preserveKeys) preserved[key] = getStateVal(state, key);
+
     // Reset ALL slider params to sensible defaults before applying preset
     for (const key of SLIDER_KEYS) {
+      if (preserveKeys.has(key)) continue;
       const s = SLIDER_SPACE[key];
       const def = SLIDER_DEFAULTS[key];
       setStateVal(state, key, def !== undefined ? def : s.min);
     }
-    // Apply saved preset values
+    // Apply saved preset values (but not preserved keys unless preset explicitly has them)
     for (const key of SLIDER_KEYS) {
+      if (preserveKeys.has(key)) continue;
       if (example.params[key] !== undefined) {
         setStateVal(state, key, example.params[key]);
       }
     }
+    // Restore preserved settings
+    for (const key of preserveKeys) setStateVal(state, key, preserved[key]);
+
     this._runStatePostNormalize(state, 'load-example');
     if (syncAllUI) syncAllUI();
   }
