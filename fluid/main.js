@@ -1820,7 +1820,7 @@ struct BuoyancyParams {
   buoyancy: f32,
   radialMix: f32,
   boundaryMode: f32,
-  _pad1: f32, _pad2: f32, _pad3: f32,
+  gravityX: f32, gravityY: f32, _pad3: f32,
 };
 
 const SPHERE_CENTER = vec2f(0.5, 0.5);
@@ -1853,9 +1853,10 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   }
   let temp = textureLoad(tempTex, id.xy, 0).r;
   var vel = textureLoad(velSrc, id.xy, 0).xy;
-  // Blend between upward and radial-outward buoyancy
+  // Blend between gravity-directed and radial-outward buoyancy
   let heatForce = bp.buoyancy * (temp - 0.5) * bp.dt * edgeFade;
-  let upDir = vec2f(0.0, 1.0);
+  let gravLen = length(vec2f(bp.gravityX, bp.gravityY));
+  let upDir = select(vec2f(0.0, 1.0), vec2f(bp.gravityX, bp.gravityY) / max(gravLen, 1e-5), gravLen > 0.01);
   let radialDir = select(toCenter / max(dist, 0.001), vec2f(0.0, 1.0), isRect);
   let dir = mix(upDir, radialDir, bp.radialMix);
   vel += dir * heatForce;
@@ -7506,6 +7507,41 @@ async function main() {
     return [simX, simY];
   }
 
+  // ── Device orientation (accelerometer gravity for mobile) ──
+  state._gravityX = 0;
+  state._gravityY = 1;
+  function handleOrientation(e) {
+    // beta = front-back tilt (-180..180), gamma = left-right tilt (-90..90)
+    const beta = (e.beta ?? 0) * Math.PI / 180;
+    const gamma = (e.gamma ?? 0) * Math.PI / 180;
+    // Map tilt to 2D gravity direction in sim space (Y-up)
+    // Phone upright: beta≈90°, gravity points down (0,-1)
+    // Phone tilted forward: beta<90°, gravity has upward component
+    state._gravityX = Math.sin(gamma);
+    state._gravityY = -Math.cos(gamma) * Math.cos(beta - Math.PI / 2);
+    // Normalize
+    const len = Math.hypot(state._gravityX, state._gravityY);
+    if (len > 0.01) {
+      state._gravityX /= len;
+      state._gravityY /= len;
+    } else {
+      state._gravityX = 0;
+      state._gravityY = 1;
+    }
+  }
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    // iOS 13+ requires permission request on user gesture
+    canvas.addEventListener('pointerdown', function reqAccel() {
+      DeviceOrientationEvent.requestPermission().then(perm => {
+        if (perm === 'granted') window.addEventListener('deviceorientation', handleOrientation);
+      }).catch(() => {});
+      canvas.removeEventListener('pointerdown', reqAccel);
+    }, { once: true });
+  } else if ('DeviceOrientationEvent' in window) {
+    window.addEventListener('deviceorientation', handleOrientation);
+  }
+
   canvas.addEventListener('pointerdown', e => {
     pointer.down = true;
     const [sx, sy] = screenToSimUV(e.clientX, e.clientY);
@@ -8006,6 +8042,8 @@ async function main() {
       buoyancyData[2] = state.tempBuoyancy * 500.0;
       buoyancyData[3] = state.tempRadialMix;
       buoyancyData[4] = state.boundaryMode ?? 0;
+      buoyancyData[5] = state._gravityX ?? 0;
+      buoyancyData[6] = state._gravityY ?? 1;
       device.queue.writeBuffer(buoyancyBuf, 0, buoyancyData);
       const p = enc.beginComputePass();
       p.setPipeline(buoyancyPipe.pipeline);

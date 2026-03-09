@@ -520,52 +520,82 @@ export class BOController {
 
   // ─── Example Management ──────────────────────────────────────────────
 
+  _getLocalPresets() {
+    try {
+      return JSON.parse(localStorage.getItem('dataorb-presets') || '[]');
+    } catch { return []; }
+  }
+
+  _saveLocalPresets(presets) {
+    localStorage.setItem('dataorb-presets', JSON.stringify(presets));
+  }
+
   async refreshExamples() {
     try {
       let res = await fetch('/api/examples').catch(() => null);
       if (!res || !res.ok) res = await fetch('data/examples.json').catch(() => null);
       if (res && res.ok) this.examples = await res.json();
+      else this.examples = [];
     } catch { this.examples = []; }
+    // Merge localStorage presets (appended after built-in ones, no duplicates)
+    const local = this._getLocalPresets();
+    const builtInNames = new Set(this.examples.map(e => e.name));
+    for (const lp of local) {
+      if (!builtInNames.has(lp.name)) this.examples.push(lp);
+    }
   }
 
   async saveExample(name, state) {
     const params = {};
     for (const key of SLIDER_KEYS) params[key] = getStateVal(state, key);
     canonicalizeNoiseFields(params);
+    // Try server first (works when running locally with node server)
+    let saved = false;
     let res = await fetch('/api/examples', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, params }),
     }).catch(() => null);
     if (!res || !res.ok) {
-      // Current server doesn't support POST, try node server on 8081
       res = await fetch('http://localhost:8081/api/examples', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name, params }),
       }).catch(() => null);
     }
-    if (!res || !res.ok) {
-      alert('Save failed — make sure the node server is running (node fluid/server.js).');
-      return;
+    if (res && res.ok) {
+      saved = true;
     }
+    // Always save to localStorage too (works on deployed PWA)
+    const local = this._getLocalPresets();
+    const idx = local.findIndex(e => e.name === name);
+    const entry = { name, params };
+    if (idx >= 0) local[idx] = entry; else local.push(entry);
+    this._saveLocalPresets(local);
+    if (!saved) console.log(`Preset "${name}" saved to localStorage`);
     await this.refreshExamples();
   }
 
   async deleteExample(name) {
+    // Try server
     try {
-      await fetch('/api/examples', {
+      let res = await fetch('/api/examples', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
-      });
-    } catch {
-      await fetch('http://localhost:8081/api/examples', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-      });
-    }
+      }).catch(() => null);
+      if (!res || !res.ok) {
+        await fetch('http://localhost:8081/api/examples', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name }),
+        }).catch(() => null);
+      }
+    } catch {}
+    // Also remove from localStorage
+    const local = this._getLocalPresets();
+    const filtered = local.filter(e => e.name !== name);
+    this._saveLocalPresets(filtered);
     await this.refreshExamples();
   }
 
