@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Particle Prototype</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+
+  #hud {
+    position: fixed; top: 8px; left: 12px;
+    color: #888; font-size: 13px; font-family: monospace;
+    pointer-events: none; z-index: 10;
+  }
+
+  #controls-hint {
+    position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%);
+    color: #555; font-size: 12px; pointer-events: none; z-index: 10;
+  }
+
+  /* ── Settings Panel ── */
+  #settingsToggle {
+    position: fixed; top: 10px; right: 10px;
+    background: rgba(30, 30, 45, 0.7); border: 1px solid #333;
+    color: #aaa; font-size: 18px; width: 36px; height: 36px;
+    border-radius: 6px; cursor: pointer; z-index: 20;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #settingsToggle:hover { background: rgba(50, 50, 70, 0.8); }
+
+  #settingsPanel {
+    position: fixed; top: 0; right: -280px; width: 280px; height: 100vh;
+    background: rgba(12, 12, 20, 0.95); border-left: 1px solid #222;
+    transition: right 0.25s ease; z-index: 15;
+    overflow-y: auto; padding: 50px 14px 20px;
+    color: #bbb; font-size: 12px;
+  }
+  #settingsPanel.open { right: 0; }
+
+  .slider-group { margin-bottom: 10px; }
+  .slider-group label {
+    display: flex; justify-content: space-between; margin-bottom: 2px;
+    color: #888; font-size: 11px;
+  }
+  .slider-group label span { color: #cc9900; font-family: monospace; }
+  .slider-group input[type="range"] {
+    width: 100%; height: 6px; -webkit-appearance: none; appearance: none;
+    background: #222; border-radius: 3px; outline: none;
+  }
+  .slider-group input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 14px; height: 14px;
+    background: #cc9900; border-radius: 50%; cursor: pointer;
+  }
+
+  h3 {
+    color: #666; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 1px; margin: 16px 0 8px; padding-bottom: 4px;
+    border-bottom: 1px solid #222;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+<div id="hud">FPS: 60</div>
+<div id="controls-hint">WASD move &bull; W jump &bull; Space shoot &bull; Shift dodge &bull; Esc settings</div>
+
+<button id="settingsToggle">&#9881;</button>
+
+<div id="settingsPanel">
+  <h3>Shooting</h3>
+
+  <div class="slider-group">
+    <label>First Speed <span id="firstSpeedVal">400</span></label>
+    <input type="range" id="firstSpeed" min="50" max="1200" step="10" value="400">
+  </div>
+
+  <div class="slider-group">
+    <label>Particle Size <span id="particleSizeVal">4</span></label>
+    <input type="range" id="particleSize" min="1" max="20" step="0.5" value="4">
+  </div>
+
+  <div class="slider-group">
+    <label>Particle Count <span id="particleCountVal">30</span></label>
+    <input type="range" id="particleCount" min="5" max="200" step="1" value="30">
+  </div>
+
+  <div class="slider-group">
+    <label>Lifetime (s) <span id="lifetimeVal">3</span></label>
+    <input type="range" id="lifetime" min="0.5" max="10" step="0.1" value="3">
+  </div>
+
+  <div class="slider-group">
+    <label>Emitter Size <span id="emitterSizeVal">10</span></label>
+    <input type="range" id="emitterSize" min="1" max="80" step="1" value="10">
+  </div>
+
+  <h3>Curl Noise</h3>
+
+  <div class="slider-group">
+    <label>Curl Amount <span id="curlNoiseVal">50</span></label>
+    <input type="range" id="curlNoise" min="0" max="300" step="5" value="50">
+  </div>
+
+  <h3>Repeller</h3>
+
+  <div class="slider-group">
+    <label>Repeller Size <span id="repellerSizeVal">60</span></label>
+    <input type="range" id="repellerSize" min="10" max="200" step="5" value="60">
+  </div>
+
+  <div class="slider-group">
+    <label>Repeller Amount <span id="repellerAmountVal">500</span></label>
+    <input type="range" id="repellerAmount" min="0" max="2000" step="10" value="500">
+  </div>
+</div>
+
+<script type="module" src="main.js"></script>
+</body>
+</html>
