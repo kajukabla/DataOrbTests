@@ -9316,6 +9316,20 @@ async function main() {
 
   boRateBtn.addEventListener('click', toggleRateMode);
 
+  // Touch rating buttons
+  document.querySelectorAll('.bo-motion-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (bo.rateMode) bo.rateMovement(parseInt(btn.dataset.score), state, syncAllUI);
+    });
+  });
+  document.querySelectorAll('.bo-color-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (bo.rateMode) bo.rateColor(parseInt(btn.dataset.score), state, syncAllUI);
+    });
+  });
+
   boMorphBtn.addEventListener('click', () => {
     bo.boMorphMode = !bo.boMorphMode;
     boMorphBtn.classList.toggle('active', bo.boMorphMode);
@@ -9436,18 +9450,27 @@ async function main() {
     }
 
     if (bo.rateMode) {
+      // Arrow keys: quick good/bad (5 or 1)
       if (e.key === 'ArrowUp') {
         e.preventDefault();
-        bo.rateMovement(1, state, syncAllUI);
+        bo.rateMovement(5, state, syncAllUI);
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
-        bo.rateMovement(-1, state, syncAllUI);
+        bo.rateMovement(1, state, syncAllUI);
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
-        bo.rateColor(1, state, syncAllUI);
+        bo.rateColor(5, state, syncAllUI);
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault();
-        bo.rateColor(-1, state, syncAllUI);
+        bo.rateColor(1, state, syncAllUI);
+      // Number keys 1-5: precise motion rating
+      } else if (e.key >= '1' && e.key <= '5' && !e.shiftKey) {
+        e.preventDefault();
+        bo.rateMovement(parseInt(e.key), state, syncAllUI);
+      // Shift+1-5: precise color rating
+      } else if (e.shiftKey && e.code >= 'Digit1' && e.code <= 'Digit5') {
+        e.preventDefault();
+        bo.rateColor(parseInt(e.code.charAt(5)), state, syncAllUI);
       } else if (e.key === 'l' || e.key === 'L') {
         bo.toggleLockColors();
       } else if (e.key === 'm' || e.key === 'M') {

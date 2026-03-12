@@ -719,20 +719,70 @@
       window.addEventListener('unhandledrejection', e => send('error', [`Unhandled rejection: ${e.reason}`]));
     })();
   </script>
-  <div id="boOverlay" style="display:none; position:fixed; bottom:20px; left:50%;
-    transform:translateX(-50%); z-index:101; text-align:center; pointer-events:none;">
-    <div style="display:flex; gap:32px; justify-content:center; align-items:center;">
+  <style>
+    #boOverlay {
+      display: none; position: fixed; bottom: 20px; left: 50%;
+      transform: translateX(-50%); z-index: 101; text-align: center;
+      font-family: system-ui, -apple-system, sans-serif;
+    }
+    .bo-rating-row {
+      display: flex; align-items: center; gap: 6px; margin: 4px 0;
+      justify-content: center;
+    }
+    .bo-rating-row .bo-label {
+      color: #888; font-size: 11px; width: 48px; text-align: right;
+    }
+    .bo-rating-btn {
+      width: 36px; height: 36px; border-radius: 50%; border: 2px solid #444;
+      background: rgba(30,30,30,0.8); color: #888; font-size: 14px;
+      cursor: pointer; transition: all 0.15s; display: flex;
+      align-items: center; justify-content: center; padding: 0;
+      -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+    }
+    .bo-rating-btn:hover { border-color: #888; color: #fff; }
+    .bo-rating-btn.selected { border-color: #fff; color: #fff; transform: scale(1.15); }
+    .bo-motion-btn.selected { background: rgba(60,180,60,0.5); border-color: #4f4; }
+    .bo-color-btn.selected { background: rgba(60,120,220,0.5); border-color: #4af; }
+    .bo-flash-row {
+      display: flex; gap: 24px; justify-content: center; margin-bottom: 6px;
+    }
+    .bo-flash {
+      font-size: 16px; opacity: 0.3; transition: opacity 0.15s; color: #555;
+      letter-spacing: -2px;
+    }
+    @media (hover: none) {
+      .bo-rating-btn { width: 44px; height: 44px; font-size: 16px; }
+    }
+  </style>
+  <div id="boOverlay">
+    <div class="bo-flash-row">
       <div style="text-align:center;">
-        <div id="boFlashMovement" style="font-size:48px; opacity:0.3; transition:opacity 0.15s; color:#555;">?</div>
-        <div style="color:#666; font-size:9px; font-family:system-ui,-apple-system,sans-serif;">↑↓ motion</div>
+        <div id="boFlashMovement" class="bo-flash">☆☆☆☆☆</div>
+        <div style="color:#666; font-size:9px;">motion</div>
       </div>
       <div style="text-align:center;">
-        <div id="boFlashColor" style="font-size:48px; opacity:0.3; transition:opacity 0.15s; color:#555;">?</div>
-        <div style="color:#666; font-size:9px; font-family:system-ui,-apple-system,sans-serif;">←→ color</div>
+        <div id="boFlashColor" class="bo-flash">☆☆☆☆☆</div>
+        <div style="color:#666; font-size:9px;">color</div>
       </div>
     </div>
-    <div id="boCount" style="color:#aaa; font-size:13px; font-family:system-ui,-apple-system,sans-serif; margin-top:4px;"></div>
-    <div id="boPhase" style="color:#666; font-size:10px; font-family:system-ui,-apple-system,sans-serif;"></div>
+    <div class="bo-rating-row">
+      <span class="bo-label">motion</span>
+      <button class="bo-rating-btn bo-motion-btn" data-score="1">1</button>
+      <button class="bo-rating-btn bo-motion-btn" data-score="2">2</button>
+      <button class="bo-rating-btn bo-motion-btn" data-score="3">3</button>
+      <button class="bo-rating-btn bo-motion-btn" data-score="4">4</button>
+      <button class="bo-rating-btn bo-motion-btn" data-score="5">5</button>
+    </div>
+    <div class="bo-rating-row">
+      <span class="bo-label">color</span>
+      <button class="bo-rating-btn bo-color-btn" data-score="1">1</button>
+      <button class="bo-rating-btn bo-color-btn" data-score="2">2</button>
+      <button class="bo-rating-btn bo-color-btn" data-score="3">3</button>
+      <button class="bo-rating-btn bo-color-btn" data-score="4">4</button>
+      <button class="bo-rating-btn bo-color-btn" data-score="5">5</button>
+    </div>
+    <div id="boCount" style="color:#aaa; font-size:13px; margin-top:4px;"></div>
+    <div id="boPhase" style="color:#666; font-size:10px;"></div>
   </div>
 
   <div id="presetBrowser">

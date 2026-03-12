@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Fluid Platformer</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a0f; overflow: hidden; font-family: system-ui, -apple-system, sans-serif; }
+    canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+
+    /* Settings toggle */
+    #settingsToggle {
+      position: fixed; top: 12px; right: 12px; z-index: 100;
+      width: 44px; height: 44px; border-radius: 50%;
+      border: 1px solid rgba(255,255,255,0.25);
+      background: rgba(0,0,0,0.5); color: #ddd;
+      font-size: 20px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.2s;
+    }
+    #settingsToggle:hover { background: rgba(255,255,255,0.15); }
+
+    /* Settings panel */
+    #settingsPanel {
+      position: fixed; top: 0; right: -280px; width: 280px; height: 100vh;
+      z-index: 99; transition: right 0.3s ease; pointer-events: none;
+    }
+    #settingsPanel.open { right: 0; }
+    #settingsContent {
+      pointer-events: auto;
+      background: rgba(0,0,0,0.92);
+      height: 100%; padding: 48px 14px 20px;
+      overflow-y: scroll; -webkit-overflow-scrolling: touch;
+      color: #bbb; font: 11px/1.6 system-ui, -apple-system, sans-serif;
+    }
+    #settingsContent::-webkit-scrollbar { width: 6px; }
+    #settingsContent::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); }
+    #settingsContent::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }
+
+    /* Collapsible sections */
+    details.section { margin-bottom: 8px; }
+    details.section > summary {
+      cursor: pointer; padding: 6px 0; color: #777;
+      font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+      list-style: none; user-select: none;
+    }
+    details.section > summary::-webkit-details-marker { display: none; }
+    details.section > summary::before { content: '\25B8 '; }
+    details.section[open] > summary::before { content: '\25BE '; }
+    details.section > .section-body { padding: 4px 0; }
+
+    /* Controls */
+    .sg { margin-bottom: 8px; }
+    .sg label {
+      display: flex; justify-content: space-between; margin-bottom: 2px;
+      color: #999; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .sg .val { color: #ccc; font-weight: 600; }
+    .sg input[type="range"] { width: 100%; margin: 2px 0; }
+    .sg select {
+      width: 100%; background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: #ddd; padding: 4px 8px; border-radius: 4px; font-size: 12px;
+    }
+    .sg input[type="color"] {
+      width: 100%; height: 28px; border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 4px; background: transparent; cursor: pointer;
+    }
+    .sg input[type="checkbox"] { margin-right: 6px; }
+    .sg .checkbox-row { display: flex; align-items: center; margin: 4px 0; }
+
+    /* Slider thumb */
+    input[type="range"] { -webkit-appearance: none; height: 4px; background: rgba(255,255,255,0.15); border-radius: 2px; }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; width: 16px; height: 16px;
+      border-radius: 50%; background: #c90; cursor: pointer; border: none;
+    }
+
+    /* Preset row */
+    .preset-row { display: flex; gap: 4px; margin-bottom: 8px; }
+    .preset-row input { flex: 1; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #ddd; padding: 4px 8px; border-radius: 4px; font-size: 11px; }
+    .preset-row button, .action-btn {
+      padding: 4px 8px; background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2); color: #ccc;
+      border-radius: 4px; cursor: pointer; font-size: 10px; text-transform: uppercase;
+    }
+    .preset-row button:hover, .action-btn:hover { background: rgba(255,255,255,0.18); }
+
+    /* HUD */
+    #hud {
+      position: fixed; top: 12px; left: 12px; z-index: 50;
+      color: rgba(255,255,255,0.4); font: 10px monospace; pointer-events: none;
+    }
+    #controls-hint {
+      position: fixed; bottom: 12px; left: 50%; transform: translateX(-50%);
+      z-index: 50; color: rgba(255,255,255,0.3); font: 11px system-ui;
+      pointer-events: none; text-align: center; transition: opacity 2s;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="canvas"></canvas>
+  <div id="hud"></div>
+  <div id="controls-hint">WASD move &bull; W jump &bull; Space shoot &bull; Shift dodge &bull; Esc settings</div>
+
+  <button id="settingsToggle">&#9881;</button>
+  <div id="settingsPanel">
+    <div id="settingsContent">
+
+      <!-- Presets -->
+      <details class="section" open>
+        <summary>Presets</summary>
+        <div class="section-body">
+          <div class="preset-row">
+            <input type="text" id="presetName" placeholder="Preset name...">
+            <button id="savePreset">Save</button>
+            <button id="loadPreset">Load</button>
+            <button id="deletePreset">Del</button>
+          </div>
+          <div class="sg">
+            <select id="presetList"><option value="">-- select --</option></select>
+          </div>
+        </div>
+      </details>
+
+      <!-- Game Controls -->
+      <details class="section" open>
+        <summary>Game Controls</summary>
+        <div class="section-body">
+          <div class="sg"><label>Shoot Force <span class="val" id="shootForceVal">4.00</span></label><input type="range" id="shootForce" min="0.5" max="8" step="0.01" value="4"></div>
+          <div class="sg"><label>Shoot Radius <span class="val" id="shootRadiusVal">0.080</span></label><input type="range" id="shootRadius" min="0.01" max="0.2" step="0.001" value="0.08"></div>
+          <div class="sg"><label>Shoot Rate <span class="val" id="shootRateVal">60</span></label><input type="range" id="shootRate" min="1" max="120" step="1" value="60"></div>
+          <div class="sg"><label>Dye Amount <span class="val" id="dyeAmountVal">1.00</span></label><input type="range" id="dyeAmount" min="0" max="3" step="0.01" value="1"></div>
+          <div class="sg"><label>Effector Strength <span class="val" id="effectorStrengthVal">1.00</span></label><input type="range" id="effectorStrength" min="0" max="5" step="0.01" value="1"></div>
+          <div class="sg"><label>Repel Force <span class="val" id="repelForceVal">0.05</span></label><input type="range" id="repelForce" min="0" max="0.5" step="0.001" value="0.05"></div>
+          <div class="sg"><label>Repel Radius <span class="val" id="repelRadiusVal">0.060</span></label><input type="range" id="repelRadius" min="0.01" max="0.2" step="0.001" value="0.06"></div>
+          <div class="sg"><label>Fluid Gravity <span class="val" id="fluidGravityVal">0.05</span></label><input type="range" id="fluidGravity" min="0" max="0.5" step="0.001" value="0.05"></div>
+          <div class="sg"><div class="checkbox-row"><input type="checkbox" id="platformBoundaries" checked><label for="platformBoundaries" style="text-transform:none;color:#bbb;">Platform Boundaries</label></div></div>
+        </div>
+      </details>
+
+      <!-- Simulation -->
+      <details class="section">
+        <summary>Simulation</summary>
+        <div class="section-body">
+          <div class="sg"><label>Sim Speed <span class="val" id="simSpeedVal">1.00</span></label><input type="range" id="simSpeed" min="0" max="3" step="0.01" value="1"></div>
+          <div class="sg"><label>Vel Dissipation <span class="val" id="velDissipationVal">0.998</span></label><input type="range" id="velDissipation" min="0.99" max="1" step="0.001" value="0.998"></div>
+          <div class="sg"><label>Dye Dissipation <span class="val" id="dyeDissipationVal">0.993</span></label><input type="range" id="dyeDissipation" min="0.98" max="1" step="0.001" value="0.993"></div>
+          <div class="sg"><label>MacCormack <span class="val" id="maccormackVal">0.00</span></label><input type="range" id="maccormack" min="0" max="1" step="0.01" value="0"></div>
+          <div class="sg"><label>Pressure Iters <span class="val" id="pressureItersVal">30</span></label><input type="range" id="pressureIters" min="10" max="60" step="1" value="30"></div>
+          <div class="sg"><label>Pressure Decay <span class="val" id="pressureDecayVal">0.80</span></label><input type="range" id="pressureDecay" min="0" max="1" step="0.01" value="0.8"></div>
+          <div class="sg"><label>Curl Strength <span class="val" id="curlStrengthVal">15</span></label><input type="range" id="curlStrength" min="0" max="50" step="1" value="15"></div>
+          <div class="sg"><label>Dye Ceiling <span class="val" id="dyeCeilingVal">1.20</span></label><input type="range" id="dyeCeiling" min="0.3" max="3" step="0.01" value="1.2"></div>
+          <div class="sg">
+            <label>Dye Soft Cap</label>
+            <select id="dyeSoftCap"><option value="0">Off</option><option value="1" selected>On</option></select>
+          </div>
+        </div>
+      </details>
+
+      <!-- Colors -->
+      <details class="section">
+        <summary>Colors</summary>
+        <div class="section-body">
+          <div class="sg"><label>Base Color</label><input type="color" id="baseColor" value="#ff8c1a"></div>
+          <div class="sg"><label>Accent Color</label><input type="color" id="accentColor" value="#264dcc"></div>
+          <div class="sg"><label>Tip Color</label><input type="color" id="tipColor" value="#ffe680"></div>
+          <div class="sg"><label>Glitter Color</label><input type="color" id="glitterColor" value="#ffffff"></div>
+          <div class="sg"><label>Glitter Accent</label><input type="color" id="glitterAccent" value="#4d80ff"></div>
+          <div class="sg"><label>Glitter Tip</label><input type="color" id="glitterTip" value="#fff2cc"></div>
+          <div class="sg"><label>Sheen Color</label><input type="color" id="sheenColor" value="#ffe6b3"></div>
+          <div class="sg"><label>Color Blend <span class="val" id="colorBlendVal">0.50</span></label><input type="range" id="colorBlend" min="0" max="1" step="0.01" value="0.5"></div>
+          <div class="sg"><label>Palette <span class="val" id="paletteIndexVal">Manual</span></label><input type="range" id="paletteIndex" min="-1" max="49" step="1" value="-1"></div>
+        </div>
+      </details>
+
+      <!-- Colormap -->
+      <details class="section">
+        <summary>Colormap</summary>
+        <div class="section-body">
+          <div class="sg">
+            <label>Colormap</label>
+            <select id="colormapMode">
+              <option value="0">Palette Gradient</option>
+              <option value="1">Viridis</option><option value="2">Inferno</option>
+              <option value="3">Plasma</option><option value="4">Magma</option>
+              <option value="5">Rainbow HDR</option><option value="6">Rainbow Inv</option>
+              <option value="7">Cividis</option><option value="8">Turbo</option>
+              <option value="9">Twilight</option><option value="10">Cool-Warm</option>
+              <option value="11">Parula</option><option value="12">Ocean</option>
+              <option value="13">Hot</option><option value="14">Copper</option>
+              <option value="15">Cubehelix</option><option value="16">Spectral</option>
+              <option value="17">Jupiter</option>
+            </select>
+          </div>
+          <div class="sg">
+            <label>Color Source</label>
+            <select id="colorSource">
+              <option value="0">Density</option><option value="1">Velocity</option>
+              <option value="2">Pressure</option><option value="3">Vorticity</option>
+              <option value="4">Temperature</option><option value="5">Divergence</option>
+            </select>
+          </div>
+          <div class="sg"><label>Gain <span class="val" id="colorGainVal">0.50</span></label><input type="range" id="colorGain" min="0" max="1" step="0.01" value="0.5"></div>
+        </div>
+      </details>
+
+      <!-- Noise Field -->
+      <details class="section">
+        <summary>Noise Field</summary>
+        <div class="section-body">
+          <div class="sg"><label>Noise Strength <span class="val" id="noiseAmountVal">0.00</span></label><input type="range" id="noiseAmount" min="0" max="1" step="0.01" value="0"></div>
+          <div class="sg">
+            <label>Noise Type</label>
+            <select id="noiseType">
+              <option value="0">Classic Curl</option><option value="1">Domain-Warped</option>
+              <option value="2">Ridged Fractal</option><option value="3">Voronoi</option>
+              <option value="4">Flow Rotated</option><option value="5">Gabor Streaks</option>
+              <option value="6">Hybrid Fractal</option><option value="7">Jupiter Bands</option>
+            </select>
+          </div>
+          <div class="sg">
+            <label>Mapping</label>
+            <select id="noiseMapping"><option value="0">Cartesian</option><option value="1">Radial Outflow</option></select>
+          </div>
+          <div class="sg"><label>Symmetry <span class="val" id="noiseBehaviorVal">0 None</span></label><input type="range" id="noiseBehavior" min="0" max="8" step="1" value="0"></div>
+          <div class="sg"><label>Frequency <span class="val" id="noiseFrequencyVal">0.50</span></label><input type="range" id="noiseFrequency" min="0" max="1" step="0.01" value="0.5"></div>
+          <div class="sg"><label>Speed <span class="val" id="noiseSpeedVal">0.50</span></label><input type="range" id="noiseSpeed" min="0" max="1" step="0.01" value="0.5"></div>
+          <div class="sg" id="noiseWarpGroup"><label><span id="noiseWarpLabel">Domain Warp</span> <span class="val" id="noiseWarpVal">0.35</span></label><input type="range" id="noiseWarp" min="0" max="1" step="0.01" value="0.35"></div>
+          <div class="sg" id="noiseSharpnessGroup"><label><span id="noiseSharpnessLabel">Fine Detail</span> <span class="val" id="noiseSharpnessVal">0.50</span></label><input type="range" id="noiseSharpness" min="0" max="1" step="0.01" value="0.5"></div>
+          <div class="sg" id="noiseAnisotropyGroup"><label><span id="noiseAnisotropyLabel">Jet Bands</span> <span class="val" id="noiseAnisotropyVal">0.50</span></label><input type="range" id="noiseAnisotropy" min="0" max="1" step="0.01" value="0.5"></div>
+          <div class="sg" id="noiseBlendGroup"><label><span id="noiseBlendLabel">Cell Breakup</span> <span class="val" id="noiseBlendVal">0.50</span></label><input type="range" id="noiseBlend" min="0" max="1" step="0.01" value="0.5"></div>
+          <div class="sg"><label>Noise Dye Intensity <span class="val" id="noiseDyeIntensityVal">0.00</span></label><input type="range" id="noiseDyeIntensity" min="0" max="1" step="0.01" value="0"></div>
+          <div class="sg"><label>Dye Noise <span class="val" id="dyeNoiseAmountVal">0.000</span></label><input type="range" id="dyeNoiseAmount" min="0" max="0.15" step="0.001" value="0"></div>
+        </div>
+      </details>
+
+      <!-- Temperature / Buoyancy -->
+      <details class="section">
+        <summary>Temperature / Buoyancy</summary>
+        <div class="section-body">
+          <div class="sg"><label>Temp Amount <span class="val" id="tempAmountVal">0.00</span></label><input type="range" id="tempAmount" min="0" max="1" step="0.01" value="0"></div>
+          <div class="sg"><label>Buoyancy <span class="val" id="tempBuoyancyVal">0.50</span></label><input type="range" id="tempBuoyancy" min="0" max="3" step="0.01" value="0.5"></div>
+          <div class="sg"><label>Temp Dissipation <span class="val" id="tempDissipationVal">0.990</span></label><input type="range" id="tempDissipation" min="0.95" max="1" step="0.001" value="0.99"></div>
+          <div class="sg"><label>Dye → Heat <span class="val" id="tempDyeHeatVal">0.00</span></label><input type="range" id="tempDyeHeat" min="0" max="3" step="0.01" value="0"></div>
+          <div class="sg"><label>Edge Cooling <span class="val" id="tempEdgeCoolVal">0.00</span></label><input type="range" id="tempEdgeCool" min="0" max="3" step="0.01" value="0"></div>
+          <div class="sg"><label>Radial Buoyancy <span class="val" id="tempRadialMixVal">0.00</span></label><input type="range" id="tempRadialMix" min="0" max="1" step="0.01" value="0"></div>
+          <div class="sg"><label>Heat Color Shift <span class="val" id="tempColorShiftVal">0.00</span></label><input type="range" id="tempColorShift" min="0" max="3" step="0.01" value="0"></div>
+        </div>
+      </details>
+
+      <!-- Interaction -->
+      <details class="section">
+        <summary>Interaction</summary>
+        <div class="section-body">
+          <div class="sg"><label>Click Size <span class="val" id="clickSizeVal">0.50</span></label><input type="range" id="clickSize" min="0" max="1" step="0.01" value="0.5"></div>
+          <div class="sg"><label>Click Strength <span class="val" id="clickStrengthVal">0.50</span></label><input type="range" id="clickStrength" min="0" max="1" step="0.01" value="0.5"></div>
+        </div>
+      </details>
+
+      <!-- Bloom -->
+      <details class="section">
+        <summary>Bloom</summary>
+        <div class="section-body">
+          <div class="sg"><label>Bloom Intensity <span class="val" id="bloomIntensityVal">0.00</span></label><input type="range" id="bloomIntensity" min="0" max="25" step="0.01" value="0"></div>
+          <div class="sg"><label>Bloom Threshold <span class="val" id="bloomThresholdVal">0.40</span></label><input type="range" id="bloomThreshold" min="0" max="1" step="0.01" value="0.4"></div>
+          <div class="sg"><label>Bloom Radius <span class="val" id="bloomRadiusVal">0.50</span></label><input type="range" id="bloomRadius" min="0" max="10" step="0.01" value="0.5"></div>
+        </div>
+      </details>
+
+    </div>
+  </div>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>

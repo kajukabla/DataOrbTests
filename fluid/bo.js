@@ -1,11 +1,11 @@
-// ─── Bayesian Optimization Controller ────────────────────────────────────────
-// Dual-GP RLHF: separate models for movement and color preferences.
-// Movement: ↑/↓ arrows   Color: →/← arrows
-// Both must be rated before advancing to next generation.
+// ─── Bayesian Optimization Controller (PCA-based) ───────────────────────────
+// Single GP in PCA space. Dual 1-5 ratings for motion + color, combined score.
+// Mutate-best (70%) + EI exploration (30%).
 
 import {
   gpFit, gpPredict, expectedImprovement,
-  optimizeHyperparams, latinHypercube
+  optimizeHyperparams, latinHypercube,
+  fitPCA, toPCA, fromPCA
 } from './gp.js';
 
 // ─── Parameter Space ─────────────────────────────────────────────────────────
@@ -45,10 +45,8 @@ export const SLIDER_SPACE = {
   pressureIters:     { min: 10,   max: 60,    step: 1    },
   pressureDecay:     { min: 0,    max: 1,     step: 0.01 },
   prismaticAmount:   { min: 0,    max: 20,    step: 0.1  },
-  // Dye-coupled noise
   noiseDyeIntensity: { min: 0,    max: 1,     step: 0.01 },
   dyeNoiseAmount:    { min: 0,    max: 0.15,  step: 0.001 },
-  // Temperature/buoyancy
   tempAmount:        { min: 0,    max: 1,     step: 0.01 },
   tempBuoyancy:      { min: 0,    max: 3,     step: 0.01 },
   tempDissipation:   { min: 0.95, max: 1.0,   step: 0.001 },
@@ -56,14 +54,11 @@ export const SLIDER_SPACE = {
   tempEdgeCool:      { min: 0,    max: 3,     step: 0.01 },
   tempRadialMix:     { min: 0,    max: 1,     step: 0.01 },
   tempColorShift:    { min: 0,    max: 3,     step: 0.01 },
-  // Mood
   moodAmount:        { min: 0,    max: 1,     step: 0.01 },
   moodSpeed:         { min: 0,    max: 1,     step: 0.01 },
   paletteIndex:      { min: -1,   max: 49,    step: 1 },
-  // Material properties
   metallic:          { min: 0,    max: 1,     step: 0.01 },
   roughness:         { min: 0,    max: 1,     step: 0.01 },
-  // Color channels (7 colors × 3 channels = 21 dims)
   baseColor_0:       { min: 0, max: 1, step: 0.01 },
   baseColor_1:       { min: 0, max: 1, step: 0.01 },
   baseColor_2:       { min: 0, max: 1, step: 0.01 },
@@ -85,11 +80,9 @@ export const SLIDER_SPACE = {
   sheenColor_0:      { min: 0, max: 1, step: 0.01 },
   sheenColor_1:      { min: 0, max: 1, step: 0.01 },
   sheenColor_2:      { min: 0, max: 1, step: 0.01 },
-  // Bloom
   bloomIntensity:    { min: 0, max: 1, step: 0.01 },
   bloomThreshold:    { min: 0, max: 2, step: 0.01 },
   bloomRadius:       { min: 0, max: 1, step: 0.01 },
-  // Face tracking
   faceEffectorMode:  { min: 0, max: 2, step: 1    },
   faceMeshNoiseAmount: { min: 0, max: 6, step: 0.01 },
   faceMeshNoiseFreq: { min: 1, max: 60, step: 0.5 },
@@ -112,12 +105,10 @@ export const SLIDER_SPACE = {
   faceMeshThickness: { min: 0.5, max: 3, step: 0.01 },
   radialMask:        { min: 0.5, max: 1, step: 0.001 },
   boundaryMode:      { min: 0, max: 1, step: 1 },
-  // Transfer function
   colormapMode:      { min: 0, max: 17, step: 1    },
   colorSource:       { min: 0, max: 8, step: 1    },
   colorGain:         { min: 0, max: 1, step: 0.01 },
   colormapCompress:  { min: 0, max: 1, step: 1    },
-  // Particle overdraw cap
   particleCount:     { min: 65536, max: 4194304, step: 65536 },
   particleSize:      { min: 0.1, max: 4, step: 0.01 },
   glitterCap:        { min: 0.01, max: 3, step: 0.01 },
@@ -136,7 +127,6 @@ export const SLIDER_SPACE = {
 export const SLIDER_KEYS = Object.keys(SLIDER_SPACE);
 export const D = SLIDER_KEYS.length;
 
-// Sensible defaults for params that shouldn't reset to min when loading old presets
 const SLIDER_DEFAULTS = {
   particleCount: 4194304,
   particleSize: 0.9,
@@ -210,24 +200,24 @@ export const COLOR_KEYS = [
 
 const NOISE_CONTROL_KEYS = ['noiseWarp', 'noiseSharpness', 'noiseAnisotropy', 'noiseBlend'];
 const NOISE_PROFILE_BY_TYPE = [
-  { noiseWarp: 0.22, noiseSharpness: 0.30, noiseAnisotropy: 0.25, noiseBlend: 0.24 }, // Classic
-  { noiseWarp: 0.76, noiseSharpness: 0.58, noiseAnisotropy: 0.40, noiseBlend: 0.52 }, // Domain-Warped
-  { noiseWarp: 0.42, noiseSharpness: 0.78, noiseAnisotropy: 0.30, noiseBlend: 0.48 }, // Ridged
-  { noiseWarp: 0.38, noiseSharpness: 0.55, noiseAnisotropy: 0.20, noiseBlend: 0.74 }, // Voronoi
-  { noiseWarp: 0.52, noiseSharpness: 0.46, noiseAnisotropy: 0.86, noiseBlend: 0.40 }, // Flow
-  { noiseWarp: 0.50, noiseSharpness: 0.62, noiseAnisotropy: 0.72, noiseBlend: 0.44 }, // Gabor
-  { noiseWarp: 0.66, noiseSharpness: 0.58, noiseAnisotropy: 0.60, noiseBlend: 0.64 }, // Hybrid
-  { noiseWarp: 0.78, noiseSharpness: 0.58, noiseAnisotropy: 0.70, noiseBlend: 0.62 }, // Jupiter
+  { noiseWarp: 0.22, noiseSharpness: 0.30, noiseAnisotropy: 0.25, noiseBlend: 0.24 },
+  { noiseWarp: 0.76, noiseSharpness: 0.58, noiseAnisotropy: 0.40, noiseBlend: 0.52 },
+  { noiseWarp: 0.42, noiseSharpness: 0.78, noiseAnisotropy: 0.30, noiseBlend: 0.48 },
+  { noiseWarp: 0.38, noiseSharpness: 0.55, noiseAnisotropy: 0.20, noiseBlend: 0.74 },
+  { noiseWarp: 0.52, noiseSharpness: 0.46, noiseAnisotropy: 0.86, noiseBlend: 0.40 },
+  { noiseWarp: 0.50, noiseSharpness: 0.62, noiseAnisotropy: 0.72, noiseBlend: 0.44 },
+  { noiseWarp: 0.66, noiseSharpness: 0.58, noiseAnisotropy: 0.60, noiseBlend: 0.64 },
+  { noiseWarp: 0.78, noiseSharpness: 0.58, noiseAnisotropy: 0.70, noiseBlend: 0.62 },
 ];
 const NOISE_ACTIVE_BY_TYPE = [
-  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },  // Classic
-  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },  // Domain-Warped
-  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: false, noiseBlend: true }, // Ridged
-  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: false, noiseBlend: true }, // Voronoi
-  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },  // Flow
-  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },  // Gabor
-  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },  // Hybrid
-  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },  // Jupiter
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: false, noiseBlend: true },
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: false, noiseBlend: true },
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },
+  { noiseWarp: true, noiseSharpness: true, noiseAnisotropy: true, noiseBlend: true },
 ];
 
 function clampNoiseType(raw) {
@@ -256,33 +246,14 @@ function canonicalizeNoiseFields(params) {
   }
 }
 
-// ─── Parameter Group Indices ────────────────────────────────────────────────
-// Split SLIDER_KEYS into motion vs color for dual-GP training
-
-const COLOR_PATTERN = /Color_|Accent_|Tip_|sheen.*_/i;
-
-export const COLOR_INDICES = [];
-export const MOTION_INDICES = [];
-for (let i = 0; i < D; i++) {
-  if (COLOR_PATTERN.test(SLIDER_KEYS[i])) {
-    COLOR_INDICES.push(i);
-  } else {
-    MOTION_INDICES.push(i);
-  }
-}
-export const D_MOTION = MOTION_INDICES.length;
-export const D_COLOR = COLOR_INDICES.length;
-
 // ─── Color channel helpers ──────────────────────────────────────────────────
 
-/** Get state value for a key (handles color channels like baseColor_0). */
 function getStateVal(state, key) {
   const m = key.match(/^(.+)_([012])$/);
   if (m && Array.isArray(state[m[1]])) return state[m[1]][parseInt(m[2])];
   return state[key];
 }
 
-/** Set state value for a key (handles color channels). */
 function setStateVal(state, key, val) {
   const m = key.match(/^(.+)_([012])$/);
   if (m && Array.isArray(state[m[1]])) { state[m[1]][parseInt(m[2])] = val; return; }
@@ -291,7 +262,6 @@ function setStateVal(state, key, val) {
 
 // ─── Normalization ───────────────────────────────────────────────────────────
 
-/** Extract state → [0,1]^D normalized vector (Float64Array). */
 export function stateToNormalized(state) {
   const canonical = {};
   for (let i = 0; i < D; i++) {
@@ -316,9 +286,6 @@ export function stateToNormalized(state) {
   return x;
 }
 
-/** Apply [0,1]^D normalized vector → state, snapping to step sizes.
- *  @param {Set} [lockedKeys] — keys to skip (preserve current state values)
- */
 export function normalizedToState(x, state, lockedKeys) {
   for (let i = 0; i < D; i++) {
     const key = SLIDER_KEYS[i];
@@ -330,7 +297,6 @@ export function normalizedToState(x, state, lockedKeys) {
     if (val > s.max) val = s.max;
     setStateVal(state, key, val);
   }
-  // Keep noise control dimensions coherent with selected noise type.
   const canonical = {};
   for (let i = 0; i < D; i++) {
     const key = SLIDER_KEYS[i];
@@ -344,135 +310,64 @@ export function normalizedToState(x, state, lockedKeys) {
   if (!(lockedKeys && lockedKeys.has('noiseType'))) {
     setStateVal(state, 'noiseType', canonical.noiseType);
   }
-  // Clamp critical params so the sim is always visually active
   if (state.simSpeed < 0.2) state.simSpeed = 0.2;
 }
 
-/** Generate a random normalized vector in [0,1]^D. */
 function randomNormalized() {
   const x = new Float64Array(D);
   for (let i = 0; i < D; i++) x[i] = Math.random();
   return x;
 }
 
-// ─── Data Store ──────────────────────────────────────────────────────────────
+// ─── Storage (localStorage-first, server fallback) ───────────────────────────
 
-const MAX_RATINGS = 2000;
+const RATINGS_KEY = 'dataorb-ratings-v2';
+const PRESETS_KEY = 'dataorb-presets';
+const MAX_RATINGS = 500;
 
-async function loadRatings() {
-  try {
-    const res = await fetch('/api/ratings');
-    if (!res.ok) return [];
-    const arr = await res.json();
-    return Array.isArray(arr) ? arr : [];
-  } catch { return []; }
+function loadRatingsLocal() {
+  try { return JSON.parse(localStorage.getItem(RATINGS_KEY) || '[]'); }
+  catch { return []; }
 }
 
-async function saveRatings(ratings) {
-  // Cap at MAX_RATINGS (keep most recent)
-  if (ratings.length > MAX_RATINGS) {
-    ratings = ratings.slice(ratings.length - MAX_RATINGS);
-  }
+function saveRatingsLocal(ratings) {
+  if (ratings.length > MAX_RATINGS) ratings = ratings.slice(-MAX_RATINGS);
+  try { localStorage.setItem(RATINGS_KEY, JSON.stringify(ratings)); }
+  catch (e) { console.warn('BO: localStorage save failed:', e); }
+}
+
+// Also try server for backward compat
+async function saveRatingsServer(ratings) {
   try {
     await fetch('/api/ratings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ratings }),
     });
-  } catch (e) { console.warn('BO: save failed:', e); }
+  } catch {}
 }
 
-/** Purge old-format or out-of-range ratings. */
-function purgeStaleRatings(ratings) {
-  const before = ratings.length;
-  const valid = ratings.filter(r => {
-    // Must have dual-rating format
-    if (r.movementRating === undefined || r.colorRating === undefined) return false;
-    // Check params are within current SLIDER_SPACE ranges (with 10% tolerance)
-    const p = r.params;
-    if (!p) return false;
-    for (const key of SLIDER_KEYS) {
-      if (p[key] === undefined) continue;
-      const s = SLIDER_SPACE[key];
-      const range = s.max - s.min;
-      const tol = range * 0.1;
-      if (p[key] < s.min - tol || p[key] > s.max + tol) return false;
-    }
-    return true;
-  });
-  const purged = before - valid.length;
-  if (purged > 0) {
-    console.log(`BO: Purged ${purged} stale ratings (${valid.length} remaining)`);
-  }
-  return valid;
-}
+// ─── PCA Configuration ──────────────────────────────────────────────────────
 
-// ─── Dual-GP Training Data ──────────────────────────────────────────────────
+const PCA_COMPONENTS = 8;
 
-/** Extract motion-only training data from ratings. */
-function ratingsToMotionData(ratings) {
-  const N = ratings.length;
-  const X = new Float64Array(N * D_MOTION);
-  const y = new Float64Array(N);
-  for (let i = 0; i < N; i++) {
-    const r = ratings[i];
-    const p = { ...r.params };
-    canonicalizeNoiseFields(p);
-    for (let j = 0; j < D_MOTION; j++) {
-      const key = SLIDER_KEYS[MOTION_INDICES[j]];
-      const s = SLIDER_SPACE[key];
-      if (p[key] !== undefined) {
-        X[i * D_MOTION + j] = (p[key] - s.min) / (s.max - s.min);
-      } else {
-        X[i * D_MOTION + j] = 0.5;
-      }
-    }
-    y[i] = r.movementRating;
-  }
-  return { X, y, N, D: D_MOTION };
-}
-
-/** Extract color-only training data from ratings. */
-function ratingsToColorData(ratings) {
-  const N = ratings.length;
-  const X = new Float64Array(N * D_COLOR);
-  const y = new Float64Array(N);
-  for (let i = 0; i < N; i++) {
-    const r = ratings[i];
-    const p = { ...r.params };
-    canonicalizeNoiseFields(p);
-    for (let j = 0; j < D_COLOR; j++) {
-      const key = SLIDER_KEYS[COLOR_INDICES[j]];
-      const s = SLIDER_SPACE[key];
-      if (p[key] !== undefined) {
-        X[i * D_COLOR + j] = (p[key] - s.min) / (s.max - s.min);
-      } else {
-        X[i * D_COLOR + j] = 0.5;
-      }
-    }
-    y[i] = r.colorRating;
-  }
-  return { X, y, N, D: D_COLOR };
-}
-
-// ─── BOController Class ──────────────────────────────────────────────────────
+// ─── BOController ────────────────────────────────────────────────────────────
 
 export class BOController {
   constructor() {
     this.ratings = [];
     this.examples = [];
-    this.motionModel = null;
-    this.colorModel = null;
+    this.model = null;         // single GP in PCA space
+    this.pca = null;           // PCA transform
     this.rateMode = false;
     this.boMorphMode = false;
     this._retrainCounter = 0;
-    this._morphCooldown = 0;
     this._suggestionCount = 0;
     this.lockedKeys = new Set();
-    // Pending ratings for current generation
-    this._pendingMovement = null;  // null = not yet rated
+    // Pending ratings (1-5 scale, null = not yet rated)
+    this._pendingMovement = null;
     this._pendingColor = null;
-    this._state = null;            // ref set by rate calls
+    this._state = null;
     this._syncAllUI = null;
     this._statePostNormalize = null;
   }
@@ -483,51 +378,55 @@ export class BOController {
 
   _runStatePostNormalize(state, source) {
     if (!this._statePostNormalize || !state) return;
-    try {
-      this._statePostNormalize(state, source);
-    } catch (e) {
-      console.warn('BO: state post-normalize hook failed:', e);
-    }
+    try { this._statePostNormalize(state, source); }
+    catch (e) { console.warn('BO: state post-normalize hook failed:', e); }
   }
 
   static async create() {
     const bo = new BOController();
-    const raw = await loadRatings();
-    bo.ratings = purgeStaleRatings(raw);
-    // Save purged list if anything was removed
-    if (bo.ratings.length !== raw.length && bo.ratings.length > 0) {
-      saveRatings(bo.ratings);
-    }
+    bo.ratings = loadRatingsLocal();
     await bo.refreshExamples();
-    // Warm-start: inject examples as positive ratings when starting fresh
-    if (bo.ratings.length === 0 && bo.examples.length > 0) {
-      for (const ex of bo.examples) {
-        bo.ratings.push({
-          params: ex.params,
-          movementRating: 1,
-          colorRating: 1,
-          timestamp: Date.now(),
-        });
-      }
-      saveRatings(bo.ratings);
-      console.log(`BO: Warm-started with ${bo.examples.length} example ratings`);
-    }
-    if (bo.ratings.length >= 10) {
-      console.log(`BO: Deferring initial retrain (N=${bo.ratings.length}) — will train after first frame`);
+    bo._fitPCA();
+
+    if (bo.ratings.length >= 5) {
+      console.log(`BO: ${bo.ratings.length} ratings loaded, will retrain after first frame`);
+      setTimeout(() => bo.retrain(), 100);
     }
     return bo;
+  }
+
+  // ─── PCA ──────────────────────────────────────────────────────────────
+
+  _fitPCA() {
+    if (this.examples.length < 3) {
+      console.log('BO: Too few presets for PCA, using raw space');
+      this.pca = null;
+      return;
+    }
+
+    // Build data matrix from all presets
+    const N = this.examples.length;
+    const data = new Float64Array(N * D);
+    for (let i = 0; i < N; i++) {
+      const x = stateToNormalized(this.examples[i].params);
+      for (let j = 0; j < D; j++) data[i * D + j] = x[j];
+    }
+
+    this.pca = fitPCA(data, N, D, PCA_COMPONENTS);
+    if (this.pca) {
+      console.log(`BO: PCA fitted on ${N} presets → ${this.pca.nK} components`);
+    }
   }
 
   // ─── Example Management ──────────────────────────────────────────────
 
   _getLocalPresets() {
-    try {
-      return JSON.parse(localStorage.getItem('dataorb-presets') || '[]');
-    } catch { return []; }
+    try { return JSON.parse(localStorage.getItem(PRESETS_KEY) || '[]'); }
+    catch { return []; }
   }
 
   _saveLocalPresets(presets) {
-    localStorage.setItem('dataorb-presets', JSON.stringify(presets));
+    localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
   }
 
   async refreshExamples() {
@@ -537,7 +436,6 @@ export class BOController {
       if (res && res.ok) this.examples = await res.json();
       else this.examples = [];
     } catch { this.examples = []; }
-    // Merge localStorage presets (appended after built-in ones, no duplicates)
     const local = this._getLocalPresets();
     const builtInNames = new Set(this.examples.map(e => e.name));
     for (const lp of local) {
@@ -549,7 +447,6 @@ export class BOController {
     const params = {};
     for (const key of SLIDER_KEYS) params[key] = getStateVal(state, key);
     canonicalizeNoiseFields(params);
-    // Try server first (works when running locally with node server)
     let saved = false;
     let res = await fetch('/api/examples', {
       method: 'POST',
@@ -563,10 +460,7 @@ export class BOController {
         body: JSON.stringify({ name, params }),
       }).catch(() => null);
     }
-    if (res && res.ok) {
-      saved = true;
-    }
-    // Always save to localStorage too (works on deployed PWA)
+    if (res && res.ok) saved = true;
     const local = this._getLocalPresets();
     const idx = local.findIndex(e => e.name === name);
     const entry = { name, params };
@@ -574,10 +468,10 @@ export class BOController {
     this._saveLocalPresets(local);
     if (!saved) console.log(`Preset "${name}" saved to localStorage`);
     await this.refreshExamples();
+    this._fitPCA(); // refit with new preset
   }
 
   async deleteExample(name) {
-    // Try server
     try {
       let res = await fetch('/api/examples', {
         method: 'DELETE',
@@ -592,36 +486,28 @@ export class BOController {
         }).catch(() => null);
       }
     } catch {}
-    // Also remove from localStorage
     const local = this._getLocalPresets();
-    const filtered = local.filter(e => e.name !== name);
-    this._saveLocalPresets(filtered);
+    this._saveLocalPresets(local.filter(e => e.name !== name));
     await this.refreshExamples();
   }
 
   loadExample(example, state, syncAllUI) {
-    // Preserve display/mode settings that shouldn't be overridden by presets
     const preserveKeys = new Set(['boundaryMode']);
     const preserved = {};
     for (const key of preserveKeys) preserved[key] = getStateVal(state, key);
-
-    // Reset ALL slider params to sensible defaults before applying preset
     for (const key of SLIDER_KEYS) {
       if (preserveKeys.has(key)) continue;
       const s = SLIDER_SPACE[key];
       const def = SLIDER_DEFAULTS[key];
       setStateVal(state, key, def !== undefined ? def : s.min);
     }
-    // Apply saved preset values (but not preserved keys unless preset explicitly has them)
     for (const key of SLIDER_KEYS) {
       if (preserveKeys.has(key)) continue;
       if (example.params[key] !== undefined) {
         setStateVal(state, key, example.params[key]);
       }
     }
-    // Restore preserved settings
     for (const key of preserveKeys) setStateVal(state, key, preserved[key]);
-
     this._runStatePostNormalize(state, 'load-example');
     if (syncAllUI) syncAllUI();
   }
@@ -631,186 +517,292 @@ export class BOController {
     return this.examples;
   }
 
-  // ─── Dual-GP Retrain ──────────────────────────────────────────────────
+  // ─── GP Training ──────────────────────────────────────────────────────
 
-  /** Rebuild both GP models from ratings. */
   retrain() {
     const startMs = performance.now();
-    const MAX_TRAIN = 200;
-    const recentRatings = this.ratings.length > MAX_TRAIN
-      ? this.ratings.slice(-MAX_TRAIN)
-      : this.ratings;
-    const N = recentRatings.length;
+    const N = this.ratings.length;
 
     if (N < 5) {
-      console.log(`BO: Retrain skipped — need 5+ ratings (have ${N})`);
-      this.motionModel = null;
-      this.colorModel = null;
+      console.log(`BO: Need 5+ ratings (have ${N})`);
+      this.model = null;
       return;
     }
 
-    // Train motion GP
-    this.motionModel = this._trainGP(recentRatings, 'motion', ratingsToMotionData, D_MOTION);
+    // Use most recent ratings (cap for performance)
+    const recent = N > 200 ? this.ratings.slice(-200) : this.ratings;
+    const n = recent.length;
 
-    // Train color GP
-    this.colorModel = this._trainGP(recentRatings, 'color', ratingsToColorData, D_COLOR);
-
-    console.log(`BO: Dual retrain done (${(performance.now() - startMs).toFixed(0)}ms)`);
-  }
-
-  /** Train a single GP model for a parameter group. */
-  _trainGP(ratings, label, dataFn, dims) {
-    const { X, y, N, D: gD } = dataFn(ratings);
-
-    // Check if all ratings are identical
-    const allSame = y.every(v => v === y[0]);
-    if (allSame) {
-      console.log(`BO: ${label} GP skipped — all ratings identical`);
-      return null;
+    // Combined score: average of motion + color, normalized to [0,1]
+    const y = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const r = recent[i];
+      const motion = (r.motionScore ?? 3) / 5;  // 1-5 → 0.2-1.0
+      const color = (r.colorScore ?? 3) / 5;
+      y[i] = (motion + color) / 2;
     }
 
-    const useARD = N >= 60;
-    try {
-      const hp = optimizeHyperparams(X, y, N, gD, useARD);
-      const model = gpFit(X, y, N, gD, hp.lengthScales, hp.sigmaF, hp.sigmaN, hp.mu);
-      if (!model) {
-        console.warn(`BO: ${label} GP — Cholesky failed`);
-        return null;
+    // Check if all same
+    if (y.every(v => Math.abs(v - y[0]) < 1e-6)) {
+      console.log('BO: All ratings identical, skipping GP');
+      this.model = null;
+      return;
+    }
+
+    // Build training data in PCA space (or raw if no PCA)
+    const usePCA = this.pca !== null;
+    const gD = usePCA ? this.pca.nK : D;
+    const X = new Float64Array(n * gD);
+
+    for (let i = 0; i < n; i++) {
+      const norm = stateToNormalized(recent[i].params);
+      if (usePCA) {
+        const z = toPCA(this.pca, norm);
+        for (let j = 0; j < gD; j++) X[i * gD + j] = z[j];
+      } else {
+        for (let j = 0; j < gD; j++) X[i * gD + j] = norm[j];
       }
-      console.log(`BO: ${label} GP trained — N=${N}, D=${gD}, ARD=${useARD}, sigmaF=${hp.sigmaF.toFixed(3)}, sigmaN=${hp.sigmaN.toFixed(3)}`);
-      return model;
+    }
+
+    const useARD = n >= 40;
+    try {
+      const hp = optimizeHyperparams(X, y, n, gD, useARD);
+      this.model = gpFit(X, y, n, gD, hp.lengthScales, hp.sigmaF, hp.sigmaN, hp.mu);
+      if (!this.model) {
+        console.warn('BO: Cholesky failed');
+        return;
+      }
+      this.model._usePCA = usePCA;
+      console.log(`BO: GP trained — N=${n}, D=${gD}, PCA=${usePCA}, ARD=${useARD} (${(performance.now() - startMs).toFixed(0)}ms)`);
     } catch (e) {
-      console.warn(`BO: ${label} GP failed:`, e);
-      return null;
+      console.warn('BO: GP failed:', e);
+      this.model = null;
     }
   }
 
-  /** Retrain every 10 ratings, or on first reaching 10. */
   maybeRetrain() {
     this._retrainCounter++;
     const N = this.ratings.length;
-    if (N === 10 || (N >= 10 && this._retrainCounter >= 10)) {
+    if (N === 5 || (N >= 5 && this._retrainCounter >= 5)) {
       this._retrainCounter = 0;
-      console.log(`BO: Retrain triggered (N=${N})`);
       setTimeout(() => this.retrain(), 0);
-    } else {
-      console.log(`BO: Retrain skipped (N=${N}, counter=${this._retrainCounter}/10)`);
     }
   }
 
-  // ─── Dual-GP Suggestions ──────────────────────────────────────────────
+  // ─── Suggestions ──────────────────────────────────────────────────────
 
-  /**
-   * Get next parameter suggestion using dual GPs.
-   * Generates motion and color suggestions independently, merges into full vector.
-   */
   getNextParams() {
     const N = this.ratings.length;
 
-    // Phase 1: random/example exploration
-    if (N < 10 || (!this.motionModel && !this.colorModel)) {
-      if (this.examples.length > 0 && N % 2 === 0) {
-        const ex = this.examples[N % this.examples.length];
-        const x = stateToNormalized(ex.params);
-        for (let i = 0; i < D; i++) {
-          x[i] += (Math.random() - 0.5) * 0.15;
-          if (x[i] < 0) x[i] = 0;
-          if (x[i] > 1) x[i] = 1;
-        }
-        console.log(`BO: Next suggestion — Phase 1 (example seed "${ex.name}", N=${N})`);
-        return x;
-      }
-      console.log(`BO: Next suggestion — Phase 1 (random, N=${N})`);
-      return randomNormalized();
+    // Phase 1: explore with example mutations
+    if (N < 5 || !this.model) {
+      return this._mutateBestPreset(0.3);
     }
 
-    // Force exploration every 3rd suggestion
     this._suggestionCount++;
-    if (this._suggestionCount % 3 === 0) {
-      console.log('BO: Next suggestion — Explore (random)');
-      return randomNormalized();
+
+    // 70% mutate best rated, 30% EI explore
+    if (this._suggestionCount % 10 < 7) {
+      return this._mutateBestRated(0.15);
+    } else {
+      return this._eiSuggestion();
     }
-
-    const xi = N < 30 ? 0.01 : 0.05;
-    const nCandidates = N < 30 ? 1000 : 500;
-
-    // Generate motion and color suggestions independently, merge
-    const fullX = randomNormalized(); // fallback base
-
-    // Motion suggestion
-    if (this.motionModel) {
-      const motionX = this._argmaxEIPartial(this.motionModel, MOTION_INDICES, D_MOTION, nCandidates, xi, 'movementRating');
-      for (let j = 0; j < D_MOTION; j++) {
-        fullX[MOTION_INDICES[j]] = motionX[j];
-      }
-    }
-
-    // Color suggestion
-    if (this.colorModel) {
-      const colorX = this._argmaxEIPartial(this.colorModel, COLOR_INDICES, D_COLOR, nCandidates, xi, 'colorRating');
-      for (let j = 0; j < D_COLOR; j++) {
-        fullX[COLOR_INDICES[j]] = colorX[j];
-      }
-    }
-
-    console.log(`BO: Next suggestion — EI (motion=${!!this.motionModel}, color=${!!this.colorModel}, xi=${xi})`);
-    return fullX;
   }
 
-  /** Pure exploitation: return argmax of posterior mean (uses motion model for motion, color for color). */
+  /** Mutate a random good preset with noise in PCA space. */
+  _mutateBestPreset(sigma) {
+    if (this.examples.length === 0) return randomNormalized();
+
+    // Pick a random preset (biased toward variety)
+    const ex = this.examples[Math.floor(Math.random() * this.examples.length)];
+    const norm = stateToNormalized(ex.params);
+
+    if (this.pca) {
+      const z = toPCA(this.pca, norm);
+      for (let c = 0; c < this.pca.nK; c++) {
+        z[c] += gaussianRandom() * sigma;
+      }
+      console.log(`BO: Suggest — mutate preset "${ex.name}" (PCA σ=${sigma})`);
+      return fromPCA(this.pca, z);
+    } else {
+      for (let i = 0; i < D; i++) {
+        norm[i] += (Math.random() - 0.5) * sigma * 2;
+        if (norm[i] < 0) norm[i] = 0;
+        if (norm[i] > 1) norm[i] = 1;
+      }
+      return norm;
+    }
+  }
+
+  /** Mutate the highest-rated config in PCA space. */
+  _mutateBestRated(sigma) {
+    // Find best rated
+    let bestScore = -Infinity;
+    let bestParams = null;
+    for (const r of this.ratings) {
+      const score = ((r.motionScore ?? 3) + (r.colorScore ?? 3)) / 2;
+      if (score > bestScore) {
+        bestScore = score;
+        bestParams = r.params;
+      }
+    }
+
+    if (!bestParams) return this._mutateBestPreset(sigma);
+
+    const norm = stateToNormalized(bestParams);
+
+    if (this.pca) {
+      const z = toPCA(this.pca, norm);
+      // Adaptive sigma: smaller as we get more ratings
+      const adaptSigma = sigma / (1 + this.ratings.length / 50);
+      for (let c = 0; c < this.pca.nK; c++) {
+        z[c] += gaussianRandom() * adaptSigma;
+      }
+      console.log(`BO: Suggest — mutate best rated (score=${bestScore.toFixed(1)}, PCA σ=${adaptSigma.toFixed(3)})`);
+      return fromPCA(this.pca, z);
+    } else {
+      for (let i = 0; i < D; i++) {
+        norm[i] += (Math.random() - 0.5) * sigma * 2;
+        if (norm[i] < 0) norm[i] = 0;
+        if (norm[i] > 1) norm[i] = 1;
+      }
+      return norm;
+    }
+  }
+
+  /** EI-based suggestion in PCA space. */
+  _eiSuggestion() {
+    if (!this.model) return this._mutateBestPreset(0.3);
+
+    const usePCA = this.model._usePCA;
+    const gD = usePCA ? this.pca.nK : D;
+
+    // Find best observed score
+    let fBest = -Infinity;
+    for (const r of this.ratings) {
+      const score = ((r.motionScore ?? 3) + (r.colorScore ?? 3)) / 10;
+      if (score > fBest) fBest = score;
+    }
+
+    const xi = this.ratings.length < 20 ? 0.02 : 0.05;
+    const nCandidates = 500;
+
+    // Generate candidates: mix of LHS + mutations of best
+    const lhsCandidates = latinHypercube(nCandidates / 2, gD);
+
+    // Also generate mutation candidates around best
+    const mutCandidates = new Float64Array((nCandidates / 2) * gD);
+    for (let i = 0; i < nCandidates / 2; i++) {
+      const bestNorm = this._getBestNormalized();
+      if (usePCA) {
+        const z = toPCA(this.pca, bestNorm);
+        for (let j = 0; j < gD; j++) {
+          mutCandidates[i * gD + j] = z[j] + gaussianRandom() * 0.2;
+        }
+      } else {
+        for (let j = 0; j < gD; j++) {
+          mutCandidates[i * gD + j] = bestNorm[j] + (Math.random() - 0.5) * 0.3;
+          if (mutCandidates[i * gD + j] < 0) mutCandidates[i * gD + j] = 0;
+          if (mutCandidates[i * gD + j] > 1) mutCandidates[i * gD + j] = 1;
+        }
+      }
+    }
+
+    let bestEI = -Infinity;
+    let bestX = null;
+    const xStar = new Float64Array(gD);
+
+    // Evaluate LHS candidates
+    for (let i = 0; i < nCandidates / 2; i++) {
+      for (let j = 0; j < gD; j++) xStar[j] = lhsCandidates[i * gD + j];
+      const { mean, variance } = gpPredict(this.model, xStar);
+      const ei = expectedImprovement(mean, variance, fBest, xi);
+      if (ei > bestEI) { bestEI = ei; bestX = new Float64Array(xStar); }
+    }
+
+    // Evaluate mutation candidates
+    for (let i = 0; i < nCandidates / 2; i++) {
+      for (let j = 0; j < gD; j++) xStar[j] = mutCandidates[i * gD + j];
+      const { mean, variance } = gpPredict(this.model, xStar);
+      const ei = expectedImprovement(mean, variance, fBest, xi);
+      if (ei > bestEI) { bestEI = ei; bestX = new Float64Array(xStar); }
+    }
+
+    if (!bestX) return this._mutateBestPreset(0.3);
+
+    // Convert from PCA/raw space to full normalized
+    if (usePCA) {
+      console.log(`BO: Suggest — EI (bestEI=${bestEI.toFixed(4)})`);
+      return fromPCA(this.pca, bestX);
+    } else {
+      return bestX;
+    }
+  }
+
+  _getBestNormalized() {
+    let bestScore = -Infinity;
+    let bestParams = null;
+    for (const r of this.ratings) {
+      const score = ((r.motionScore ?? 3) + (r.colorScore ?? 3)) / 2;
+      if (score > bestScore) { bestScore = score; bestParams = r.params; }
+    }
+    if (bestParams) return stateToNormalized(bestParams);
+    if (this.examples.length > 0) return stateToNormalized(this.examples[0].params);
+    return randomNormalized();
+  }
+
   getBestParams() {
-    const fullX = randomNormalized();
+    if (!this.model) return this._getBestNormalized();
 
-    if (this.motionModel) {
-      const best = this._bestMeanPartial(this.motionModel, MOTION_INDICES, D_MOTION);
-      for (let j = 0; j < D_MOTION; j++) fullX[MOTION_INDICES[j]] = best[j];
+    const usePCA = this.model._usePCA;
+    const gD = usePCA ? this.pca.nK : D;
+    const candidates = latinHypercube(2000, gD);
+    let bestMean = -Infinity;
+    let bestX = null;
+    const xStar = new Float64Array(gD);
+
+    for (let i = 0; i < 2000; i++) {
+      for (let j = 0; j < gD; j++) xStar[j] = candidates[i * gD + j];
+      const { mean } = gpPredict(this.model, xStar);
+      if (mean > bestMean) { bestMean = mean; bestX = new Float64Array(xStar); }
     }
 
-    if (this.colorModel) {
-      const best = this._bestMeanPartial(this.colorModel, COLOR_INDICES, D_COLOR);
-      for (let j = 0; j < D_COLOR; j++) fullX[COLOR_INDICES[j]] = best[j];
-    }
-
-    return fullX;
+    if (!bestX) return this._getBestNormalized();
+    return usePCA ? fromPCA(this.pca, bestX) : bestX;
   }
 
-  // ─── Dual Rating ──────────────────────────────────────────────────────
+  // ─── Rating ────────────────────────────────────────────────────────────
 
   /**
-   * Rate the movement of the current config.
-   * @param {number} rating - 1 (good) or -1 (bad)
-   * @param {object} state - fluid sim state
-   * @param {function} syncAllUI - UI sync callback
+   * Rate motion of current config. Score: 1-5.
    */
-  rateMovement(rating, state, syncAllUI) {
-    if (this._pendingMovement !== null) return; // already rated
-    this._pendingMovement = rating;
+  rateMovement(score, state, syncAllUI) {
+    if (this._pendingMovement !== null) return;
+    score = Math.max(1, Math.min(5, Math.round(score)));
+    this._pendingMovement = score;
     this._state = state;
     this._syncAllUI = syncAllUI;
-    this.flashMovement(rating);
-    console.log(`BO: Movement rated ${rating === 1 ? '↑' : '↓'}`);
+    this.flashMovement(score);
+    console.log(`BO: Motion rated ${score}/5`);
     this.updateOverlay();
     this._tryCommit();
   }
 
   /**
-   * Rate the color of the current config.
-   * @param {number} rating - 1 (good) or -1 (bad)
-   * @param {object} state - fluid sim state
-   * @param {function} syncAllUI - UI sync callback
+   * Rate color of current config. Score: 1-5.
    */
-  rateColor(rating, state, syncAllUI) {
-    if (this._pendingColor !== null) return; // already rated
-    this._pendingColor = rating;
+  rateColor(score, state, syncAllUI) {
+    if (this._pendingColor !== null) return;
+    score = Math.max(1, Math.min(5, Math.round(score)));
+    this._pendingColor = score;
     this._state = state;
     this._syncAllUI = syncAllUI;
-    this.flashColor(rating);
-    console.log(`BO: Color rated ${rating === 1 ? '→' : '←'}`);
+    this.flashColor(score);
+    console.log(`BO: Color rated ${score}/5`);
     this.updateOverlay();
     this._tryCommit();
   }
 
-  /** If both ratings are in, commit and advance. */
   _tryCommit() {
     if (this._pendingMovement === null || this._pendingColor === null) return;
 
@@ -818,36 +810,30 @@ export class BOController {
       const state = this._state;
       const syncAllUI = this._syncAllUI;
 
-      // Snapshot current params
       const params = {};
       for (const key of SLIDER_KEYS) params[key] = getStateVal(state, key);
       canonicalizeNoiseFields(params);
 
-      // Store with dual ratings
       this.ratings.push({
         params,
-        movementRating: this._pendingMovement,
-        colorRating: this._pendingColor,
+        motionScore: this._pendingMovement,
+        colorScore: this._pendingColor,
         timestamp: Date.now(),
       });
 
-      const mStr = this._pendingMovement === 1 ? '↑' : '↓';
-      const cStr = this._pendingColor === 1 ? '→' : '←';
-      console.log(`BO: Rating committed ${mStr}${cStr} (${this.ratings.length} total)`);
-      saveRatings(this.ratings);
+      console.log(`BO: Committed motion=${this._pendingMovement} color=${this._pendingColor} (${this.ratings.length} total)`);
+      saveRatingsLocal(this.ratings);
+      saveRatingsServer(this.ratings);
       this.maybeRetrain();
 
-      // Reset pending
       this._pendingMovement = null;
       this._pendingColor = null;
 
-      // Get next suggestion
       let nextX;
-      try {
-        nextX = this.getNextParams();
-      } catch (e) {
-        console.warn('BO: getNextParams failed, using random:', e);
-        nextX = randomNormalized();
+      try { nextX = this.getNextParams(); }
+      catch (e) {
+        console.warn('BO: getNextParams failed:', e);
+        nextX = this._mutateBestPreset(0.3);
       }
 
       normalizedToState(nextX, state, this.lockedKeys);
@@ -855,7 +841,6 @@ export class BOController {
       if (syncAllUI) syncAllUI();
       this.updateOverlay();
 
-      // Reset flash indicators after brief delay so user sees their ratings
       setTimeout(() => this._resetFlash(), 600);
     } catch (e) {
       console.error('BO: commit crashed:', e);
@@ -867,111 +852,43 @@ export class BOController {
     }
   }
 
-  /**
-   * Get morph target for BO-guided auto-morph.
-   * 70% exploit (noisy best), 30% explore (EI).
-   */
   getMorphTarget() {
-    if (!this.motionModel && !this.colorModel) return randomNormalized();
+    if (!this.model) return this._mutateBestPreset(0.2);
 
-    let x;
     if (Math.random() < 0.7) {
-      x = this.getBestParams();
-      for (let i = 0; i < D; i++) {
-        x[i] += (Math.random() - 0.5) * 0.1;
-        if (x[i] < 0) x[i] = 0;
-        if (x[i] > 1) x[i] = 1;
-      }
+      return this._mutateBestRated(0.1);
     } else {
-      const xi = 0.01;
-      const fullX = randomNormalized();
-      if (this.motionModel) {
-        const mx = this._argmaxEIPartial(this.motionModel, MOTION_INDICES, D_MOTION, 1000, xi, 'movementRating');
-        for (let j = 0; j < D_MOTION; j++) fullX[MOTION_INDICES[j]] = mx[j];
-      }
-      if (this.colorModel) {
-        const cx = this._argmaxEIPartial(this.colorModel, COLOR_INDICES, D_COLOR, 1000, xi, 'colorRating');
-        for (let j = 0; j < D_COLOR; j++) fullX[COLOR_INDICES[j]] = cx[j];
-      }
-      x = fullX;
+      return this._eiSuggestion();
     }
-    return x;
-  }
-
-  /** EI optimization over a subset of parameters. Returns partial normalized vector. */
-  _argmaxEIPartial(model, indices, dims, nCandidates, xi, ratingKey) {
-    // Find best observed value for this rating dimension
-    let fBest = -Infinity;
-    for (const r of this.ratings) {
-      if (r[ratingKey] > fBest) fBest = r[ratingKey];
-    }
-
-    const candidates = latinHypercube(nCandidates, dims);
-    let bestEI = -Infinity;
-    let bestX = null;
-    const xStar = new Float64Array(dims);
-
-    for (let i = 0; i < nCandidates; i++) {
-      for (let j = 0; j < dims; j++) xStar[j] = candidates[i * dims + j];
-      const { mean, variance } = gpPredict(model, xStar);
-      const ei = expectedImprovement(mean, variance, fBest, xi);
-      if (ei > bestEI) {
-        bestEI = ei;
-        bestX = new Float64Array(xStar);
-      }
-    }
-
-    return bestX || (() => { const x = new Float64Array(dims); for (let i = 0; i < dims; i++) x[i] = Math.random(); return x; })();
-  }
-
-  /** Argmax posterior mean over a subset of parameters. */
-  _bestMeanPartial(model, indices, dims) {
-    const candidates = latinHypercube(2000, dims);
-    let bestMean = -Infinity;
-    let bestX = null;
-    const xStar = new Float64Array(dims);
-
-    for (let i = 0; i < 2000; i++) {
-      for (let j = 0; j < dims; j++) xStar[j] = candidates[i * dims + j];
-      const { mean } = gpPredict(model, xStar);
-      if (mean > bestMean) {
-        bestMean = mean;
-        bestX = new Float64Array(xStar);
-      }
-    }
-    return bestX || (() => { const x = new Float64Array(dims); for (let i = 0; i < dims; i++) x[i] = Math.random(); return x; })();
   }
 
   // ─── UI ──────────────────────────────────────────────────────────────
 
-  /** Flash the movement rating indicator. */
-  flashMovement(rating) {
+  flashMovement(score) {
     const el = document.getElementById('boFlashMovement');
     if (!el) return;
-    el.textContent = rating === 1 ? '\u2191' : '\u2193';
-    el.style.color = rating === 1 ? '#4f4' : '#f44';
+    el.textContent = '★'.repeat(score) + '☆'.repeat(5 - score);
+    el.style.color = score >= 4 ? '#4f4' : score >= 3 ? '#ff4' : '#f44';
     el.style.opacity = '1';
   }
 
-  /** Flash the color rating indicator. */
-  flashColor(rating) {
+  flashColor(score) {
     const el = document.getElementById('boFlashColor');
     if (!el) return;
-    el.textContent = rating === 1 ? '\u2192' : '\u2190';
-    el.style.color = rating === 1 ? '#4af' : '#fa4';
+    el.textContent = '★'.repeat(score) + '☆'.repeat(5 - score);
+    el.style.color = score >= 4 ? '#4af' : score >= 3 ? '#ff4' : '#fa4';
     el.style.opacity = '1';
   }
 
-  /** Reset flash indicators for new generation. */
   _resetFlash() {
     const m = document.getElementById('boFlashMovement');
     const c = document.getElementById('boFlashColor');
-    if (m) { m.textContent = '?'; m.style.color = '#555'; m.style.opacity = '0.3'; }
-    if (c) { c.textContent = '?'; c.style.color = '#555'; c.style.opacity = '0.3'; }
+    if (m) { m.textContent = '☆☆☆☆☆'; m.style.color = '#555'; m.style.opacity = '0.3'; }
+    if (c) { c.textContent = '☆☆☆☆☆'; c.style.color = '#555'; c.style.opacity = '0.3'; }
   }
 
-  /** Toggle locking color params (all 21 color channels). */
   toggleLockColors() {
+    const COLOR_PATTERN = /Color_|Accent_|Tip_|sheen.*_/i;
     const colorSliderKeys = SLIDER_KEYS.filter(k => COLOR_PATTERN.test(k));
     const allLocked = colorSliderKeys.every(k => this.lockedKeys.has(k));
     if (allLocked) {
@@ -985,7 +902,6 @@ export class BOController {
     return !allLocked;
   }
 
-  /** Toggle locking motion/dynamics params. */
   toggleLockMotion() {
     const motionKeys = SLIDER_KEYS.filter(k =>
       ['simSpeed', 'burstBehavior', 'burstCount', 'burstForce', 'burstForceRandomness', 'burstDyeIntensity', 'burstSpeed', 'burstTravelSpeed', 'burstDuration', 'burstWidth', 'burstRadialAngle',
@@ -1004,7 +920,6 @@ export class BOController {
     return !allLocked;
   }
 
-  /** Update the overlay count and phase text. */
   updateOverlay() {
     const N = this.ratings.length;
     const countEl = document.getElementById('boCount');
@@ -1012,76 +927,129 @@ export class BOController {
     if (countEl) countEl.textContent = `Ratings: ${N}`;
     if (phaseEl) {
       const pending = [];
-      if (this._pendingMovement === null) pending.push('↑↓ movement');
-      if (this._pendingColor === null) pending.push('←→ color');
-      let phase = N < 10 ? 'exploring' : N < 60 ? 'EI active' : 'ARD active';
-      phase += ` | Motion GP (D=${D_MOTION}) | Color GP (D=${D_COLOR})`;
+      if (this._pendingMovement === null) pending.push('motion');
+      if (this._pendingColor === null) pending.push('color');
+      let phase = N < 5 ? 'exploring' : 'GP active';
+      phase += this.pca ? ` | PCA ${this.pca.nK}D` : ` | raw ${D}D`;
       if (pending.length > 0 && this.rateMode) {
         phase += ' | rate: ' + pending.join(', ');
       }
       phaseEl.textContent = phase;
     }
+
+    // Update touch rating button highlights
+    this._updateTouchRatingUI();
   }
 
-  /** Clear all ratings and models. */
+  _updateTouchRatingUI() {
+    const motionBtns = document.querySelectorAll('.bo-motion-btn');
+    const colorBtns = document.querySelectorAll('.bo-color-btn');
+    motionBtns.forEach(btn => {
+      btn.classList.toggle('rated', this._pendingMovement !== null);
+      btn.classList.toggle('selected', parseInt(btn.dataset.score) === this._pendingMovement);
+    });
+    colorBtns.forEach(btn => {
+      btn.classList.toggle('rated', this._pendingColor !== null);
+      btn.classList.toggle('selected', parseInt(btn.dataset.score) === this._pendingColor);
+    });
+  }
+
   clearData() {
     this.ratings = [];
-    this.motionModel = null;
-    this.colorModel = null;
+    this.model = null;
     this._retrainCounter = 0;
     this._pendingMovement = null;
     this._pendingColor = null;
+    localStorage.removeItem(RATINGS_KEY);
     fetch('/api/ratings', { method: 'DELETE' }).catch(() => {});
     this.updateOverlay();
     this._resetFlash();
+    console.log('BO: All rating data cleared');
   }
 
   // ─── Run Management ─────────────────────────────────────────────────
 
   async saveRun(name) {
-    const res = await fetch('/api/runs/save', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
-    return res.ok;
+    // Save to localStorage
+    const runs = JSON.parse(localStorage.getItem('dataorb-runs') || '{}');
+    runs[name] = this.ratings;
+    localStorage.setItem('dataorb-runs', JSON.stringify(runs));
+    // Try server too
+    try {
+      const res = await fetch('/api/runs/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      return res.ok;
+    } catch { return true; } // localStorage save succeeded
   }
 
   async loadRun(name) {
-    const res = await fetch('/api/runs/load', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
-    if (!res.ok) return false;
-    const raw = await res.json();
-    this.ratings = purgeStaleRatings(raw);
-    this.motionModel = null;
-    this.colorModel = null;
-    this._retrainCounter = 0;
-    this._pendingMovement = null;
-    this._pendingColor = null;
-    if (this.ratings.length >= 10) {
-      try { this.retrain(); } catch (e) { console.warn('BO: retrain after load failed:', e); }
+    // Try localStorage first
+    const runs = JSON.parse(localStorage.getItem('dataorb-runs') || '{}');
+    if (runs[name]) {
+      this.ratings = runs[name];
+      this.model = null;
+      this._retrainCounter = 0;
+      this._pendingMovement = null;
+      this._pendingColor = null;
+      if (this.ratings.length >= 5) this.retrain();
+      this.updateOverlay();
+      this._resetFlash();
+      return true;
     }
-    this.updateOverlay();
-    this._resetFlash();
-    return true;
+    // Try server
+    try {
+      const res = await fetch('/api/runs/load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) return false;
+      this.ratings = await res.json();
+      this.model = null;
+      this._retrainCounter = 0;
+      if (this.ratings.length >= 5) this.retrain();
+      this.updateOverlay();
+      this._resetFlash();
+      return true;
+    } catch { return false; }
   }
 
   async listRuns() {
+    const localRuns = Object.keys(JSON.parse(localStorage.getItem('dataorb-runs') || '{}'));
     try {
       const res = await fetch('/api/runs');
-      return res.ok ? await res.json() : [];
-    } catch { return []; }
+      const serverRuns = res.ok ? await res.json() : [];
+      return [...new Set([...localRuns, ...serverRuns])];
+    } catch { return localRuns; }
   }
 
   async deleteRun(name) {
-    const res = await fetch('/api/runs/delete', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name }),
-    });
-    return res.ok;
+    const runs = JSON.parse(localStorage.getItem('dataorb-runs') || '{}');
+    delete runs[name];
+    localStorage.setItem('dataorb-runs', JSON.stringify(runs));
+    try {
+      await fetch('/api/runs/delete', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+    } catch {}
+    return true;
   }
+}
+
+// ─── Utility ─────────────────────────────────────────────────────────────────
+
+/** Box-Muller transform for Gaussian random numbers. */
+function gaussianRandom() {
+  let u, v, s;
+  do {
+    u = Math.random() * 2 - 1;
+    v = Math.random() * 2 - 1;
+    s = u * u + v * v;
+  } while (s >= 1 || s === 0);
+  return u * Math.sqrt(-2 * Math.log(s) / s);
 }

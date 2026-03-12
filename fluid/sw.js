@@ -1,4 +1,4 @@
-const CACHE = 'dataorb-v1';
+const CACHE = 'dataorb-v2';
 const SHELL = ['/', '/index.html', '/main.js', '/bo.js', '/gp.js', '/face-tracker-worker.js'];
 
 self.addEventListener('install', e => {

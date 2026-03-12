@@ -401,6 +401,115 @@ export function optimizeHyperparams(X, y, N, D, useARD = false) {
   return { lengthScales, sigmaF, sigmaN, mu };
 }
 
+// ─── PCA (via kernel trick) ──────────────────────────────────────────────────
+
+/**
+ * Fit PCA on normalized data using the kernel trick (efficient when N < D).
+ * @param {Float64Array} data - flat N×D matrix (row-major, values in [0,1])
+ * @param {number} N - number of samples
+ * @param {number} D - number of dimensions
+ * @param {number} maxK - max components to keep
+ * @returns {{ mean, components (K×D flat), eigenvalues, nK, D }}
+ */
+export function fitPCA(data, N, D, maxK = 8) {
+  const nK = Math.min(maxK, N - 1, D);
+  if (nK < 1) return null;
+
+  // Mean
+  const mean = new Float64Array(D);
+  for (let i = 0; i < N; i++)
+    for (let j = 0; j < D; j++)
+      mean[j] += data[i * D + j];
+  for (let j = 0; j < D; j++) mean[j] /= N;
+
+  // Center
+  const C = new Float64Array(N * D);
+  for (let i = 0; i < N; i++)
+    for (let j = 0; j < D; j++)
+      C[i * D + j] = data[i * D + j] - mean[j];
+
+  // Gram matrix N×N
+  const G = new Float64Array(N * N);
+  for (let i = 0; i < N; i++) {
+    for (let j = i; j < N; j++) {
+      let dot = 0;
+      for (let k = 0; k < D; k++) dot += C[i * D + k] * C[j * D + k];
+      G[i * N + j] = dot;
+      G[j * N + i] = dot;
+    }
+  }
+
+  // Power iteration with deflation
+  const eigenvalues = [];
+  const eigenvecs = [];
+  const A = new Float64Array(G);
+
+  for (let c = 0; c < nK; c++) {
+    let v = new Float64Array(N);
+    for (let i = 0; i < N; i++) v[i] = Math.random() - 0.5;
+    let norm = Math.sqrt(v.reduce((s, x) => s + x * x, 0));
+    for (let i = 0; i < N; i++) v[i] /= norm;
+
+    let ev = 0;
+    for (let iter = 0; iter < 300; iter++) {
+      const Av = new Float64Array(N);
+      for (let i = 0; i < N; i++)
+        for (let j = 0; j < N; j++)
+          Av[i] += A[i * N + j] * v[j];
+      norm = Math.sqrt(Av.reduce((s, x) => s + x * x, 0));
+      if (norm < 1e-12) break;
+      ev = norm;
+      for (let i = 0; i < N; i++) v[i] = Av[i] / norm;
+    }
+    eigenvalues.push(ev);
+    eigenvecs.push(v);
+    // Deflate
+    for (let i = 0; i < N; i++)
+      for (let j = 0; j < N; j++)
+        A[i * N + j] -= ev * v[i] * v[j];
+  }
+
+  // Convert gram eigenvecs → data-space principal components
+  const components = new Float64Array(nK * D);
+  for (let c = 0; c < nK; c++) {
+    const u = eigenvecs[c];
+    const scale = Math.sqrt(eigenvalues[c]);
+    if (scale < 1e-10) continue;
+    for (let j = 0; j < D; j++) {
+      let val = 0;
+      for (let i = 0; i < N; i++) val += C[i * D + j] * u[i];
+      components[c * D + j] = val / scale;
+    }
+  }
+
+  const totalVar = eigenvalues.reduce((s, v) => s + v, 0);
+  console.log(`PCA: ${nK} components, explained variance: ${eigenvalues.map((v, i) => ((v / totalVar) * 100).toFixed(1) + '%').join(', ')}`);
+
+  return { mean, components, eigenvalues, nK, D };
+}
+
+/** Project full normalized vector → PCA space (Float64Array of length nK). */
+export function toPCA(pca, x) {
+  const z = new Float64Array(pca.nK);
+  for (let c = 0; c < pca.nK; c++)
+    for (let j = 0; j < pca.D; j++)
+      z[c] += (x[j] - pca.mean[j]) * pca.components[c * pca.D + j];
+  return z;
+}
+
+/** Reconstruct from PCA space → full normalized vector, clamped to [0,1]. */
+export function fromPCA(pca, z) {
+  const x = new Float64Array(pca.D);
+  for (let j = 0; j < pca.D; j++) {
+    x[j] = pca.mean[j];
+    for (let c = 0; c < pca.nK; c++)
+      x[j] += z[c] * pca.components[c * pca.D + j];
+    if (x[j] < 0) x[j] = 0;
+    if (x[j] > 1) x[j] = 1;
+  }
+  return x;
+}
+
 // ─── Sampling ────────────────────────────────────────────────────────────────
 
 /**
