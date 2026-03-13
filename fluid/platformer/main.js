@@ -25,18 +25,22 @@ import { initUI } from './ui.js';
 
 // --- Canvas Setup ---
 const canvas = document.getElementById('canvas');
+// --- Initialize Systems ---
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+setPlatforms(buildPlatforms(canvas.width, canvas.height));
+
+const fluid = initFluid(canvas);
+const game = initGame(canvas);
+initUI();
+
 function resizeCanvas() {
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight;
   setPlatforms(buildPlatforms(canvas.width, canvas.height));
+  fluid.resize(canvas.width, canvas.height);
 }
-resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
-
-// --- Initialize Systems ---
-const fluid = initFluid(canvas);
-const game = initGame(canvas);
-initUI();
 
 console.log('Fluid Platformer initialized');
 
@@ -74,15 +78,15 @@ function loop(time) {
   const simDt = dt * state.simSpeed;
 
   // Update game physics, get splats to apply
-  const splats = game.update(dt, canvas.width, canvas.height);
+  const { splats, repellerSplats } = game.update(dt, canvas.width, canvas.height);
 
-  // Apply splats to fluid
+  // Apply regular splats (shooting) before simulation
   for (const s of splats) {
     fluid.splat(s.x, s.y, s.dx, s.dy, s.color, s.radius);
   }
 
-  // Run fluid simulation step
-  fluid.step(simDt, getPlatforms());
+  // Run fluid simulation step — repeller splats applied after pressure projection
+  fluid.step(simDt, getPlatforms(), repellerSplats);
 
   // Render fluid to screen
   fluid.render(null);

@@ -124,18 +124,27 @@
         </div>
       </details>
 
-      <!-- Game Controls -->
+      <!-- Jet Controls -->
       <details class="section" open>
-        <summary>Game Controls</summary>
+        <summary>Jet Controls</summary>
         <div class="section-body">
-          <div class="sg"><label>Shoot Force <span class="val" id="shootForceVal">4.00</span></label><input type="range" id="shootForce" min="0.5" max="8" step="0.01" value="4"></div>
-          <div class="sg"><label>Shoot Radius <span class="val" id="shootRadiusVal">0.080</span></label><input type="range" id="shootRadius" min="0.01" max="0.2" step="0.001" value="0.08"></div>
-          <div class="sg"><label>Shoot Rate <span class="val" id="shootRateVal">60</span></label><input type="range" id="shootRate" min="1" max="120" step="1" value="60"></div>
-          <div class="sg"><label>Dye Amount <span class="val" id="dyeAmountVal">1.00</span></label><input type="range" id="dyeAmount" min="0" max="3" step="0.01" value="1"></div>
+          <div class="sg"><label>Jet Force <span class="val" id="jetForceVal">4.00</span></label><input type="range" id="jetForce" min="0.5" max="12" step="0.1" value="4"></div>
+          <div class="sg"><label>Jet Speed <span class="val" id="jetSpeedVal">0.80</span></label><input type="range" id="jetSpeed" min="0.1" max="3" step="0.05" value="0.8"></div>
+          <div class="sg"><label>Jet Duration <span class="val" id="jetDurationVal">0.50</span></label><input type="range" id="jetDuration" min="0.1" max="6" step="0.05" value="0.5"></div>
+          <div class="sg"><label>Jet Radius <span class="val" id="jetRadiusVal">0.10</span></label><input type="range" id="jetRadius" min="0.01" max="0.3" step="0.005" value="0.1"></div>
+          <div class="sg"><label>Jet Dye Intensity <span class="val" id="jetDyeIntensityVal">1.00</span></label><input type="range" id="jetDyeIntensity" min="0" max="3" step="0.05" value="1"></div>
+          <div class="sg"><label>Jet Drag <span class="val" id="jetDragVal">2.20</span></label><input type="range" id="jetDrag" min="0" max="8" step="0.1" value="2.2"></div>
+        </div>
+      </details>
+
+      <!-- Repeller & Movement -->
+      <details class="section" open>
+        <summary>Repeller & Movement</summary>
+        <div class="section-body">
           <div class="sg"><label>Effector Strength <span class="val" id="effectorStrengthVal">1.00</span></label><input type="range" id="effectorStrength" min="0" max="5" step="0.01" value="1"></div>
-          <div class="sg"><label>Repel Force <span class="val" id="repelForceVal">0.05</span></label><input type="range" id="repelForce" min="0" max="0.5" step="0.001" value="0.05"></div>
-          <div class="sg"><label>Repel Radius <span class="val" id="repelRadiusVal">0.060</span></label><input type="range" id="repelRadius" min="0.01" max="0.2" step="0.001" value="0.06"></div>
-          <div class="sg"><label>Fluid Gravity <span class="val" id="fluidGravityVal">0.05</span></label><input type="range" id="fluidGravity" min="0" max="0.5" step="0.001" value="0.05"></div>
+          <div class="sg"><label>Repel Force <span class="val" id="repelForceVal">0.50</span></label><input type="range" id="repelForce" min="0" max="2" step="0.01" value="0.5"></div>
+          <div class="sg"><label>Repel Radius <span class="val" id="repelRadiusVal">0.080</span></label><input type="range" id="repelRadius" min="0.01" max="0.3" step="0.001" value="0.08"></div>
+          <div class="sg"><label>Fluid Gravity <span class="val" id="fluidGravityVal">0.00</span></label><input type="range" id="fluidGravity" min="0" max="0.5" step="0.001" value="0"></div>
           <div class="sg"><div class="checkbox-row"><input type="checkbox" id="platformBoundaries" checked><label for="platformBoundaries" style="text-transform:none;color:#bbb;">Platform Boundaries</label></div></div>
         </div>
       </details>
@@ -150,7 +159,7 @@
           <div class="sg"><label>MacCormack <span class="val" id="maccormackVal">0.00</span></label><input type="range" id="maccormack" min="0" max="1" step="0.01" value="0"></div>
           <div class="sg"><label>Pressure Iters <span class="val" id="pressureItersVal">30</span></label><input type="range" id="pressureIters" min="10" max="60" step="1" value="30"></div>
           <div class="sg"><label>Pressure Decay <span class="val" id="pressureDecayVal">0.80</span></label><input type="range" id="pressureDecay" min="0" max="1" step="0.01" value="0.8"></div>
-          <div class="sg"><label>Curl Strength <span class="val" id="curlStrengthVal">15</span></label><input type="range" id="curlStrength" min="0" max="50" step="1" value="15"></div>
+          <div class="sg"><label>Curl Strength <span class="val" id="curlStrengthVal">5</span></label><input type="range" id="curlStrength" min="0" max="50" step="1" value="5"></div>
           <div class="sg"><label>Dye Ceiling <span class="val" id="dyeCeilingVal">1.20</span></label><input type="range" id="dyeCeiling" min="0.3" max="3" step="0.01" value="1.2"></div>
           <div class="sg">
             <label>Dye Soft Cap</label>
@@ -202,7 +211,7 @@
               <option value="4">Temperature</option><option value="5">Divergence</option>
             </select>
           </div>
-          <div class="sg"><label>Gain <span class="val" id="colorGainVal">0.50</span></label><input type="range" id="colorGain" min="0" max="1" step="0.01" value="0.5"></div>
+          <div class="sg"><label>Color Gain <span class="val" id="colorGainVal">0.50</span></label><input type="range" id="colorGain" min="0" max="1" step="0.01" value="0.5"></div>
         </div>
       </details>
 
@@ -247,15 +256,6 @@
           <div class="sg"><label>Edge Cooling <span class="val" id="tempEdgeCoolVal">0.00</span></label><input type="range" id="tempEdgeCool" min="0" max="3" step="0.01" value="0"></div>
           <div class="sg"><label>Radial Buoyancy <span class="val" id="tempRadialMixVal">0.00</span></label><input type="range" id="tempRadialMix" min="0" max="1" step="0.01" value="0"></div>
           <div class="sg"><label>Heat Color Shift <span class="val" id="tempColorShiftVal">0.00</span></label><input type="range" id="tempColorShift" min="0" max="3" step="0.01" value="0"></div>
-        </div>
-      </details>
-
-      <!-- Interaction -->
-      <details class="section">
-        <summary>Interaction</summary>
-        <div class="section-body">
-          <div class="sg"><label>Click Size <span class="val" id="clickSizeVal">0.50</span></label><input type="range" id="clickSize" min="0" max="1" step="0.01" value="0.5"></div>
-          <div class="sg"><label>Click Strength <span class="val" id="clickStrengthVal">0.50</span></label><input type="range" id="clickStrength" min="0" max="1" step="0.01" value="0.5"></div>
         </div>
       </details>
 

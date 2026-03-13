@@ -110,7 +110,7 @@ function applyNoiseProfile(typeIndex) {
 
 /* ── preset system ────────────────────────────────────────── */
 const PRESET_KEYS = [
-  'shootForce', 'shootRadius', 'shootRate', 'dyeAmount', 'effectorStrength', 'repelForce', 'repelRadius', 'fluidGravity', 'platformBoundaries',
+  'jetForce', 'jetSpeed', 'jetDuration', 'jetRadius', 'jetDyeIntensity', 'jetDrag', 'effectorStrength', 'repelForce', 'repelRadius', 'fluidGravity', 'platformBoundaries',
   'simSpeed', 'velDissipation', 'dyeDissipation', 'maccormack', 'pressureIters', 'pressureDecay',
   'curlStrength', 'dyeSoftCap', 'dyeCeiling',
   'baseColor', 'accentColor', 'glitterColor', 'glitterAccent', 'tipColor', 'glitterTip', 'sheenColor',
@@ -119,7 +119,6 @@ const PRESET_KEYS = [
   'noiseAmount', 'noiseType', 'noiseBehavior', 'noiseMapping', 'noiseFrequency', 'noiseSpeed',
   'noiseWarp', 'noiseSharpness', 'noiseAnisotropy', 'noiseBlend', 'noiseDyeIntensity', 'dyeNoiseAmount',
   'tempAmount', 'tempBuoyancy', 'tempDissipation', 'tempDyeHeat', 'tempEdgeCool', 'tempRadialMix', 'tempColorShift',
-  'clickSize', 'clickStrength',
   'bloomIntensity', 'bloomThreshold', 'bloomRadius',
 ];
 
@@ -131,6 +130,7 @@ function savePreset(name) {
   }
   presets[name] = data;
   localStorage.setItem('platformer-presets', JSON.stringify(presets));
+  localStorage.setItem('platformer-lastPreset', name);
   refreshPresetList();
 }
 
@@ -143,6 +143,7 @@ function loadPreset(name) {
       state[key] = Array.isArray(data[key]) ? [...data[key]] : data[key];
     }
   }
+  localStorage.setItem('platformer-lastPreset', name);
   syncAllUI();
 }
 
@@ -179,11 +180,15 @@ function initPanelToggle() {
 export function initUI() {
   initPanelToggle();
 
-  // Game Controls
-  wireSlider('shootForce', 'shootForce');
-  wireSlider('shootRadius', 'shootRadius');
-  wireSlider('shootRate', 'shootRate');
-  wireSlider('dyeAmount', 'dyeAmount');
+  // Jet Controls
+  wireSlider('jetForce', 'jetForce');
+  wireSlider('jetSpeed', 'jetSpeed');
+  wireSlider('jetDuration', 'jetDuration');
+  wireSlider('jetRadius', 'jetRadius');
+  wireSlider('jetDyeIntensity', 'jetDyeIntensity');
+  wireSlider('jetDrag', 'jetDrag');
+
+  // Repeller & Movement
   wireSlider('effectorStrength', 'effectorStrength');
   wireSlider('repelForce', 'repelForce');
   wireSlider('repelRadius', 'repelRadius');
@@ -254,10 +259,6 @@ export function initUI() {
   wireSlider('tempRadialMix', 'tempRadialMix');
   wireSlider('tempColorShift', 'tempColorShift');
 
-  // Interaction
-  wireSlider('clickSize', 'clickSize');
-  wireSlider('clickStrength', 'clickStrength');
-
   // Bloom
   wireSlider('bloomIntensity', 'bloomIntensity');
   wireSlider('bloomThreshold', 'bloomThreshold');
@@ -296,4 +297,8 @@ export function initUI() {
     const name = document.getElementById('presetList').value;
     if (name) loadPreset(name);
   });
+
+  // Auto-load last used preset on startup
+  const lastPreset = localStorage.getItem('platformer-lastPreset');
+  if (lastPreset) loadPreset(lastPreset);
 }

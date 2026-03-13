@@ -14,14 +14,17 @@ const player = {
   dodgeCooldown: 0,
   dodging: false,
   dodgeTimer: 0,
-  shootTimer: 0,
 };
 
 // ── Input State ───────────────────────────────────────────────────────────────
 
 const keys = {};
 const mouse = { x: 400, y: 300, down: false };
-let shooting = false;
+let shootPressed = false;
+
+// ── Jet Shots (travelling projectiles that splat along their path) ───────────
+
+const shots = [];
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -97,17 +100,14 @@ export function initGame(canvas) {
 
   document.addEventListener('keydown', (e) => {
     keys[e.code] = true;
-    if (e.code === 'Space') {
-      shooting = true;
+    if (e.code === 'Space' && !e.repeat) {
+      shootPressed = true;
       e.preventDefault();
     }
   });
 
   document.addEventListener('keyup', (e) => {
     keys[e.code] = false;
-    if (e.code === 'Space') {
-      shooting = false;
-    }
   });
 
   canvas.addEventListener('mousemove', (e) => {
@@ -146,6 +146,7 @@ export function initGame(canvas) {
 
 function update(dt, canvasW, canvasH) {
   const splats = [];
+  const repellerSplats = [];
 
   // ── Update facing based on mouse position ──
   const playerCX = player.x + player.w / 2;
@@ -242,86 +243,148 @@ function update(dt, canvasW, canvasH) {
   if (player.y < 0) { player.y = 0; player.vy = 0; }
   if (player.y + player.h > canvasH) { player.y = canvasH - player.h; player.vy = 0; player.grounded = true; }
 
-  // ── Shooting splats ──
-  player.shootTimer -= dt;
-
-  if (shooting && player.shootTimer <= 0) {
-    player.shootTimer = 1.0 / state.shootRate;
+  // ── Shooting — single press spawns a travelling jet projectile ──
+  if (shootPressed) {
+    shootPressed = false;
 
     const [aimX, aimY] = normalize(
       mouse.x - (player.x + player.w / 2),
       mouse.y - (player.y + player.h * 0.3),
     );
 
-    const dx = aimX * state.shootForce;
-    const dy = -aimY * state.shootForce; // flip Y for UV space
+    // Spawn position: gun tip in UV space
+    const tipX = player.x + player.w / 2 + aimX * 15;
+    const tipY = player.y + player.h * 0.3 + aimY * 15;
 
-    // Blend base and accent colors, scaled by dye amount
+    // Blend color
     const blend = state.colorBlend;
-    const da = state.dyeAmount;
-    const color = [
-      (state.baseColor[0] * (1 - blend) + state.accentColor[0] * blend) * da,
-      (state.baseColor[1] * (1 - blend) + state.accentColor[1] * blend) * da,
-      (state.baseColor[2] * (1 - blend) + state.accentColor[2] * blend) * da,
-    ];
+    const dyeI = state.jetDyeIntensity;
+    const travelSpeed = 0.35 + Math.max(0.25, state.jetSpeed) * 1.15;
+    const life = 0.07 + state.jetDuration * 0.16;
+    const forceScale = Math.max(0.15, 0.45 + state.jetForce * 1.5);
 
-    // Emit jet — multiple splats along aim direction from gun tip outward
-    const jetSteps = 4;
-    const startDist = 15;   // px from player center
-    const stepDist = 20;    // px between each splat
-    const baseRadius = state.shootRadius;
+    shots.push({
+      x: tipX / canvasW,
+      y: 1.0 - tipY / canvasH,
+      vx: aimX * travelSpeed,
+      vy: -aimY * travelSpeed,
+      life,
+      maxLife: life,
+      forceScale,
+      radius: state.jetRadius,
+      color: [
+        (state.baseColor[0] * (1 - blend) + state.accentColor[0] * blend) * dyeI,
+        (state.baseColor[1] * (1 - blend) + state.accentColor[1] * blend) * dyeI,
+        (state.baseColor[2] * (1 - blend) + state.accentColor[2] * blend) * dyeI,
+      ],
+    });
+  }
 
-    for (let i = 0; i < jetSteps; i++) {
-      const dist = startDist + i * stepDist;
-      const px = player.x + player.w / 2 + aimX * dist;
-      const py = player.y + player.h * 0.3 + aimY * dist;
+  // ── Update travelling jet shots — splat dye along their path each frame ──
+  for (let i = shots.length - 1; i >= 0; i--) {
+    const s = shots[i];
+    const prevX = s.x;
+    const prevY = s.y;
 
-      const su = px / canvasW;
-      const sv = 1.0 - py / canvasH;
+    s.x += s.vx * dt;
+    s.y += s.vy * dt;
+    s.life -= dt;
 
-      // Taper: radius shrinks, force stays strong along the jet
-      const t = i / (jetSteps - 1);
-      const r = baseRadius * (1.0 - t * 0.5); // taper to 50% at tip
+    // Remove dead or out-of-bounds shots
+    if (s.life <= 0 || s.x < -0.05 || s.x > 1.05 || s.y < -0.05 || s.y > 1.05) {
+      shots.splice(i, 1);
+      continue;
+    }
+
+    // Platform collision — convert UV to pixel, check AABB, kill on hit
+    const pixX = s.x * canvasW;
+    const pixY = (1.0 - s.y) * canvasH;
+    let hitPlatform = false;
+    for (const plat of getPlatforms()) {
+      if (pixX >= plat.x && pixX <= plat.x + plat.w &&
+          pixY >= plat.y && pixY <= plat.y + plat.h) {
+        hitPlatform = true;
+        break;
+      }
+    }
+    if (hitPlatform) {
+      // Splat a final burst on impact then remove
+      splats.push({
+        x: s.x, y: s.y,
+        dx: s.vx * s.forceScale * 30,
+        dy: s.vy * s.forceScale * 30,
+        color: s.color,
+        radius: s.radius * 1.5,
+        temp: state.tempAmount * 0.5,
+      });
+      shots.splice(i, 1);
+      continue;
+    }
+
+    // Splat along the path this frame (matches main app jet behavior)
+    const stepX = s.x - prevX;
+    const stepY = s.y - prevY;
+    if (Math.abs(stepX) + Math.abs(stepY) < 1e-6) continue;
+
+    const ageT = 1 - s.life / Math.max(1e-6, s.maxLife);
+    const fade = Math.max(0.25, 1 - ageT * 0.7);
+    const force = s.forceScale * fade;
+    const dyeScale = force * 2.0;  // dye stronger than force, like main app
+    const radius = s.radius * (1 - ageT * 0.22);
+
+    const FORCE_BASE = 6000;  // matches main app BURST_SPLAT_FORCE_BASE
+    const samples = 2;
+    for (let j = 1; j <= samples; j++) {
+      const t = j / samples;
+      const px = prevX + stepX * t;
+      const py = prevY + stepY * t;
 
       splats.push({
-        x: su, y: sv,
-        dx, dy,
-        color,
-        radius: r,
+        x: px, y: py,
+        dx: stepX * FORCE_BASE * force,
+        dy: stepY * FORCE_BASE * force,
+        color: [s.color[0] * dyeScale, s.color[1] * dyeScale, s.color[2] * dyeScale],
+        radius,
         temp: state.tempAmount * 0.5,
       });
     }
+
+    // Drag (configurable, main app default: 2.2)
+    const drag = Math.max(0, 1 - dt * state.jetDrag);
+    s.vx *= drag;
+    s.vy *= drag;
   }
 
-  // ── Movement effector — wake-style push ──
-  // Single splat in movement direction, only when moving.
-  // Pushes fluid ahead like a boat wake — no dye added.
+  // ── Player repeller — ring of offset splats pushing outward ──
+  // Applied AFTER pressure projection so they aren't canceled.
   {
-    const speed = Math.sqrt(player.vx * player.vx + player.vy * player.vy);
+    const cx = (player.x + player.w / 2) / canvasW;
+    const headTop = player.y - 12;
+    const bodyBottom = player.y + player.h;
+    const cy = 1.0 - ((headTop + bodyBottom) / 2) / canvasH;
 
-    if (speed > 20) {
-      const cu = (player.x + player.w / 2) / canvasW;
-      const cv = 1.0 - (player.y + player.h / 2) / canvasH;
+    const force = state.repelForce * state.effectorStrength;
+    const ringRadius = state.repelRadius * 0.5;
+    const splatRadius = state.repelRadius * 0.4;
+    const numSplats = 8;
 
-      let force = state.repelForce * state.effectorStrength;
-      if (!player.grounded) force *= 1.5;
-      if (player.dodging) force *= 3;
+    for (let i = 0; i < numSplats; i++) {
+      const angle = (i / numSplats) * Math.PI * 2;
+      const nx = Math.cos(angle);
+      const ny = Math.sin(angle);
 
-      // Normalize movement direction, push fluid that way
-      const dvx = (player.vx / speed) * force;
-      const dvy = -(player.vy / speed) * force;
-
-      splats.push({
-        x: cu, y: cv,
-        dx: dvx, dy: dvy,
+      repellerSplats.push({
+        x: cx + nx * ringRadius,
+        y: cy + ny * ringRadius,
+        dx: nx * force,
+        dy: ny * force,
         color: null,
-        radius: state.repelRadius,
-        temp: 0,
+        radius: splatRadius,
       });
     }
   }
 
-  return splats;
+  return { splats, repellerSplats };
 }
 
 // ── Exported: render ──────────────────────────────────────────────────────────

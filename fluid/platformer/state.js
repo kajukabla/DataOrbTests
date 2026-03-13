@@ -2,14 +2,17 @@
 
 export const state = {
   // Game-specific
-  shootForce: 4.0,
-  shootRadius: 0.08,
-  shootRate: 60,
-  dyeAmount: 1.0,
+  // Jet controls
+  jetForce: 4.0,
+  jetSpeed: 0.8,
+  jetDuration: 0.5,
+  jetRadius: 0.10,
+  jetDyeIntensity: 1.0,
+  jetDrag: 2.2,
   effectorStrength: 1.0,
-  repelRadius: 0.06,
-  repelForce: 0.05,
-  fluidGravity: 0.05,
+  repelRadius: 0.08,
+  repelForce: 0.5,
+  fluidGravity: 0,
   platformBoundaries: true,
 
   // Simulation
@@ -19,7 +22,7 @@ export const state = {
   maccormack: 0,
   pressureIters: 30,
   pressureDecay: 0.8,
-  curlStrength: 15,
+  curlStrength: 5,
   dyeSoftCap: 1,
   dyeCeiling: 1.2,
 
@@ -37,7 +40,7 @@ export const state = {
   // Colormap
   colormapMode: 2,
   colorSource: 0,
-  colorGain: 0.75,
+  colorGain: 0.5,
 
   // Noise Field
   noiseAmount: 0.0,
@@ -61,10 +64,6 @@ export const state = {
   tempEdgeCool: 0,
   tempRadialMix: 0,
   tempColorShift: 0,
-
-  // Interaction
-  clickSize: 0.5,
-  clickStrength: 0.5,
 
   // Bloom
   bloomIntensity: 0,

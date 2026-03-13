@@ -135,10 +135,12 @@ export function initFluid(canvas) {
   const curl        = createFBO(gl, SIM_RES, SIM_RES, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.NEAREST);
   const boundary    = createFBO(gl, SIM_RES, SIM_RES, gl.R8, gl.RED, gl.UNSIGNED_BYTE, gl.NEAREST);
 
+  // Full-resolution scene FBO for bloom composite
+  let sceneFBO = createFBO(gl, canvas.width, canvas.height, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
+
   // Bloom FBOs at quarter canvas resolution
   let bloomW = Math.floor(canvas.width / 4) || 1;
   let bloomH = Math.floor(canvas.height / 4) || 1;
-  let bloomFBO     = createFBO(gl, bloomW, bloomH, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
   let bloomPing    = createFBO(gl, bloomW, bloomH, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
   let bloomPong    = createFBO(gl, bloomW, bloomH, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
 
@@ -223,7 +225,7 @@ export function initFluid(canvas) {
 
   let noiseTime = 0;
 
-  function step(dt, platforms) {
+  function step(dt, platforms, postProjectionSplats) {
     const scaledDt = dt * state.simSpeed;
     noiseTime += scaledDt;
     let u;
@@ -327,6 +329,14 @@ export function initFluid(canvas) {
     gl.uniform1i(u.uBoundary, 2);
     blit(velocity.write);
     velocity.swap();
+
+    // 8b. Apply post-projection velocity splats (repeller)
+    // These are injected AFTER pressure projection so they survive intact.
+    if (postProjectionSplats) {
+      for (const s of postProjectionSplats) {
+        splat(s.x, s.y, s.dx, s.dy, s.color, s.radius);
+      }
+    }
 
     // 9. Advect velocity
     u = use(programs.advect);
@@ -439,13 +449,13 @@ export function initFluid(canvas) {
       return;
     }
 
-    // Bloom enabled — render scene to bloomFBO first, then extract/blur/composite
-    blit(bloomFBO);
+    // Bloom enabled — render scene to full-res sceneFBO, then extract/blur/composite
+    blit(sceneFBO);
 
-    // Extract bright pixels
+    // Extract bright pixels from full-res scene into quarter-res bloom
     u = use(programs.bloomExtract);
     gl.uniform1f(u.uThreshold, state.bloomThreshold);
-    bindTex(0, bloomFBO.texture);
+    bindTex(0, sceneFBO.texture);
     gl.uniform1i(u.uSource, 0);
     blit(bloomPing);
 
@@ -469,11 +479,11 @@ export function initFluid(canvas) {
       blit(bloomPing);
     }
 
-    // Composite bloom onto scene
+    // Composite bloom onto scene (full-res scene + quarter-res bloom)
     u = use(programs.bloomComposite);
     gl.uniform1f(u.uIntensity, state.bloomIntensity);
     gl.uniform2f(u.uScreenSize, gl.canvas.width, gl.canvas.height);
-    bindTex(0, bloomFBO.texture);
+    bindTex(0, sceneFBO.texture);
     gl.uniform1i(u.uScene, 0);
     bindTex(1, bloomPing.texture);
     gl.uniform1i(u.uBloom, 1);
@@ -486,10 +496,12 @@ export function initFluid(canvas) {
     canvasW = w;
     canvasH = h;
 
+    // Rebuild scene FBO at full resolution
+    sceneFBO = createFBO(gl, w, h, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
+
     // Rebuild bloom FBOs at new quarter resolution
     bloomW = Math.max(1, Math.floor(w / 4));
     bloomH = Math.max(1, Math.floor(h / 4));
-    bloomFBO  = createFBO(gl, bloomW, bloomH, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
     bloomPing = createFBO(gl, bloomW, bloomH, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
     bloomPong = createFBO(gl, bloomW, bloomH, gl.RGBA16F, gl.RGBA, gl.HALF_FLOAT, gl.LINEAR);
   }
