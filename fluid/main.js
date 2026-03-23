@@ -133,6 +133,21 @@ const state = {
   faceMeshNoiseDir: 0.0,
   faceMouthSimBoost: 0.3,
   faceDyeNoise: 1, // 0=constant white (stable), 1=noise-modulated colors (default, can oscillate)
+  // Debug toggle flags (all true = normal operation, uncheck to bypass)
+  dbg_dyeNoise: true,
+  dbg_convergenceInject: true,
+  dbg_curlDyeInject: true,
+  dbg_curlNoise: true,
+  dbg_freezeNoise: false,
+  dbg_buoyancy: true,
+  dbg_cleanup: true,
+  dbg_cleanupDye: true,
+  dbg_dissipation: true,
+  dbg_dyeSoftCeil: true,
+  dbg_dyeHardClamp: true,
+  dbg_dyeMinCSub: true,
+  dbg_dyeClampFade: true,
+  dbg_dyeHeadroom: true,
 };
 
 const FACE_TRACKER_BUNDLE_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
@@ -1038,6 +1053,7 @@ ${commonHeader}
 struct TempParams {
   dt: f32, dx: f32, simRes: f32, dissipation: f32,
   dyeHeat: f32, edgeCool: f32, tempActive: f32, dyeCeiling: f32,
+  dbgFlags: u32, pad1: f32, pad2: f32, pad3: f32,
 };
 
 @group(0) @binding(1) var velTex: texture_2d<f32>;
@@ -1109,11 +1125,15 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let ovY = max(-backUV.y, max(backUV.y - 1.0, 0.0));
     backtraceOvershoot = max(ovX, ovY);
   }
-  let clampFade = 1.0 / (1.0 + backtraceOvershoot * 30.0);
-  var dye = advectedDye * p.dyeDissipation * edgeFade * clampFade;
+  var clampFade = 1.0;
+  if ((tp.dbgFlags & 8u) != 0u) {
+    clampFade = 1.0 / (1.0 + backtraceOvershoot * 30.0);
+  }
+  let effDissipation = select(1.0, p.dyeDissipation, (tp.dbgFlags & 16u) != 0u);
+  var dye = advectedDye * effDissipation * edgeFade * clampFade;
   let maxC = max(dye.r, max(dye.g, dye.b));
   let ceiling = tp.dyeCeiling;
-  if (ceiling > 0.01) {
+  if (ceiling > 0.01 && (tp.dbgFlags & 1u) != 0u) {
     // Soft saturation: smoothly compress approaching ceiling
     let knee = ceiling * 0.667;
     if (maxC > knee) {
@@ -1121,12 +1141,14 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
       let compressed = knee + (ceiling - knee) * (excess / (1.0 + excess));
       dye *= compressed / maxC;
     }
-  } else {
+  } else if (ceiling <= 0.01 && (tp.dbgFlags & 2u) != 0u) {
     // Hard clamp (legacy behavior)
     if (maxC > 1.2) { dye *= 1.2 / maxC; }
   }
-  let minC = min(dye.r, min(dye.g, dye.b));
-  dye -= vec3f(minC * 0.02);
+  if ((tp.dbgFlags & 4u) != 0u) {
+    let minC = min(dye.r, min(dye.g, dye.b));
+    dye -= vec3f(minC * 0.02);
+  }
   textureStore(dst, id.xy, vec4f(max(dye, vec3f(0.0)), 1.0));
 
   // ── Temperature advection (fused, conditional) ──
@@ -1631,7 +1653,7 @@ struct DyeNoiseParams {
   curlDyeAmount: f32,
   color: vec4f, // rgb=tint, a=noise symmetry behavior (0=none, 1=mirror, 2+=n-fold)
   boundaryMode: f32,
-  _pad1: f32, _pad2: f32, _pad3: f32,
+  headroomEnabled: f32, convergenceEnabled: f32, curlDyeEnabled: f32,
 };
 
 @group(0) @binding(0) var<uniform> dp: DyeNoiseParams;
@@ -1725,9 +1747,12 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let vD = sampleSymVel(uvD, idD, behavior, dp.simRes);
   let div = (vR.x - vL.x + vU.y - vD.y) * 0.5;
 
-  // Smooth headroom gate — taper injection as dye gets bright
+  // Linear headroom gate — taper injection as dye gets bright.
   let existingBrightness = max(dye.r, max(dye.g, dye.b));
-  let headroom = smoothstep(0.0, 0.4, max(1.0 - existingBrightness, 0.0));
+  var headroom = 1.0;
+  if (dp.headroomEnabled > 0.5) {
+    headroom = max(1.0 - existingBrightness, 0.0);
+  }
   if (headroom < 0.001) {
     textureStore(dyeDst, id.xy, dye);
     return;
@@ -1736,22 +1761,30 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   // Symmetry-safe color phase: canonical position + speed only (no signed angle terms).
   let symP = (symUV - SPHERE_CENTER) / max(SPHERE_RADIUS, 1e-5);
   let colorPhase = dp.time * 0.05 + dot(symP, vec2f(6.0, 3.2)) + length(vC) * 1.15;
-  // Cycle through R, G, B emphasis zones for real hue variety
   let cR = 0.3 + 0.7 * max(sin(colorPhase), 0.0);
   let cG = 0.3 + 0.7 * max(sin(colorPhase + 2.094), 0.0);
   let cB = 0.3 + 0.7 * max(sin(colorPhase + 4.189), 0.0);
-  let spatialColor = vec3f(cR, cG, cB) * dp.color.rgb;
+  // Combine shader-side color cycling with CPU-side palette color,
+  // then normalize the PRODUCT to constant luminance (weights: 0.3R + 0.6G + 0.1B).
+  // Without this, the color cycling creates a periodic density oscillation.
+  let rawColor = vec3f(cR, cG, cB) * dp.color.rgb;
+  let rawLum = rawColor.r * 0.3 + rawColor.g * 0.6 + rawColor.b * 0.1;
+  let spatialColor = rawColor * (0.5 / max(rawLum, 0.001));
 
   // Inject dye where flow converges (negative divergence) — dyeNoiseAmount
-  let amt = dp.amount * dp.amount;
-  let convergence = max(-div, 0.0);
-  let inject = convergence * amt * 0.5 * edgeFade * headroom;
-  dye += vec4f(spatialColor * inject, 0.0);
+  if (dp.convergenceEnabled > 0.5) {
+    let amt = dp.amount * dp.amount;
+    let convergence = max(-div, 0.0);
+    let inject = convergence * amt * 0.15 * edgeFade * headroom;
+    dye += vec4f(spatialColor * inject, 0.0);
+  }
 
   // Inject dye from curl noise velocity — proportional to local speed
-  let velMag = length(vC);
-  let curlDye = velMag * dp.curlDyeAmount * 0.003 * edgeFade * headroom;
-  dye += vec4f(spatialColor * curlDye, 0.0);
+  if (dp.curlDyeEnabled > 0.5) {
+    let velMag = length(vC);
+    let curlDye = velMag * dp.curlDyeAmount * 0.001 * edgeFade * headroom;
+    dye += vec4f(spatialColor * curlDye, 0.0);
+  }
 
   textureStore(dyeDst, id.xy, dye);
 }
@@ -1763,7 +1796,7 @@ const SPHERE_CENTER = vec2f(0.5, 0.5);
 const SPHERE_RADIUS = ${SIM_SPHERE_RADIUS};
 const VISIBLE_RADIUS = ${VISIBLE_SPHERE_RADIUS};
 
-struct CleanupParams { simRes: f32, boundaryMode: f32, pad2: f32, pad3: f32, };
+struct CleanupParams { simRes: f32, boundaryMode: f32, cleanupDye: f32, pad3: f32, };
 @group(0) @binding(0) var<uniform> cp: CleanupParams;
 @group(0) @binding(1) var velSrc: texture_2d<f32>;
 @group(0) @binding(2) var dyeSrc: texture_2d<f32>;
@@ -1781,7 +1814,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   if (cp.boundaryMode > 0.5) {
     // Rectangular mode: reflect velocity at edges, clear dye at very edge
     let margin = 0.006;
-    if (uv.x < margin || uv.x > 1.0 - margin || uv.y < margin || uv.y > 1.0 - margin) {
+    if (cp.cleanupDye > 0.5 && (uv.x < margin || uv.x > 1.0 - margin || uv.y < margin || uv.y > 1.0 - margin)) {
       dye = vec3f(0.0);
     }
     let wallMargin = 0.02;
@@ -1795,7 +1828,11 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let dist = length(uv - SPHERE_CENTER);
     if (dist > VISIBLE_RADIUS || dist > SPHERE_RADIUS) {
       textureStore(velDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
-      textureStore(dyeDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+      if (cp.cleanupDye > 0.5) {
+        textureStore(dyeDst, id.xy, vec4f(0.0, 0.0, 0.0, 1.0));
+      } else {
+        textureStore(dyeDst, id.xy, vec4f(dye, 1.0));
+      }
     } else {
       if (dist > VISIBLE_RADIUS - 0.05) {
         let normal = (uv - SPHERE_CENTER) / max(dist, 1e-5);
@@ -1806,7 +1843,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
         let wallT = clamp((dist - (VISIBLE_RADIUS - 0.05)) / 0.05, 0.0, 1.0);
         vel *= mix(1.0, 0.7, wallT);
       }
-      if (dist > VISIBLE_RADIUS - 0.006) {
+      if (cp.cleanupDye > 0.5 && dist > VISIBLE_RADIUS - 0.006) {
         dye = vec3f(0.0, 0.0, 0.0);
       }
       textureStore(velDst, id.xy, vec4f(vel, 0.0, 1.0));
@@ -4392,10 +4429,11 @@ async function main() {
 
   // ─── Temperature/Buoyancy pipelines ─────────────────────────────────────
   // (tempAdvect pipeline removed — fused into advectDye)
-  const tempParamBuf = device.createBuffer({
-    size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  const tempParamBuf = device.createBuffer({ // expanded to 48 bytes for dbgFlags
+    size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
-  const tempParamData = new Float32Array(8); // [dt, dx, simRes, dissipation, dyeHeat, edgeCool, tempActive, pad]
+  const tempParamData = new Float32Array(12); // [dt, dx, simRes, dissipation, dyeHeat, edgeCool, tempActive, dyeCeiling, dbgFlags(u32), pad, pad, pad]
+  const tempParamU32 = new Uint32Array(tempParamData.buffer);
 
   // Buoyancy: custom BGL (uniform, texture(temp), texture(vel), storage(velDst))
   const buoyancyPipe = buildPipeline(buoyancyShader, 'buoyancy',
@@ -7767,13 +7805,13 @@ async function main() {
     // Continuous time scaling: render every frame, but advance simulation with smaller dt.
     // This avoids the frame-skipping look while still slowing all calculations.
     const masterSpeed = Math.max(0, Math.min(1, Number.isFinite(state.masterSpeed) ? state.masterSpeed : 1.0));
-    frameTimeScale = masterSpeed;
     // Mouth open → boost sim dynamics
     let mouthSimBoost = 0;
     if (faceTracking.face && Math.round(state.faceEffectorMode || 0) >= 2) {
       const jaw = faceTracking.blendshapeScores?.jawOpen ?? faceTracking.face.mouthOpen ?? 0;
       mouthSimBoost = jaw * Math.max(0, state.faceMouthSimBoost ?? 0.3);
     }
+    frameTimeScale = masterSpeed;
     const dt = 0.016 * (state.simSpeed + mouthSimBoost) * masterSpeed;
     const decayScale = masterSpeed;
     const effectivePressureDecay = Math.pow(state.pressureDecay, decayScale);
@@ -8037,6 +8075,12 @@ async function main() {
       tempParamData[5] = state.tempEdgeCool;
       tempParamData[6] = tempActive ? 1.0 : 0.0;
       tempParamData[7] = (state.dyeSoftCap > 0.5) ? Math.max(0.3, state.dyeCeiling) : 0.0;
+      // Pack debug flags as u32 into slot 8
+      tempParamU32[8] = (state.dbg_dyeSoftCeil ? 1 : 0)
+                      | (state.dbg_dyeHardClamp ? 2 : 0)
+                      | (state.dbg_dyeMinCSub ? 4 : 0)
+                      | (state.dbg_dyeClampFade ? 8 : 0)
+                      | (state.dbg_dissipation ? 16 : 0);
       device.queue.writeBuffer(tempParamBuf, 0, tempParamData);
       const p = enc.beginComputePass();
       p.setPipeline(advectDyePipe.pipeline);
@@ -8048,7 +8092,7 @@ async function main() {
     }
 
     // ── Buoyancy (reads temp[cur] + vel[cur], writes vel[1-cur]) ──
-    if (tempActive && state.tempBuoyancy > 0.01) {
+    if (state.dbg_buoyancy && tempActive && state.tempBuoyancy > 0.01) {
       buoyancyData[0] = SIM_RES;
       buoyancyData[1] = dt;
       buoyancyData[2] = state.tempBuoyancy * 500.0;
@@ -8066,8 +8110,8 @@ async function main() {
     }
 
     // ── Noise Field (type-selectable curl perturbation) ──
-    if (state.noiseAmount > 0.01) {
-      noiseData[0] = time;
+    if (state.dbg_curlNoise && state.noiseAmount > 0.01) {
+      noiseData[0] = state.dbg_freezeNoise ? 0.0 : time;
       // Keep low-end control but avoid over-damping the effect.
       const na = state.noiseAmount;
       noiseData[1] = na * na * frameTimeScale;
@@ -8095,7 +8139,7 @@ async function main() {
     const hasDyeNoise = state.dyeNoiseAmount > 0.001;
     const hasCurlDye = state.noiseDyeIntensity > 0.01 && state.noiseAmount > 0.01;
     const enforceNoiseSymmetry = state.noiseAmount > 0.01 && state.noiseBehavior > 0.5;
-    if (hasDyeNoise || hasCurlDye || enforceNoiseSymmetry) {
+    if (state.dbg_dyeNoise && (hasDyeNoise || hasCurlDye || enforceNoiseSymmetry)) {
       const col = palette(time * 0.05, 4);
       dyeNoiseData[0] = time;
       dyeNoiseData[1] = hasDyeNoise ? state.dyeNoiseAmount * frameTimeScale : 0;
@@ -8108,6 +8152,9 @@ async function main() {
       dyeNoiseData[6] = col[2];
       dyeNoiseData[7] = Math.round(state.noiseBehavior || 0);
       dyeNoiseData[8] = state.boundaryMode ?? 0;
+      dyeNoiseData[9] = state.dbg_dyeHeadroom ? 1.0 : 0.0;
+      dyeNoiseData[10] = state.dbg_convergenceInject ? 1.0 : 0.0;
+      dyeNoiseData[11] = state.dbg_curlDyeInject ? 1.0 : 0.0;
       device.queue.writeBuffer(dyeNoiseBuf, 0, dyeNoiseData);
       const p = enc.beginComputePass();
       p.setPipeline(dyeNoisePipe.pipeline);
@@ -8121,16 +8168,17 @@ async function main() {
 
     // ── Boundary Cleanup (hard-zero vel+dye outside boundary) ──
     cleanupData[1] = state.boundaryMode ?? 0;
+    cleanupData[2] = state.dbg_cleanupDye ? 1.0 : 0.0;
     device.queue.writeBuffer(cleanupBuf, 0, cleanupData);
-    {
+    if (state.dbg_cleanup) {
       const p = enc.beginComputePass();
       p.setPipeline(cleanupPipeline);
       p.setBindGroup(0, cleanupBGs[velFlip][dyeFlip]);
       p.dispatchWorkgroups(dispatch, dispatch);
       p.end();
-      velFlip ^= 1;
-      dyeFlip ^= 1;
     }
+    velFlip ^= 1;
+    dyeFlip ^= 1;
 
     // ── Pass 10: Particle Update (compute) ──
     {
@@ -9440,9 +9488,25 @@ async function main() {
   }
 
   // Keyboard handler
+  // ── Debug panel toggle and wiring ──
+  const debugPanel = document.getElementById('debugPanel');
+  const dbgKeys = ['dbg_dyeSoftCeil','dbg_dyeHardClamp','dbg_dyeMinCSub','dbg_dyeClampFade','dbg_dyeHeadroom','dbg_dyeNoise','dbg_convergenceInject','dbg_curlDyeInject','dbg_curlNoise','dbg_freezeNoise','dbg_buoyancy','dbg_cleanup','dbg_cleanupDye','dbg_dissipation'];
+  for (const key of dbgKeys) {
+    const el = document.getElementById(key);
+    if (el) {
+      el.checked = state[key];
+      el.addEventListener('change', () => { state[key] = el.checked; });
+    }
+  }
+
   document.addEventListener('keydown', (e) => {
     const tag = document.activeElement?.tagName;
     if (tag === 'INPUT' || tag === 'SELECT') return;
+
+    if (e.key === 'd' || e.key === 'D') {
+      if (debugPanel) debugPanel.style.display = debugPanel.style.display === 'none' ? 'block' : 'none';
+      return;
+    }
 
     if (e.key === 'r' || e.key === 'R') {
       toggleRateMode();
@@ -9507,7 +9571,7 @@ async function main() {
 
   // Load default preset on startup
   const mobilePresetName = 'MobileSlosher';
-  const desktopPresetName = 'FaceInferno4';
+  const desktopPresetName = 'DebugTest';
   const defaultPresetName = isMobile ? mobilePresetName : desktopPresetName;
   const defaultIdx = bo.examples.findIndex(e => e.name === defaultPresetName);
   if (defaultIdx >= 0) {

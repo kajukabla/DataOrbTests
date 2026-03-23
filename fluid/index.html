@@ -791,6 +791,25 @@
     <button id="presetNext">&#9654;</button>
   </div>
 
+  <!-- Debug Toggle Panel (backtick key to show/hide) -->
+  <div id="debugPanel" style="position:fixed;top:60px;left:12px;z-index:200;background:rgba(0,0,0,0.9);color:#0f0;font:11px monospace;padding:10px 14px;border:1px solid #444;border-radius:6px;display:none;line-height:1.8;">
+    <div style="margin-bottom:6px;color:#888;font-size:10px;text-transform:uppercase;letter-spacing:1px;">Debug Toggles (D to hide)</div>
+    <label><input type="checkbox" id="dbg_dyeSoftCeil" checked> Soft Ceiling</label><br>
+    <label><input type="checkbox" id="dbg_dyeHardClamp" checked> Hard Clamp 1.2</label><br>
+    <label><input type="checkbox" id="dbg_dyeMinCSub" checked> MinC Subtract</label><br>
+    <label><input type="checkbox" id="dbg_dyeClampFade" checked> Clamp Fade</label><br>
+    <label><input type="checkbox" id="dbg_dyeHeadroom" checked> Headroom Gate</label><br>
+    <label><input type="checkbox" id="dbg_dyeNoise" checked> Dye Noise Pass</label><br>
+    <label><input type="checkbox" id="dbg_convergenceInject" checked> &nbsp;↳ Convergence Inject</label><br>
+    <label><input type="checkbox" id="dbg_curlDyeInject" checked> &nbsp;↳ Curl Dye Inject</label><br>
+    <label><input type="checkbox" id="dbg_curlNoise" checked> Curl Noise</label><br>
+    <label><input type="checkbox" id="dbg_freezeNoise" unchecked> &nbsp;↳ Freeze Noise Time</label><br>
+    <label><input type="checkbox" id="dbg_buoyancy" checked> Buoyancy</label><br>
+    <label><input type="checkbox" id="dbg_cleanup" checked> Boundary Cleanup</label><br>
+    <label><input type="checkbox" id="dbg_cleanupDye" checked> &nbsp;↳ Cleanup Dye</label><br>
+    <label><input type="checkbox" id="dbg_dissipation" checked> Dye Dissipation</label>
+  </div>
+
   <script type="module" src="main.js"></script>
   <script>if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});</script>
 </body>
