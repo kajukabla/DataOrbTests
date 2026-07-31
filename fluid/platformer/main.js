@@ -50,6 +50,35 @@ let frameCount = 0;
 let fpsTime = 0;
 let fps = 0;
 
+// Dye intensity tracking for diagnostics
+let dyeIntensity = 0;
+let velMagnitude = 0;
+let diagSampleFrame = 0;
+
+function sampleTextures(gl) {
+  diagSampleFrame++;
+  if (diagSampleFrame % 10 !== 0) return; // every 10 frames
+  const textures = fluid.getTextures();
+  const pixel = new Float32Array(4);
+
+  // Sample dye at 9 grid points for a spatial average
+  const pts = [[128,128],[256,128],[384,128],[128,256],[256,256],[384,256],[128,384],[256,384],[384,384]];
+  let totalI = 0;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, textures.dye.read.fbo);
+  for (const [x,y] of pts) {
+    gl.readPixels(x, y, 1, 1, gl.RGBA, gl.FLOAT, pixel);
+    totalI += pixel[0] * 0.3 + pixel[1] * 0.6 + pixel[2] * 0.1;
+  }
+  dyeIntensity = totalI / pts.length;
+
+  // Sample velocity magnitude at center
+  gl.bindFramebuffer(gl.FRAMEBUFFER, textures.velocity.read.fbo);
+  gl.readPixels(256, 256, 1, 1, gl.RGBA, gl.FLOAT, pixel);
+  velMagnitude = Math.sqrt(pixel[0] * pixel[0] + pixel[1] * pixel[1]);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
 function updateHUD(dt) {
   frameCount++;
   fpsTime += dt;
@@ -58,7 +87,7 @@ function updateHUD(dt) {
     frameCount = 0;
     fpsTime = 0;
   }
-  hudEl.textContent = `FPS: ${fps}`;
+  hudEl.textContent = `FPS: ${fps}  DYE: ${dyeIntensity.toFixed(4)}  VEL: ${velMagnitude.toFixed(1)}`;
 }
 
 // --- Controls Hint Auto-fade ---
@@ -93,6 +122,9 @@ function loop(time) {
 
   // Render game objects on top
   game.render(fluid.gl, canvas.width, canvas.height);
+
+  // Sample textures for HUD diagnostics
+  sampleTextures(fluid.gl);
 
   // Update HUD
   updateHUD(dt);

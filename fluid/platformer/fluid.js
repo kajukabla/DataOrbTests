@@ -1,7 +1,7 @@
 // fluid.js — WebGL2 fluid simulation engine (ES module)
 
 import {
-  fullscreenVS, splatFS, curlFS, vorticityFS, divergenceFS, pressureFS,
+  fullscreenVS, splatFS, scaleFS, curlFS, vorticityFS, divergenceFS, pressureFS,
   gradSubFS, advectFS, buoyancyFS, curlNoiseFS, boundaryFS, displayFS,
   bloomExtractFS, bloomBlurFS, bloomCompositeFS
 } from './shaders.js';
@@ -110,6 +110,7 @@ export function initFluid(canvas) {
 
   const programs = {
     splat:          createProgram(gl, fullscreenVS, splatFS),
+    scale:          createProgram(gl, fullscreenVS, scaleFS),
     curl:           createProgram(gl, fullscreenVS, curlFS),
     vorticity:      createProgram(gl, fullscreenVS, vorticityFS),
     divergence:     createProgram(gl, fullscreenVS, divergenceFS),
@@ -301,9 +302,17 @@ export function initFluid(canvas) {
     gl.uniform1i(u.uBoundary, 1);
     blit(divergence);
 
-    // 6-7. Jacobi pressure solve
-    // Apply pressure decay before solving
-    // (handled implicitly — pressure decays through iterations)
+    // 6. Apply pressure decay before Jacobi solve
+    if (state.pressureDecay < 1.0) {
+      u = use(programs.scale);
+      gl.uniform1f(u.uScale, state.pressureDecay);
+      bindTex(0, pressure.read.texture);
+      gl.uniform1i(u.uTarget, 0);
+      blit(pressure.write);
+      pressure.swap();
+    }
+
+    // 7. Jacobi pressure solve
     u = use(programs.pressure);
     gl.uniform2f(u.uTexelSize, texelSize[0], texelSize[1]);
     for (let i = 0; i < state.pressureIters; i++) {

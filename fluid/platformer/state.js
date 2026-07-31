@@ -9,6 +9,8 @@ export const state = {
   jetRadius: 0.10,
   jetDyeIntensity: 1.0,
   jetDrag: 2.2,
+  jetKickback: 200,
+  jetSurfaceKickback: 3.0,
   effectorStrength: 1.0,
   repelRadius: 0.08,
   repelForce: 0.5,
@@ -179,23 +181,37 @@ export const NOISE_TYPE_DEFS = [
 
 // Build platforms dynamically based on screen size
 export function buildPlatforms(canvasW, canvasH) {
+  // Physics: jump height ≈ 90px, horizontal reach ≈ 214px
+  // Platforms spaced ≤ 75px vertically, ≤ 180px horizontally
   const groundY = canvasH - 60;
+  const step = 75;
+  const t1 = groundY - step;
+  const t2 = groundY - step * 2;
+  const t3 = groundY - step * 3;
+  const t4 = groundY - step * 4;
+  const pw = canvasW * 0.12;
+
   return [
-    // Ground — spans full width, thick enough to never leak
+    // Ground
     { x: 0, y: groundY, w: canvasW, h: 60 },
-    // Floating platforms — scaled proportionally
-    { x: canvasW * 0.10, y: canvasH * 0.60, w: canvasW * 0.14, h: 16 },
-    { x: canvasW * 0.36, y: canvasH * 0.50, w: canvasW * 0.16, h: 16 },
-    { x: canvasW * 0.62, y: canvasH * 0.60, w: canvasW * 0.14, h: 16 },
-    { x: canvasW * 0.22, y: canvasH * 0.38, w: canvasW * 0.12, h: 16 },
-    { x: canvasW * 0.52, y: canvasH * 0.40, w: canvasW * 0.15, h: 16 },
-    { x: canvasW * 0.04, y: canvasH * 0.27, w: canvasW * 0.12, h: 16 },
-    { x: canvasW * 0.76, y: canvasH * 0.29, w: canvasW * 0.12, h: 16 },
-    // Walls — full height
+    // Tier 1 — reachable from ground
+    { x: canvasW * 0.05,  y: t1, w: pw, h: 16 },
+    { x: canvasW * 0.38,  y: t1, w: pw, h: 16 },
+    { x: canvasW * 0.72,  y: t1, w: pw, h: 16 },
+    // Tier 2 — reachable from tier 1
+    { x: canvasW * 0.20,  y: t2, w: pw, h: 16 },
+    { x: canvasW * 0.55,  y: t2, w: pw, h: 16 },
+    { x: canvasW * 0.85,  y: t2, w: pw * 0.9, h: 16 },
+    // Tier 3 — reachable from tier 2
+    { x: canvasW * 0.08,  y: t3, w: pw, h: 16 },
+    { x: canvasW * 0.40,  y: t3, w: pw, h: 16 },
+    { x: canvasW * 0.70,  y: t3, w: pw, h: 16 },
+    // Tier 4 — top level
+    { x: canvasW * 0.25,  y: t4, w: pw, h: 16 },
+    { x: canvasW * 0.55,  y: t4, w: pw, h: 16 },
+    // Walls
     { x: 0, y: 0, w: 10, h: canvasH },
     { x: canvasW - 10, y: 0, w: 10, h: canvasH },
-    // Interior wall
-    { x: canvasW * 0.45, y: canvasH * 0.62, w: 12, h: canvasH * 0.16 },
   ];
 }
 

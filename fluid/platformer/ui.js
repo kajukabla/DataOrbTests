@@ -110,7 +110,7 @@ function applyNoiseProfile(typeIndex) {
 
 /* ── preset system ────────────────────────────────────────── */
 const PRESET_KEYS = [
-  'jetForce', 'jetSpeed', 'jetDuration', 'jetRadius', 'jetDyeIntensity', 'jetDrag', 'effectorStrength', 'repelForce', 'repelRadius', 'fluidGravity', 'platformBoundaries',
+  'jetForce', 'jetSpeed', 'jetDuration', 'jetRadius', 'jetDyeIntensity', 'jetDrag', 'jetKickback', 'jetSurfaceKickback', 'effectorStrength', 'repelForce', 'repelRadius', 'fluidGravity', 'platformBoundaries',
   'simSpeed', 'velDissipation', 'dyeDissipation', 'maccormack', 'pressureIters', 'pressureDecay',
   'curlStrength', 'dyeSoftCap', 'dyeCeiling',
   'baseColor', 'accentColor', 'glitterColor', 'glitterAccent', 'tipColor', 'glitterTip', 'sheenColor',
@@ -187,6 +187,8 @@ export function initUI() {
   wireSlider('jetRadius', 'jetRadius');
   wireSlider('jetDyeIntensity', 'jetDyeIntensity');
   wireSlider('jetDrag', 'jetDrag');
+  wireSlider('jetKickback', 'jetKickback');
+  wireSlider('jetSurfaceKickback', 'jetSurfaceKickback');
 
   // Repeller & Movement
   wireSlider('effectorStrength', 'effectorStrength');

@@ -32,6 +32,18 @@ void main() {
 }
 `;
 
+// ─── 1b. Scale (multiply texture by scalar) Fragment Shader ──────────────────
+export const scaleFS = `#version 300 es
+precision highp float;
+uniform sampler2D uTarget;
+uniform float uScale;
+out vec4 fragColor;
+void main() {
+  vec2 uv = gl_FragCoord.xy / vec2(textureSize(uTarget, 0));
+  fragColor = uScale * texture(uTarget, uv);
+}
+`;
+
 // ─── 2. Curl (Vorticity) Fragment Shader ─────────────────────────────────────
 export const curlFS = `#version 300 es
 precision highp float;

@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { exec } = require('node:child_process');
 
-const PORT = 8081;
+const PORT = process.env.FLUID_PORT ? parseInt(process.env.FLUID_PORT, 10) : 8081;
 const ROOT = __dirname;
 const DATA_DIR = path.join(__dirname, 'data');
 const AUTO_OPEN_BROWSER = process.env.FLUID_AUTO_OPEN_BROWSER === '1';

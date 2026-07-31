@@ -249,12 +249,12 @@ function update(dt, canvasW, canvasH) {
 
     const [aimX, aimY] = normalize(
       mouse.x - (player.x + player.w / 2),
-      mouse.y - (player.y + player.h * 0.3),
+      mouse.y - (player.y + 4),
     );
 
-    // Spawn position: gun tip in UV space
-    const tipX = player.x + player.w / 2 + aimX * 15;
-    const tipY = player.y + player.h * 0.3 + aimY * 15;
+    // Spawn position: upper body
+    const tipX = player.x + player.w / 2;
+    const tipY = player.y + 4;
 
     // Blend color
     const blend = state.colorBlend;
@@ -278,6 +278,13 @@ function update(dt, canvasW, canvasH) {
         (state.baseColor[2] * (1 - blend) + state.accentColor[2] * blend) * dyeI,
       ],
     });
+
+    // Kickback — push player opposite to aim direction
+    if (state.jetKickback > 0) {
+      player.vx -= aimX * state.jetKickback;
+      player.vy -= aimY * state.jetKickback;
+      player.grounded = false;
+    }
   }
 
   // ── Update travelling jet shots — splat dye along their path each frame ──
@@ -308,15 +315,59 @@ function update(dt, canvasW, canvasH) {
       }
     }
     if (hitPlatform) {
-      // Splat a final burst on impact then remove
-      splats.push({
-        x: s.x, y: s.y,
-        dx: s.vx * s.forceScale * 30,
-        dy: s.vy * s.forceScale * 30,
-        color: s.color,
-        radius: s.radius * 1.5,
-        temp: state.tempAmount * 0.5,
-      });
+      // Place burst splat well back from the platform surface so dye
+      // lands in open fluid space (not inside the boundary mask)
+      const shotSpeed = Math.sqrt(s.vx * s.vx + s.vy * s.vy) || 1;
+      const nxUV = s.vx / shotSpeed;
+      const nyUV = s.vy / shotSpeed;
+      // Pull back ~3% of UV space along shot direction from previous position
+      const pullback = 0.03;
+      const burstX = prevX - nxUV * pullback;
+      const burstY = prevY - nyUV * pullback;
+
+      // Splash: spray multiple splats outward from impact point
+      // More splats for early hits (shot didn't get to emit along its path)
+      const lifeLeft = s.life / Math.max(1e-6, s.maxLife);
+      const splashCount = Math.max(3, Math.round(4 + lifeLeft * 8));
+      const burstDyeScale = s.forceScale * 2.0;
+      const burstForce = s.forceScale * 20;
+
+      // Perpendicular to shot direction for lateral spread
+      const perpX = -nyUV;
+      const perpY = nxUV;
+
+      for (let si = 0; si < splashCount; si++) {
+        const angle = (si / splashCount) * Math.PI * 2;
+        const spreadX = Math.cos(angle);
+        const spreadY = Math.sin(angle);
+
+        splats.push({
+          x: burstX + spreadX * s.radius * 0.5,
+          y: burstY + spreadY * s.radius * 0.5,
+          dx: spreadX * burstForce,
+          dy: spreadY * burstForce,
+          color: [s.color[0] * burstDyeScale, s.color[1] * burstDyeScale, s.color[2] * burstDyeScale],
+          radius: s.radius * 1.2,
+          temp: state.tempAmount * 0.5,
+        });
+      }
+
+      // Surface kickback — closer impact = stronger push on player
+      if (state.jetSurfaceKickback > 0 && state.jetKickback > 0) {
+        const playerCX = player.x + player.w / 2;
+        const playerCY = player.y + player.h / 2;
+        const dist = Math.sqrt((pixX - playerCX) ** 2 + (pixY - playerCY) ** 2);
+        const maxDist = 300;
+        const proximity = Math.max(0, 1 - dist / maxDist);
+        if (proximity > 0) {
+          const speed = Math.sqrt(s.vx * s.vx + s.vy * s.vy) || 1;
+          const kickStr = proximity * state.jetSurfaceKickback * state.jetKickback;
+          player.vx -= (s.vx / speed) * kickStr;
+          player.vy += (s.vy / speed) * kickStr; // + because UV Y is flipped
+          player.grounded = false;
+        }
+      }
+
       shots.splice(i, 1);
       continue;
     }
@@ -411,46 +462,83 @@ function render(glCtx, canvasW, canvasH) {
     g.drawArrays(g.TRIANGLES, 0, 6);
   }
 
-  // ── Draw player body ──
+  // ── Draw player ──
   const alpha = player.dodging ? 0.4 : 0.9;
-
-  g.useProgram(gameProgram);
-  g.uniform2f(uniforms.game.uResolution, canvasW, canvasH);
-  g.uniform4f(uniforms.game.uRect, player.x, player.y, player.w, player.h);
-  g.uniform4f(uniforms.game.uColor, 0.1, 0.1, 0.15, alpha);
-  g.drawArrays(g.TRIANGLES, 0, 6);
-
-  // ── Draw player head (circle) — offset in facing direction ──
-  const headCX = player.x + player.w / 2 + player.facing * 2;
-  const headCY = player.y - 4;
-  const headR = 8;
+  const cx = player.x + player.w / 2;
 
   g.useProgram(circleProgram);
   g.uniform2f(uniforms.circle.uResolution, canvasW, canvasH);
+
+  // Head (big round white head)
+  const headCX = cx + player.facing * 2;
+  const headCY = player.y - 2;
+  const headR = 11;
   g.uniform2f(uniforms.circle.uCenter, headCX, headCY);
   g.uniform1f(uniforms.circle.uRadius, headR);
-  g.uniform4f(uniforms.circle.uColor, 0.15, 0.15, 0.22, alpha);
+  g.uniform4f(uniforms.circle.uColor, 0.92, 0.92, 0.96, alpha);
   g.uniform1f(uniforms.circle.uHollow, 0.0);
   g.drawArrays(g.TRIANGLES, 0, 6);
 
-  // ── Draw gun arm ──
-  const shoulderX = player.x + player.w / 2 + player.facing * 5;
-  const shoulderY = player.y + player.h * 0.3 - 4;
+  // Eyes
+  const eyeOffX = player.facing * 3;
+  const eyeY = headCY - 1;
+  // Left eye
+  g.uniform2f(uniforms.circle.uCenter, headCX + eyeOffX - 2.5, eyeY);
+  g.uniform1f(uniforms.circle.uRadius, 2.0);
+  g.uniform4f(uniforms.circle.uColor, 0.15, 0.15, 0.2, alpha);
+  g.uniform1f(uniforms.circle.uHollow, 0.0);
+  g.drawArrays(g.TRIANGLES, 0, 6);
+  // Right eye
+  g.uniform2f(uniforms.circle.uCenter, headCX + eyeOffX + 2.5, eyeY);
+  g.drawArrays(g.TRIANGLES, 0, 6);
 
+  // Blush cheeks (subtle pink)
+  g.uniform2f(uniforms.circle.uCenter, headCX + player.facing * 1 - 4, headCY + 2);
+  g.uniform1f(uniforms.circle.uRadius, 2.5);
+  g.uniform4f(uniforms.circle.uColor, 1.0, 0.55, 0.55, alpha * 0.35);
+  g.drawArrays(g.TRIANGLES, 0, 6);
+  g.uniform2f(uniforms.circle.uCenter, headCX + player.facing * 1 + 4, headCY + 2);
+  g.drawArrays(g.TRIANGLES, 0, 6);
+
+  // Body (small rounded white rectangle)
+  g.useProgram(gameProgram);
+  g.uniform2f(uniforms.game.uResolution, canvasW, canvasH);
+  g.uniform4f(uniforms.game.uRect, cx - 7, player.y + 8, 14, player.h - 8);
+  g.uniform4f(uniforms.game.uColor, 0.85, 0.85, 0.9, alpha);
+  g.drawArrays(g.TRIANGLES, 0, 6);
+
+  // Little feet
+  g.useProgram(circleProgram);
+  g.uniform2f(uniforms.circle.uResolution, canvasW, canvasH);
+  g.uniform1f(uniforms.circle.uHollow, 0.0);
+  // Left foot
+  g.uniform2f(uniforms.circle.uCenter, cx - 4, player.y + player.h);
+  g.uniform1f(uniforms.circle.uRadius, 3.5);
+  g.uniform4f(uniforms.circle.uColor, 0.8, 0.8, 0.85, alpha);
+  g.drawArrays(g.TRIANGLES, 0, 6);
+  // Right foot
+  g.uniform2f(uniforms.circle.uCenter, cx + 4, player.y + player.h);
+  g.drawArrays(g.TRIANGLES, 0, 6);
+
+  // ── Draw gun arm ──
+  const shoulderX = cx + player.facing * 5;
+  const shoulderY = player.y + 4;
+
+  const aimOriginY = player.y + 4;
   const [aimX, aimY] = normalize(
     mouse.x - (player.x + player.w / 2),
-    mouse.y - (player.y + player.h * 0.3),
+    mouse.y - aimOriginY,
   );
 
   const gunTipX = player.x + player.w / 2 + aimX * 15;
-  const gunTipY = player.y + player.h * 0.3 + aimY * 15;
+  const gunTipY = aimOriginY + aimY * 15;
 
   g.useProgram(lineProgram);
   g.uniform2f(uniforms.line.uResolution, canvasW, canvasH);
   g.uniform2f(uniforms.line.uStart, shoulderX, shoulderY);
   g.uniform2f(uniforms.line.uEnd, gunTipX, gunTipY);
-  g.uniform1f(uniforms.line.uWidth, 3.0);
-  g.uniform4f(uniforms.line.uColor, 0.2, 0.2, 0.3, alpha);
+  g.uniform1f(uniforms.line.uWidth, 2.5);
+  g.uniform4f(uniforms.line.uColor, 0.7, 0.7, 0.75, alpha);
   g.drawArrays(g.TRIANGLES, 0, 6);
 
   // ── Draw crosshair ──
